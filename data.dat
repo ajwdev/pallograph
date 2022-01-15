@@ -1,0 +1,46 @@
+start;
+
+insert Pods("default", "pod-a", "node-1"),
+insert Pods("default", "pod-b", "node-1"),
+insert Pods("default", "pod-c", "node-2"),
+insert Pods("default", "pod-d", "node-3"),
+insert Pods("default", "ingress-0", "node-1"),
+insert IngressController("default", "ingress-0"),
+
+insert ReplicaSets("default", "test"),
+
+insert Services("default", "ingress", LoadBalancer),
+insert Services("default", "svc-test", LoadBalancer),
+insert Services("default", "svc-test2", ClusterIP),
+
+insert Ingresses("default", "svc-test2", "ingress-0", "svc-test2"),
+
+insert Labels("app", "test", Pod, "default", "pod-a"),
+insert Labels("pod-template-hash", "558bd4d5db", Pod, "default", "pod-a"),
+
+insert Labels("app", "test", Pod, "default", "pod-c"),
+insert Labels("pod-template-hash", "558bd4d5db", Pod, "default", "pod-c"),
+
+insert Labels("app", "test2", Pod, "default", "pod-d"),
+
+insert Labels("app", "ingress", Pod, "default", "ingress-0"),
+
+insert Selectors("app", "test", ReplicaSet, "default", "test"),
+insert Selectors("pod-template-hash", "558bd4d5db", ReplicaSet, "default", "test"),
+
+insert Selectors("app", "test", Service, "default", "svc-test"),
+insert Selectors("app", "test2", Service, "default", "svc-test2"),
+insert Selectors("app", "ingress", Service, "default", "ingress"),
+
+commit;
+
+dump Nodes;
+dump PodsToReplicaSet;
+
+echo ToReplicaSet;
+query_index ToReplicaSet("default", "pod-a");
+
+echo ToNodes;
+query_index ToNodes("default", "test");
+
+dump IsPublic;

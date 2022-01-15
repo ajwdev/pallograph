@@ -1,0 +1,27 @@
+digraph {
+    0 [label=IngressController];
+    1 [label=Ingresses];
+    2 [label=IsPublic];
+    3 [label=Labels];
+    4 [label=Nodes];
+    5 [label=NodesToReplicaSet];
+    6 [label=Pods];
+    7 [label=PodsToReplicaSet];
+    8 [label=ReplicaSets];
+    9 [label=Selectors];
+    10 [label=Services];
+    11 [label="ddlog_std::Singleton"];
+    0 -> 2;
+    1 -> 2;
+    2 -> 2;
+    3 -> 2;
+    3 -> 2;
+    3 -> 7;
+    6 -> 4;
+    6 -> 5;
+    7 -> 5;
+    9 -> 2;
+    9 -> 2;
+    9 -> 7;
+    10 -> 2;
+}

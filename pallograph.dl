@@ -1,0 +1,46 @@
+typedef Object = Pod 
+               | ReplicaSet
+               | Node
+               | Service
+
+typedef ServiceType = ClusterIP 
+                    | NodePort
+                    | LoadBalancer
+                    | ExternalName
+
+input relation Labels(k: string, v: string, ty: Object, namespace: string, name: string)
+input relation Selectors(k: string, v: string, ty: Object, namespace: string, name: string)
+
+input relation Pods(namespace: string, name: string, node: string)
+input relation Services(namespace: string, name: string, ty: ServiceType)
+input relation Ingresses(namespace: string, name: string, controller: string, serviceName: string)
+input relation IngressController(namespace: string, name: string)
+input relation ReplicaSets(namespace: string, name: string)
+
+output relation Nodes(name: string)
+Nodes(n) :- Pods(_, _, n).
+
+output relation PodsToReplicaSet(namespace: string, rs: string, pod: string)
+index ToReplicaSet(namespace: string, pod: string) on PodsToReplicaSet(namespace, _, pod)
+PodsToReplicaSet(namespace, rs, pod) :- 
+  Selectors(key, val, ReplicaSet, namespace, rs), 
+  Labels(key, val, Pod, namespace, pod). 
+
+output relation NodesToReplicaSet(namespace: string, rs: string, node: string)
+index ToNodes(namespace: string, rs: string) on NodesToReplicaSet(namespace, rs, _)
+NodesToReplicaSet(namespace, rs, node) :- 
+  PodsToReplicaSet(namespace, rs, pod),
+  Pods(namespace, pod, node).
+
+output relation IsPublic(namespace: string, pod: string)
+IsPublic(namespace, pod) :- 
+  Services(namespace, serviceName, LoadBalancer),
+  Selectors(key, val, Service, namespace, serviceName), 
+  Labels(key, val, Pod, namespace, pod). 
+// Public via ingress
+IsPublic(namespace, pod) :- 
+  IsPublic(namespace, ingPod),
+  IngressController(namespace, ingPod),
+  Ingresses(namespace, _, ingPod, svc),
+  Selectors(key, val, Service, namespace, svc), 
+  Labels(key, val, Pod, namespace, pod). 
