@@ -67,19 +67,22 @@ pub type std_isize = i64;
 pub struct ObjectMeta {
     pub namespace: String,
     pub name: String,
-    pub labels: ddlog_std::Map<String, String>
+    pub labels: ddlog_std::Map<String, String>,
+    pub annotations: ddlog_std::Map<String, String>
 }
 impl abomonation::Abomonation for ObjectMeta{}
 impl ::std::fmt::Display for ObjectMeta {
     fn fmt(&self, __formatter: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
         match self {
-            ObjectMeta{namespace,name,labels} => {
+            ObjectMeta{namespace,name,labels,annotations} => {
                 __formatter.write_str("metav1::ObjectMeta{")?;
                 differential_datalog::record::format_ddlog_str(namespace, __formatter)?;
                 __formatter.write_str(",")?;
                 differential_datalog::record::format_ddlog_str(name, __formatter)?;
                 __formatter.write_str(",")?;
                 ::std::fmt::Debug::fmt(labels, __formatter)?;
+                __formatter.write_str(",")?;
+                ::std::fmt::Debug::fmt(annotations, __formatter)?;
                 __formatter.write_str("}")
             }
         }

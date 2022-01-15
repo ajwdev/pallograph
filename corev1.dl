@@ -19,7 +19,7 @@ input relation &Pods2(meta: ObjectMeta, spec: PodSpec, status: PodStatus)
 primary key (x) (x.meta.namespace, x.meta.name)
 
 Pods2[Pods2{
-  ObjectMeta{.namespace="test", .name="test", .labels=["foo" -> "bar", "app" -> "test"]},
+  ObjectMeta{.namespace="test", .name="test", .labels=["foo" -> "bar", "app" -> "test"], .annotations=map_empty()},
   PodSpec{.nodeName="test-1"},
   PodStatus{.phase=Running},
 }.ref_new()].

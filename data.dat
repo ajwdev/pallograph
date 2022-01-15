@@ -1,7 +1,7 @@
 start;
 
 insert_or_update corev1::Pods2[corev1::Pods2{
-  metav1::ObjectMeta{"test", "test2", [("app","test")]},
+  metav1::ObjectMeta{"test", "test2", [("app","test")], []},
   corev1::PodSpec{"test0"},
   corev1::PodStatus{corev1::Running}
 }];
