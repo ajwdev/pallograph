@@ -1,3 +1,7 @@
+import selectors
+import metav1
+import corev1
+
 typedef Object = Pod 
                | ReplicaSet
                | Node
@@ -8,10 +12,12 @@ typedef ServiceType = ClusterIP
                     | LoadBalancer
                     | ExternalName
 
+
 input relation Labels(k: string, v: string, ty: Object, namespace: string, name: string)
 input relation Selectors(k: string, v: string, ty: Object, namespace: string, name: string)
 
 input relation Pods(namespace: string, name: string, node: string)
+
 input relation Services(namespace: string, name: string, ty: ServiceType)
 input relation Ingresses(namespace: string, name: string, controller: string, serviceName: string)
 input relation IngressController(namespace: string, name: string)

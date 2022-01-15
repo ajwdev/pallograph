@@ -627,10 +627,10 @@ pub static __Arng_IsPublic_0 : ::once_cell::sync::Lazy<program::Arrangement> = :
 pub static __Rule_Nodes_0 : ::once_cell::sync::Lazy<program::Rule> = ::once_cell::sync::Lazy::new(|| {
     /* Nodes[(Nodes{.name=n}: Nodes)] :- Pods[(Pods{.namespace=(_: string), .name=(_: string), .node=(n: string)}: Pods)]. */
     ::differential_datalog::program::Rule::CollectionRule {
-        debug_info: ::ddlog_profiler::RuleDebugInfo::new(::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 21, 1, 23, 1)),
+        debug_info: ::ddlog_profiler::RuleDebugInfo::new(::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 27, 1, 29, 1)),
         rel: 6,
         xform: ::core::option::Option::Some(XFormCollection::FilterMap{
-                                                debug_info: ::ddlog_profiler::OperatorDebugInfo::head(::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 21, 1, 21, 10)),
+                                                debug_info: ::ddlog_profiler::OperatorDebugInfo::head(::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 27, 1, 27, 10)),
                                                 fmfun: {fn __f(__v: ::differential_datalog::ddval::DDValue) -> ::std::option::Option<::differential_datalog::ddval::DDValue>
                                                 {
                                                     let ref n = match *unsafe { <Pods>::from_ddvalue_ref_unchecked(&__v) } {
@@ -647,10 +647,10 @@ pub static __Rule_Nodes_0 : ::once_cell::sync::Lazy<program::Rule> = ::once_cell
 pub static __Rule_PodsToReplicaSet_0 : ::once_cell::sync::Lazy<program::Rule> = ::once_cell::sync::Lazy::new(|| {
     /* PodsToReplicaSet[(PodsToReplicaSet{.namespace=namespace, .rs=rs, .pod=pod}: PodsToReplicaSet)] :- Selectors[(Selectors{.k=(key: string), .v=(val: string), .ty=(ReplicaSet{}: Object), .namespace=(namespace: string), .name=(rs: string)}: Selectors)], Labels[(Labels{.k=(key: string), .v=(val: string), .ty=(Pod{}: Object), .namespace=(namespace: string), .name=(pod: string)}: Labels)]. */
     ::differential_datalog::program::Rule::ArrangementRule {
-        debug_info: ::ddlog_profiler::RuleDebugInfo::new(::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 25, 1, 29, 1)),
+        debug_info: ::ddlog_profiler::RuleDebugInfo::new(::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 31, 1, 35, 1)),
         arr: (9, 1),
         xform: XFormArrangement::Join {
-                   debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Labels"), ::std::borrow::Cow::Borrowed("(Labels{.k=(_0: string), .v=(_1: string), .ty=(Pod{}: Object), .namespace=(_2: string), .name=(_: string)}: Labels)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 27, 3, 27, 40)),
+                   debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Labels"), ::std::borrow::Cow::Borrowed("(Labels{.k=(_0: string), .v=(_1: string), .ty=(Pod{}: Object), .namespace=(_2: string), .name=(_: string)}: Labels)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 33, 3, 33, 40)),
                    ffun: None,
                    arrangement: (3,0),
                    jfun: {fn __f(_: &::differential_datalog::ddval::DDValue, __v1: &::differential_datalog::ddval::DDValue, __v2: &::differential_datalog::ddval::DDValue) -> ::std::option::Option<::differential_datalog::ddval::DDValue>
@@ -673,10 +673,10 @@ pub static __Rule_PodsToReplicaSet_0 : ::once_cell::sync::Lazy<program::Rule> = 
 pub static __Rule_NodesToReplicaSet_0 : ::once_cell::sync::Lazy<program::Rule> = ::once_cell::sync::Lazy::new(|| {
     /* NodesToReplicaSet[(NodesToReplicaSet{.namespace=namespace, .rs=rs, .node=node}: NodesToReplicaSet)] :- PodsToReplicaSet[(PodsToReplicaSet{.namespace=(namespace: string), .rs=(rs: string), .pod=(pod: string)}: PodsToReplicaSet)], Pods[(Pods{.namespace=(namespace: string), .name=(pod: string), .node=(node: string)}: Pods)]. */
     ::differential_datalog::program::Rule::ArrangementRule {
-        debug_info: ::ddlog_profiler::RuleDebugInfo::new(::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 31, 1, 35, 1)),
+        debug_info: ::ddlog_profiler::RuleDebugInfo::new(::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 37, 1, 41, 1)),
         arr: (7, 0),
         xform: XFormArrangement::Join {
-                   debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Pods"), ::std::borrow::Cow::Borrowed("(Pods{.namespace=(_0: string), .name=(_1: string), .node=(_: string)}: Pods)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 33, 3, 33, 29)),
+                   debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Pods"), ::std::borrow::Cow::Borrowed("(Pods{.namespace=(_0: string), .name=(_1: string), .node=(_: string)}: Pods)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 39, 3, 39, 29)),
                    ffun: None,
                    arrangement: (6,0),
                    jfun: {fn __f(_: &::differential_datalog::ddval::DDValue, __v1: &::differential_datalog::ddval::DDValue, __v2: &::differential_datalog::ddval::DDValue) -> ::std::option::Option<::differential_datalog::ddval::DDValue>
@@ -699,10 +699,10 @@ pub static __Rule_NodesToReplicaSet_0 : ::once_cell::sync::Lazy<program::Rule> =
 pub static __Rule_IsPublic_0 : ::once_cell::sync::Lazy<program::Rule> = ::once_cell::sync::Lazy::new(|| {
     /* IsPublic[(IsPublic{.namespace=namespace, .pod=pod}: IsPublic)] :- Services[(Services{.namespace=(namespace: string), .name=(serviceName: string), .ty=(LoadBalancer{}: ServiceType)}: Services)], Selectors[(Selectors{.k=(key: string), .v=(val: string), .ty=(Service{}: Object), .namespace=(namespace: string), .name=(serviceName: string)}: Selectors)], Labels[(Labels{.k=(key: string), .v=(val: string), .ty=(Pod{}: Object), .namespace=(namespace: string), .name=(pod: string)}: Labels)]. */
     ::differential_datalog::program::Rule::ArrangementRule {
-        debug_info: ::ddlog_profiler::RuleDebugInfo::new(::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 36, 1, 41, 1)),
+        debug_info: ::ddlog_profiler::RuleDebugInfo::new(::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 42, 1, 47, 1)),
         arr: (10, 0),
         xform: XFormArrangement::Join {
-                   debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Selectors"), ::std::borrow::Cow::Borrowed("(Selectors{.k=(_: string), .v=(_: string), .ty=(Service{}: Object), .namespace=(_0: string), .name=(_1: string)}: Selectors)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 38, 3, 38, 55)),
+                   debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Selectors"), ::std::borrow::Cow::Borrowed("(Selectors{.k=(_: string), .v=(_: string), .ty=(Service{}: Object), .namespace=(_0: string), .name=(_1: string)}: Selectors)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 44, 3, 44, 55)),
                    ffun: None,
                    arrangement: (9,0),
                    jfun: {fn __f(_: &::differential_datalog::ddval::DDValue, __v1: &::differential_datalog::ddval::DDValue, __v2: &::differential_datalog::ddval::DDValue) -> ::std::option::Option<::differential_datalog::ddval::DDValue>
@@ -719,7 +719,7 @@ pub static __Rule_IsPublic_0 : ::once_cell::sync::Lazy<program::Rule> = ::once_c
                    }
                    __f},
                    next: Box::new(::core::option::Option::Some(::differential_datalog::program::XFormCollection::Arrange {
-                                                                   debug_info: ::ddlog_profiler::OperatorDebugInfo::arrange(::std::borrow::Cow::Borrowed("(key, val, namespace)"),::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 37, 3, 38, 55)),
+                                                                   debug_info: ::ddlog_profiler::OperatorDebugInfo::arrange(::std::borrow::Cow::Borrowed("(key, val, namespace)"),::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 43, 3, 44, 55)),
                                                                    afun: {
                                                                        fn __ddlog_generated_arrangement_function(__v: ::differential_datalog::ddval::DDValue) ->
                                                                            ::core::option::Option<(::differential_datalog::ddval::DDValue, ::differential_datalog::ddval::DDValue)>
@@ -730,7 +730,7 @@ pub static __Rule_IsPublic_0 : ::once_cell::sync::Lazy<program::Rule> = ::once_c
                                                                        __ddlog_generated_arrangement_function
                                                                    },
                                                                    next: ::std::boxed::Box::new(XFormArrangement::Join {
-                                                                                                    debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Labels"), ::std::borrow::Cow::Borrowed("(Labels{.k=(_0: string), .v=(_1: string), .ty=(Pod{}: Object), .namespace=(_2: string), .name=(_: string)}: Labels)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 39, 3, 39, 40)),
+                                                                                                    debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Labels"), ::std::borrow::Cow::Borrowed("(Labels{.k=(_0: string), .v=(_1: string), .ty=(Pod{}: Object), .namespace=(_2: string), .name=(_: string)}: Labels)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 45, 3, 45, 40)),
                                                                                                     ffun: None,
                                                                                                     arrangement: (3,0),
                                                                                                     jfun: {fn __f(_: &::differential_datalog::ddval::DDValue, __v1: &::differential_datalog::ddval::DDValue, __v2: &::differential_datalog::ddval::DDValue) -> ::std::option::Option<::differential_datalog::ddval::DDValue>
@@ -752,10 +752,10 @@ pub static __Rule_IsPublic_0 : ::once_cell::sync::Lazy<program::Rule> = ::once_c
 pub static __Rule_IsPublic_1 : ::once_cell::sync::Lazy<program::Rule> = ::once_cell::sync::Lazy::new(|| {
     /* IsPublic[(IsPublic{.namespace=namespace, .pod=pod}: IsPublic)] :- IsPublic[(IsPublic{.namespace=(namespace: string), .pod=(ingPod: string)}: IsPublic)], IngressController[(IngressController{.namespace=(namespace: string), .name=(ingPod: string)}: IngressController)], Ingresses[(Ingresses{.namespace=(namespace: string), .name=(_: string), .controller=(ingPod: string), .serviceName=(svc: string)}: Ingresses)], Selectors[(Selectors{.k=(key: string), .v=(val: string), .ty=(Service{}: Object), .namespace=(namespace: string), .name=(svc: string)}: Selectors)], Labels[(Labels{.k=(key: string), .v=(val: string), .ty=(Pod{}: Object), .namespace=(namespace: string), .name=(pod: string)}: Labels)]. */
     ::differential_datalog::program::Rule::ArrangementRule {
-        debug_info: ::ddlog_profiler::RuleDebugInfo::new(::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 41, 1, 47, 1)),
+        debug_info: ::ddlog_profiler::RuleDebugInfo::new(::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 47, 1, 53, 1)),
         arr: (2, 0),
         xform: XFormArrangement::Semijoin {
-                   debug_info: ::ddlog_profiler::OperatorDebugInfo::semijoin(::std::borrow::Cow::Borrowed("IngressController"), ::std::borrow::Cow::Borrowed("(IngressController{.namespace=(_0: string), .name=(_1: string)}: IngressController)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 43, 3, 43, 39)),
+                   debug_info: ::ddlog_profiler::OperatorDebugInfo::semijoin(::std::borrow::Cow::Borrowed("IngressController"), ::std::borrow::Cow::Borrowed("(IngressController{.namespace=(_0: string), .name=(_1: string)}: IngressController)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 49, 3, 49, 39)),
                    ffun: None,
                    arrangement: (0,0),
                    jfun: {fn __f(_: &::differential_datalog::ddval::DDValue, __v1: &::differential_datalog::ddval::DDValue, ___v2: &()) -> ::std::option::Option<::differential_datalog::ddval::DDValue>
@@ -768,7 +768,7 @@ pub static __Rule_IsPublic_1 : ::once_cell::sync::Lazy<program::Rule> = ::once_c
                    }
                    __f},
                    next: Box::new(::core::option::Option::Some(::differential_datalog::program::XFormCollection::Arrange {
-                                                                   debug_info: ::ddlog_profiler::OperatorDebugInfo::arrange(::std::borrow::Cow::Borrowed("(namespace, ingPod)"),::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 42, 3, 43, 39)),
+                                                                   debug_info: ::ddlog_profiler::OperatorDebugInfo::arrange(::std::borrow::Cow::Borrowed("(namespace, ingPod)"),::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 48, 3, 49, 39)),
                                                                    afun: {
                                                                        fn __ddlog_generated_arrangement_function(__v: ::differential_datalog::ddval::DDValue) ->
                                                                            ::core::option::Option<(::differential_datalog::ddval::DDValue, ::differential_datalog::ddval::DDValue)>
@@ -779,7 +779,7 @@ pub static __Rule_IsPublic_1 : ::once_cell::sync::Lazy<program::Rule> = ::once_c
                                                                        __ddlog_generated_arrangement_function
                                                                    },
                                                                    next: ::std::boxed::Box::new(XFormArrangement::Join {
-                                                                                                    debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Ingresses"), ::std::borrow::Cow::Borrowed("(Ingresses{.namespace=(_0: string), .name=(_: string), .controller=(_1: string), .serviceName=(_: string)}: Ingresses)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 44, 3, 44, 39)),
+                                                                                                    debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Ingresses"), ::std::borrow::Cow::Borrowed("(Ingresses{.namespace=(_0: string), .name=(_: string), .controller=(_1: string), .serviceName=(_: string)}: Ingresses)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 50, 3, 50, 39)),
                                                                                                     ffun: None,
                                                                                                     arrangement: (1,0),
                                                                                                     jfun: {fn __f(_: &::differential_datalog::ddval::DDValue, __v1: &::differential_datalog::ddval::DDValue, __v2: &::differential_datalog::ddval::DDValue) -> ::std::option::Option<::differential_datalog::ddval::DDValue>
@@ -793,7 +793,7 @@ pub static __Rule_IsPublic_1 : ::once_cell::sync::Lazy<program::Rule> = ::once_c
                                                                                                     }
                                                                                                     __f},
                                                                                                     next: Box::new(::core::option::Option::Some(::differential_datalog::program::XFormCollection::Arrange {
-                                                                                                                                                    debug_info: ::ddlog_profiler::OperatorDebugInfo::arrange(::std::borrow::Cow::Borrowed("(namespace, svc)"),::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 42, 3, 44, 39)),
+                                                                                                                                                    debug_info: ::ddlog_profiler::OperatorDebugInfo::arrange(::std::borrow::Cow::Borrowed("(namespace, svc)"),::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 48, 3, 50, 39)),
                                                                                                                                                     afun: {
                                                                                                                                                         fn __ddlog_generated_arrangement_function(__v: ::differential_datalog::ddval::DDValue) ->
                                                                                                                                                             ::core::option::Option<(::differential_datalog::ddval::DDValue, ::differential_datalog::ddval::DDValue)>
@@ -804,7 +804,7 @@ pub static __Rule_IsPublic_1 : ::once_cell::sync::Lazy<program::Rule> = ::once_c
                                                                                                                                                         __ddlog_generated_arrangement_function
                                                                                                                                                     },
                                                                                                                                                     next: ::std::boxed::Box::new(XFormArrangement::Join {
-                                                                                                                                                                                     debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Selectors"), ::std::borrow::Cow::Borrowed("(Selectors{.k=(_: string), .v=(_: string), .ty=(Service{}: Object), .namespace=(_0: string), .name=(_1: string)}: Selectors)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 45, 3, 45, 47)),
+                                                                                                                                                                                     debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Selectors"), ::std::borrow::Cow::Borrowed("(Selectors{.k=(_: string), .v=(_: string), .ty=(Service{}: Object), .namespace=(_0: string), .name=(_1: string)}: Selectors)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 51, 3, 51, 47)),
                                                                                                                                                                                      ffun: None,
                                                                                                                                                                                      arrangement: (9,0),
                                                                                                                                                                                      jfun: {fn __f(_: &::differential_datalog::ddval::DDValue, __v1: &::differential_datalog::ddval::DDValue, __v2: &::differential_datalog::ddval::DDValue) -> ::std::option::Option<::differential_datalog::ddval::DDValue>
@@ -818,7 +818,7 @@ pub static __Rule_IsPublic_1 : ::once_cell::sync::Lazy<program::Rule> = ::once_c
                                                                                                                                                                                      }
                                                                                                                                                                                      __f},
                                                                                                                                                                                      next: Box::new(::core::option::Option::Some(::differential_datalog::program::XFormCollection::Arrange {
-                                                                                                                                                                                                                                     debug_info: ::ddlog_profiler::OperatorDebugInfo::arrange(::std::borrow::Cow::Borrowed("(key, val, namespace)"),::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 42, 3, 45, 47)),
+                                                                                                                                                                                                                                     debug_info: ::ddlog_profiler::OperatorDebugInfo::arrange(::std::borrow::Cow::Borrowed("(key, val, namespace)"),::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 48, 3, 51, 47)),
                                                                                                                                                                                                                                      afun: {
                                                                                                                                                                                                                                          fn __ddlog_generated_arrangement_function(__v: ::differential_datalog::ddval::DDValue) ->
                                                                                                                                                                                                                                              ::core::option::Option<(::differential_datalog::ddval::DDValue, ::differential_datalog::ddval::DDValue)>
@@ -829,7 +829,7 @@ pub static __Rule_IsPublic_1 : ::once_cell::sync::Lazy<program::Rule> = ::once_c
                                                                                                                                                                                                                                          __ddlog_generated_arrangement_function
                                                                                                                                                                                                                                      },
                                                                                                                                                                                                                                      next: ::std::boxed::Box::new(XFormArrangement::Join {
-                                                                                                                                                                                                                                                                      debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Labels"), ::std::borrow::Cow::Borrowed("(Labels{.k=(_0: string), .v=(_1: string), .ty=(Pod{}: Object), .namespace=(_2: string), .name=(_: string)}: Labels)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 46, 3, 46, 40)),
+                                                                                                                                                                                                                                                                      debug_info: ::ddlog_profiler::OperatorDebugInfo::join(::std::borrow::Cow::Borrowed("Labels"), ::std::borrow::Cow::Borrowed("(Labels{.k=(_0: string), .v=(_1: string), .ty=(Pod{}: Object), .namespace=(_2: string), .name=(_: string)}: Labels)"), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 52, 3, 52, 40)),
                                                                                                                                                                                                                                                                       ffun: None,
                                                                                                                                                                                                                                                                       arrangement: (3,0),
                                                                                                                                                                                                                                                                       jfun: {fn __f(_: &::differential_datalog::ddval::DDValue, __v1: &::differential_datalog::ddval::DDValue, __v2: &::differential_datalog::ddval::DDValue) -> ::std::option::Option<::differential_datalog::ddval::DDValue>

@@ -1,0 +1,99 @@
+// These type defs were pulled from the upstream ddlog repository
+// https://github.com/vmware/differential-datalog/blob/cd1164ee3aed56734a3dd114a71ce4902fd7e3ef/test/antrea/k8spolicy.dl#L72
+// Copyright (c) 2018 VMware, Inc.
+
+
+// A label selector is a label query over a set of resources. The result of matchLabels and
+// matchExpressions are ANDed. An empty label selector matches all objects. A null
+// label selector matches no objects.
+typedef LabelSelector = LabelSelector {
+    // matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+    // map is equivalent to an element of matchExpressions, whose key field is "key", the
+    // operator is "In", and the values array contains only "value". The requirements are ANDed.
+    // +optional
+    matchLabels: Map<string,string>,
+    // matchExpressions is a list of label selector requirements. The requirements are ANDed.
+    // +optional
+    matchExpressions: Vec<Ref<LabelSelectorRequirement>>
+}
+
+// Matches returns true if the Requirement matches the input Labels.
+// There is a match in the following cases:
+// (1) The operator is Exists and Labels has the Requirement's key.
+// (2) The operator is In, Labels has the Requirement's key and Labels'
+//     value for that key is in Requirement's value set.
+// (3) The operator is NotIn, Labels has the Requirement's key and
+//     Labels' value for that key is not in Requirement's value set.
+// (4) The operator is DoesNotExist or NotIn and Labels does not have the
+//     Requirement's key.
+function labelSelectorMatches(selector: Option<Ref<LabelSelector>>, labels: Map<string, string>): bool =
+{
+    match (selector) {
+        None -> false,
+        Some{sel} -> {
+            if (map_is_empty(sel.matchLabels) and vec_is_empty(sel.matchExpressions)) {
+                true
+            } else {
+                for (lab in sel.matchLabels) {
+                    if (map_get(labels, lab.0) != Some{lab.1}) { return false }
+                };
+                for (e in sel.matchExpressions) {
+                    var matches = match (e.operator) {
+                        LabelSelectorOpIn -> {
+                            match (map_get(labels, e.reqkey)) {
+                                None -> false,
+                                Some{val} -> vec_contains(e.values, val)
+                            }
+                        },
+                        LabelSelectorOpNotIn -> {
+                            match (map_get(labels, e.reqkey)) {
+                                None -> true,
+                                Some{val} -> not vec_contains(e.values, val)
+                            }
+                        },
+                        LabelSelectorOpExists -> map_contains_key(labels, e.reqkey),
+                        LabelSelectorOpDoesNotExist -> not map_contains_key(labels, e.reqkey)
+                    };
+                    if (not matches) { return false }
+                };
+                true
+            }
+        }
+    }
+}
+
+// A label selector operator is the set of operators that can be used in a selector requirement.
+typedef LabelSelectorOperator = LabelSelectorOpIn
+                              | LabelSelectorOpNotIn
+                              | LabelSelectorOpExists
+                              | LabelSelectorOpDoesNotExist
+
+// DDlog looks for a function with this name when converting
+// LabelSelectorOperator to string.
+function to_string(op: LabelSelectorOperator): string =
+{
+    match (op) {
+        LabelSelectorOpIn           -> "In",
+        LabelSelectorOpNotIn        -> "NotIn",
+        LabelSelectorOpExists       -> "Exists",
+        LabelSelectorOpDoesNotExist -> "DoesNotExist"
+    }
+}
+
+// A label selector requirement is a selector that contains values, a key, and an operator that
+// relates the key and values.
+typedef LabelSelectorRequirement = LabelSelectorRequirement {
+    // key is the label key that the selector applies to.
+    // +patchMergeKey=key
+    // +patchStrategy=merge
+    reqkey: string,
+    // operator represents a key's relationship to a set of values.
+    // Valid operators are In, NotIn, Exists and DoesNotExist.
+    operator: LabelSelectorOperator,
+    // values is an array of string values. If the operator is In or NotIn,
+    // the values array must be non-empty. If the operator is Exists or DoesNotExist,
+    // the values array must be empty. This array is replaced during a strategic
+    // merge patch.
+    // +optional
+    values: Vec<string>
+}

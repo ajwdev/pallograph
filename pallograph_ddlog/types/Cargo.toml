@@ -5,8 +5,8 @@ edition = "2018"
 
 [features]
 default = []
-flatbuf = ["differential_datalog/flatbuf","ddlog_rt/flatbuf", "ddlog_std/flatbuf", "ddlog_bigint/flatbuf", "ddlog_log/flatbuf", "debug/flatbuf", "internment/flatbuf"]
-c_api = ["differential_datalog/c_api","ddlog_rt/c_api", "ddlog_std/c_api", "ddlog_bigint/c_api", "ddlog_log/c_api", "debug/c_api", "internment/c_api"]
+flatbuf = ["differential_datalog/flatbuf","ddlog_rt/flatbuf", "ddlog_std/flatbuf", "ddlog_bigint/flatbuf", "ddlog_log/flatbuf", "debug/flatbuf", "internment/flatbuf", "types__selectors/flatbuf", "types__metav1/flatbuf", "types__corev1/flatbuf"]
+c_api = ["differential_datalog/c_api","ddlog_rt/c_api", "ddlog_std/c_api", "ddlog_bigint/c_api", "ddlog_log/c_api", "debug/c_api", "internment/c_api", "types__selectors/c_api", "types__metav1/c_api", "types__corev1/c_api"]
 
 [dependencies]
 differential_datalog = { path = "../differential_datalog" }
@@ -32,6 +32,9 @@ ddlog_bigint = { path = "ddlog_bigint" }
 ddlog_log = { path = "ddlog_log" }
 debug = { path = "debug" }
 internment = { path = "internment" }
+types__selectors = { path = "selectors" }
+types__metav1 = { path = "metav1" }
+types__corev1 = { path = "corev1" }
 
 [lib]
 name = "types"

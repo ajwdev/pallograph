@@ -1,0 +1,6 @@
+typedef ObjectMeta = ObjectMeta {
+  namespace: string,
+  name: string,
+  labels: Map<string, string>,
+  /* annotations: Map<string, string>, */
+}

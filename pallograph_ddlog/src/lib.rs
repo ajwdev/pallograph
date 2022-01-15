@@ -377,6 +377,16 @@ pub mod typedefs
     pub use ::types::IsPublic;
     pub use ::types::Ingresses;
     pub use ::types::IngressController;
+    pub mod corev1
+    {
+        pub use ::types__corev1::TemplateSelectors;
+        pub use ::types__corev1::Pods2Label;
+        pub use ::types__corev1::Pods2Dump;
+        pub use ::types__corev1::Pods2;
+        pub use ::types__corev1::PodStatus;
+        pub use ::types__corev1::PodSpec;
+        pub use ::types__corev1::Phase;
+    }
     pub mod ddlog_std
     {
         pub use ::ddlog_std::s8;
@@ -671,8 +681,20 @@ pub mod typedefs
         pub use ::internment::ends_with;
         pub use ::internment::contains;
     }
+    pub mod metav1
+    {
+        pub use ::types__metav1::ObjectMeta;
+    }
+    pub mod selectors
+    {
+        pub use ::types__selectors::LabelSelectorRequirement;
+        pub use ::types__selectors::LabelSelectorOperator;
+        pub use ::types__selectors::LabelSelector;
+        pub use ::types__selectors::to_string;
+        pub use ::types__selectors::labelSelectorMatches;
+    }
 }
-decl_any_deserialize!((0u64 , types::IngressController), (1u64 , types::Ingresses), (2u64 , types::IsPublic), (3u64 , types::Labels), (4u64 , types::Nodes), (5u64 , types::NodesToReplicaSet), (6u64 , types::Pods), (7u64 , types::PodsToReplicaSet), (8u64 , types::ReplicaSets), (9u64 , types::Selectors), (10u64 , types::Services));
+decl_any_deserialize!((0u64 , types::IngressController), (1u64 , types::Ingresses), (2u64 , types::IsPublic), (3u64 , types::Labels), (4u64 , types::Nodes), (5u64 , types::NodesToReplicaSet), (6u64 , types::Pods), (7u64 , types::PodsToReplicaSet), (8u64 , types::ReplicaSets), (9u64 , types::Selectors), (10u64 , types::Services), (11u64 , ddlog_std::Ref<types__corev1::Pods2>), (12u64 , types__corev1::Pods2Dump), (13u64 , types__corev1::Pods2Label), (14u64 , types__corev1::TemplateSelectors));
 impl TryFrom<&str> for Relations {
     type Error = ();
     fn try_from(rname: &str) -> ::std::result::Result<Self, ()> {
@@ -688,6 +710,10 @@ impl TryFrom<&str> for Relations {
         "ReplicaSets" => Ok(Relations::ReplicaSets),
         "Selectors" => Ok(Relations::Selectors),
         "Services" => Ok(Relations::Services),
+        "corev1::Pods2" => Ok(Relations::corev1_Pods2),
+        "corev1::Pods2Dump" => Ok(Relations::corev1_Pods2Dump),
+        "corev1::Pods2Label" => Ok(Relations::corev1_Pods2Label),
+        "corev1::TemplateSelectors" => Ok(Relations::corev1_TemplateSelectors),
         "ddlog_std::Singleton" => Ok(Relations::ddlog_std_Singleton),
              _  => Err(()),
          }
@@ -700,6 +726,8 @@ impl Relations {
         Relations::Nodes => true,
         Relations::NodesToReplicaSet => true,
         Relations::PodsToReplicaSet => true,
+        Relations::corev1_Pods2Dump => true,
+        Relations::corev1_Pods2Label => true,
             _  => false
         }
     }
@@ -714,6 +742,8 @@ impl Relations {
         Relations::ReplicaSets => true,
         Relations::Selectors => true,
         Relations::Services => true,
+        Relations::corev1_Pods2 => true,
+        Relations::corev1_TemplateSelectors => true,
             _  => false
         }
     }
@@ -732,6 +762,10 @@ impl Relations {
             Relations::ReplicaSets => ::std::any::TypeId::of::<types::ReplicaSets>(),
             Relations::Selectors => ::std::any::TypeId::of::<types::Selectors>(),
             Relations::Services => ::std::any::TypeId::of::<types::Services>(),
+            Relations::corev1_Pods2 => ::std::any::TypeId::of::<ddlog_std::Ref<types__corev1::Pods2>>(),
+            Relations::corev1_Pods2Dump => ::std::any::TypeId::of::<types__corev1::Pods2Dump>(),
+            Relations::corev1_Pods2Label => ::std::any::TypeId::of::<types__corev1::Pods2Label>(),
+            Relations::corev1_TemplateSelectors => ::std::any::TypeId::of::<types__corev1::TemplateSelectors>(),
             Relations::ddlog_std_Singleton => ::std::any::TypeId::of::<ddlog_std::Singleton>(),
         }
     }
@@ -751,7 +785,11 @@ impl TryFrom<program::RelId> for Relations {
         8 => Ok(Relations::ReplicaSets),
         9 => Ok(Relations::Selectors),
         10 => Ok(Relations::Services),
-        11 => Ok(Relations::ddlog_std_Singleton),
+        11 => Ok(Relations::corev1_Pods2),
+        12 => Ok(Relations::corev1_Pods2Dump),
+        13 => Ok(Relations::corev1_Pods2Label),
+        14 => Ok(Relations::corev1_TemplateSelectors),
+        15 => Ok(Relations::ddlog_std_Singleton),
              _  => Err(())
          }
     }
@@ -769,7 +807,11 @@ pub fn relid2name(rid: program::RelId) -> ::std::option::Option<&'static str> {
         8 => ::core::option::Option::Some("ReplicaSets"),
         9 => ::core::option::Option::Some("Selectors"),
         10 => ::core::option::Option::Some("Services"),
-        11 => ::core::option::Option::Some("ddlog_std::Singleton"),
+        11 => ::core::option::Option::Some("corev1::Pods2"),
+        12 => ::core::option::Option::Some("corev1::Pods2Dump"),
+        13 => ::core::option::Option::Some("corev1::Pods2Label"),
+        14 => ::core::option::Option::Some("corev1::TemplateSelectors"),
+        15 => ::core::option::Option::Some("ddlog_std::Singleton"),
        _  => None
    }
 }
@@ -790,6 +832,10 @@ pub fn rel_name2orig_name(rname: &str) -> ::std::option::Option<&'static str> {
         "ReplicaSets" => ::core::option::Option::Some("ReplicaSets"),
         "Selectors" => ::core::option::Option::Some("Selectors"),
         "Services" => ::core::option::Option::Some("Services"),
+        "corev1::Pods2" => ::core::option::Option::Some("corev1::Pods2"),
+        "corev1::Pods2Dump" => ::core::option::Option::Some("corev1::Pods2Dump"),
+        "corev1::Pods2Label" => ::core::option::Option::Some("corev1::Pods2Label"),
+        "corev1::TemplateSelectors" => ::core::option::Option::Some("corev1::TemplateSelectors"),
         "ddlog_std::Singleton" => ::core::option::Option::Some("ddlog_std::Singleton"),
        _  => None
    }
@@ -808,6 +854,10 @@ pub fn rel_name2orig_cname(rname: &str) -> ::std::option::Option<&'static ::std:
         "ReplicaSets" => Some(::std::ffi::CStr::from_bytes_with_nul(b"ReplicaSets\0") .expect("Unreachable: A null byte was specifically inserted")),
         "Selectors" => Some(::std::ffi::CStr::from_bytes_with_nul(b"Selectors\0") .expect("Unreachable: A null byte was specifically inserted")),
         "Services" => Some(::std::ffi::CStr::from_bytes_with_nul(b"Services\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "corev1::Pods2" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pods2\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "corev1::Pods2Dump" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pods2Dump\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "corev1::Pods2Label" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pods2Label\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "corev1::TemplateSelectors" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::TemplateSelectors\0") .expect("Unreachable: A null byte was specifically inserted")),
         "ddlog_std::Singleton" => Some(::std::ffi::CStr::from_bytes_with_nul(b"ddlog_std::Singleton\0") .expect("Unreachable: A null byte was specifically inserted")),
        _  => None
    }
@@ -825,6 +875,10 @@ pub fn orig_rel_name2name(rname: &str) -> ::std::option::Option<&'static str> {
         "ReplicaSets" => ::core::option::Option::Some("ReplicaSets"),
         "Selectors" => ::core::option::Option::Some("Selectors"),
         "Services" => ::core::option::Option::Some("Services"),
+        "corev1::Pods2" => ::core::option::Option::Some("corev1::Pods2"),
+        "corev1::Pods2Dump" => ::core::option::Option::Some("corev1::Pods2Dump"),
+        "corev1::Pods2Label" => ::core::option::Option::Some("corev1::Pods2Label"),
+        "corev1::TemplateSelectors" => ::core::option::Option::Some("corev1::TemplateSelectors"),
         "ddlog_std::Singleton" => ::core::option::Option::Some("ddlog_std::Singleton"),
        _  => None
    }
@@ -832,7 +886,7 @@ pub fn orig_rel_name2name(rname: &str) -> ::std::option::Option<&'static str> {
 /// A map of `RelId`s to their name as an `&'static str`
 pub static RELIDMAP: ::once_cell::sync::Lazy<::fnv::FnvHashMap<Relations, &'static str>> =
     ::once_cell::sync::Lazy::new(|| {
-        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(12, ::fnv::FnvBuildHasher::default());
+        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(16, ::fnv::FnvBuildHasher::default());
         map.insert(Relations::IngressController, "IngressController");
         map.insert(Relations::Ingresses, "Ingresses");
         map.insert(Relations::IsPublic, "IsPublic");
@@ -844,6 +898,10 @@ pub static RELIDMAP: ::once_cell::sync::Lazy<::fnv::FnvHashMap<Relations, &'stat
         map.insert(Relations::ReplicaSets, "ReplicaSets");
         map.insert(Relations::Selectors, "Selectors");
         map.insert(Relations::Services, "Services");
+        map.insert(Relations::corev1_Pods2, "corev1::Pods2");
+        map.insert(Relations::corev1_Pods2Dump, "corev1::Pods2Dump");
+        map.insert(Relations::corev1_Pods2Label, "corev1::Pods2Label");
+        map.insert(Relations::corev1_TemplateSelectors, "corev1::TemplateSelectors");
         map.insert(Relations::ddlog_std_Singleton, "ddlog_std::Singleton");
         map
     });
@@ -851,7 +909,7 @@ pub static RELIDMAP: ::once_cell::sync::Lazy<::fnv::FnvHashMap<Relations, &'stat
 #[cfg(feature = "c_api")]
 pub static RELIDMAPC: ::once_cell::sync::Lazy<::fnv::FnvHashMap<program::RelId, &'static ::std::ffi::CStr>> =
     ::once_cell::sync::Lazy::new(|| {
-        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(12, ::fnv::FnvBuildHasher::default());
+        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(16, ::fnv::FnvBuildHasher::default());
         map.insert(0, ::std::ffi::CStr::from_bytes_with_nul(b"IngressController\0").expect("Unreachable: A null byte was specifically inserted"));
         map.insert(1, ::std::ffi::CStr::from_bytes_with_nul(b"Ingresses\0").expect("Unreachable: A null byte was specifically inserted"));
         map.insert(2, ::std::ffi::CStr::from_bytes_with_nul(b"IsPublic\0").expect("Unreachable: A null byte was specifically inserted"));
@@ -863,13 +921,17 @@ pub static RELIDMAPC: ::once_cell::sync::Lazy<::fnv::FnvHashMap<program::RelId, 
         map.insert(8, ::std::ffi::CStr::from_bytes_with_nul(b"ReplicaSets\0").expect("Unreachable: A null byte was specifically inserted"));
         map.insert(9, ::std::ffi::CStr::from_bytes_with_nul(b"Selectors\0").expect("Unreachable: A null byte was specifically inserted"));
         map.insert(10, ::std::ffi::CStr::from_bytes_with_nul(b"Services\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(11, ::std::ffi::CStr::from_bytes_with_nul(b"ddlog_std::Singleton\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(11, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pods2\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(12, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pods2Dump\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(13, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pods2Label\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(14, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::TemplateSelectors\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(15, ::std::ffi::CStr::from_bytes_with_nul(b"ddlog_std::Singleton\0").expect("Unreachable: A null byte was specifically inserted"));
         map
     });
 /// A map of input `Relations`s to their name as an `&'static str`
 pub static INPUT_RELIDMAP: ::once_cell::sync::Lazy<::fnv::FnvHashMap<Relations, &'static str>> =
     ::once_cell::sync::Lazy::new(|| {
-        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(7, ::fnv::FnvBuildHasher::default());
+        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(9, ::fnv::FnvBuildHasher::default());
         map.insert(Relations::IngressController, "IngressController");
         map.insert(Relations::Ingresses, "Ingresses");
         map.insert(Relations::Labels, "Labels");
@@ -877,16 +939,20 @@ pub static INPUT_RELIDMAP: ::once_cell::sync::Lazy<::fnv::FnvHashMap<Relations, 
         map.insert(Relations::ReplicaSets, "ReplicaSets");
         map.insert(Relations::Selectors, "Selectors");
         map.insert(Relations::Services, "Services");
+        map.insert(Relations::corev1_Pods2, "corev1::Pods2");
+        map.insert(Relations::corev1_TemplateSelectors, "corev1::TemplateSelectors");
         map
     });
 /// A map of output `Relations`s to their name as an `&'static str`
 pub static OUTPUT_RELIDMAP: ::once_cell::sync::Lazy<::fnv::FnvHashMap<Relations, &'static str>> =
     ::once_cell::sync::Lazy::new(|| {
-        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(4, ::fnv::FnvBuildHasher::default());
+        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(6, ::fnv::FnvBuildHasher::default());
         map.insert(Relations::IsPublic, "IsPublic");
         map.insert(Relations::Nodes, "Nodes");
         map.insert(Relations::NodesToReplicaSet, "NodesToReplicaSet");
         map.insert(Relations::PodsToReplicaSet, "PodsToReplicaSet");
+        map.insert(Relations::corev1_Pods2Dump, "corev1::Pods2Dump");
+        map.insert(Relations::corev1_Pods2Label, "corev1::Pods2Label");
         map
     });
 impl TryFrom<&str> for Indexes {
@@ -972,6 +1038,18 @@ pub fn relval_from_record(relation: Relations, record: &::differential_datalog::
         Relations::Services => {
             Ok(<types::Services as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
+        Relations::corev1_Pods2 => {
+            Ok(<ddlog_std::Ref<types__corev1::Pods2> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        },
+        Relations::corev1_Pods2Dump => {
+            Ok(<types__corev1::Pods2Dump as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        },
+        Relations::corev1_Pods2Label => {
+            Ok(<types__corev1::Pods2Label as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        },
+        Relations::corev1_TemplateSelectors => {
+            Ok(<types__corev1::TemplateSelectors as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        },
         Relations::ddlog_std_Singleton => {
             Ok(<ddlog_std::Singleton as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         }
@@ -979,6 +1057,9 @@ pub fn relval_from_record(relation: Relations, record: &::differential_datalog::
 }
 pub fn relkey_from_record(relation: Relations, record: &::differential_datalog::record::Record) -> ::std::result::Result<::differential_datalog::ddval::DDValue, ::std::string::String> {
     match relation {
+        Relations::corev1_Pods2 => {
+            Ok(<ddlog_std::tuple2<String, String> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        }
         _ => Err(format!("relation {:?} does not have a primary key", relation)),
     }
 }
@@ -1011,7 +1092,11 @@ pub enum Relations {
     ReplicaSets = 8,
     Selectors = 9,
     Services = 10,
-    ddlog_std_Singleton = 11
+    corev1_Pods2 = 11,
+    corev1_Pods2Dump = 12,
+    corev1_Pods2Label = 13,
+    corev1_TemplateSelectors = 14,
+    ddlog_std_Singleton = 15
 }
 #[derive(Copy,Clone,Debug,PartialEq,Eq,Hash)]
 pub enum Indexes {
@@ -1022,7 +1107,7 @@ impl_trait_d3log!();
 pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> program::Program {
     let IngressController = ::differential_datalog::program::Relation {
         name: ::std::borrow::Cow::Borrowed("IngressController"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 17, 1, 18, 1),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 23, 1, 24, 1),
         input: true,
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
@@ -1031,13 +1116,13 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
         rules: vec![
         ],
         arrangements: vec![
-            types::__Arng_IngressController_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(IngressController{.namespace=(_0: string), .name=(_1: string)}: IngressController)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 43, 3, 43, 39)], &[])),
+            types::__Arng_IngressController_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(IngressController{.namespace=(_0: string), .name=(_1: string)}: IngressController)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 49, 3, 49, 39)], &[])),
         ],
         change_cb: ::core::option::Option::None,
     };
     let Ingresses = ::differential_datalog::program::Relation {
         name: ::std::borrow::Cow::Borrowed("Ingresses"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 16, 1, 17, 1),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 22, 1, 23, 1),
         input: true,
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
@@ -1046,13 +1131,13 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
         rules: vec![
         ],
         arrangements: vec![
-            types::__Arng_Ingresses_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Ingresses{.namespace=(_0: string), .name=(_: string), .controller=(_1: string), .serviceName=(_: string)}: Ingresses)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 44, 3, 44, 39)], &[])),
+            types::__Arng_Ingresses_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Ingresses{.namespace=(_0: string), .name=(_: string), .controller=(_1: string), .serviceName=(_: string)}: Ingresses)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 50, 3, 50, 39)], &[])),
         ],
         change_cb: ::core::option::Option::None,
     };
     let Labels = ::differential_datalog::program::Relation {
         name: ::std::borrow::Cow::Borrowed("Labels"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 11, 1, 12, 1),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 16, 1, 17, 1),
         input: true,
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
@@ -1061,13 +1146,13 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
         rules: vec![
         ],
         arrangements: vec![
-            types::__Arng_Labels_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Labels{.k=(_0: string), .v=(_1: string), .ty=(Pod{}: Object), .namespace=(_2: string), .name=(_: string)}: Labels)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 27, 3, 27, 40), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 46, 3, 46, 40), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 39, 3, 39, 40)], &[])),
+            types::__Arng_Labels_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Labels{.k=(_0: string), .v=(_1: string), .ty=(Pod{}: Object), .namespace=(_2: string), .name=(_: string)}: Labels)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 33, 3, 33, 40), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 52, 3, 52, 40), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 45, 3, 45, 40)], &[])),
         ],
         change_cb: ::core::option::Option::None,
     };
     let Pods = ::differential_datalog::program::Relation {
         name: ::std::borrow::Cow::Borrowed("Pods"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 14, 1, 15, 1),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 19, 1, 21, 1),
         input: true,
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
@@ -1076,13 +1161,13 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
         rules: vec![
         ],
         arrangements: vec![
-            types::__Arng_Pods_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Pods{.namespace=(_0: string), .name=(_1: string), .node=(_: string)}: Pods)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 33, 3, 33, 29)], &[])),
+            types::__Arng_Pods_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Pods{.namespace=(_0: string), .name=(_1: string), .node=(_: string)}: Pods)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 39, 3, 39, 29)], &[])),
         ],
         change_cb: ::core::option::Option::None,
     };
     let Nodes = ::differential_datalog::program::Relation {
         name: ::std::borrow::Cow::Borrowed("Nodes"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 20, 1, 21, 1),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 26, 1, 27, 1),
         input: false,
         distinct: true,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
@@ -1097,7 +1182,7 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
     };
     let ReplicaSets = ::differential_datalog::program::Relation {
         name: ::std::borrow::Cow::Borrowed("ReplicaSets"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 18, 1, 20, 1),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 24, 1, 26, 1),
         input: true,
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
@@ -1111,7 +1196,7 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
     };
     let Selectors = ::differential_datalog::program::Relation {
         name: ::std::borrow::Cow::Borrowed("Selectors"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 12, 1, 14, 1),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 17, 1, 19, 1),
         input: true,
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
@@ -1120,14 +1205,14 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
         rules: vec![
         ],
         arrangements: vec![
-            types::__Arng_Selectors_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Selectors{.k=(_: string), .v=(_: string), .ty=(Service{}: Object), .namespace=(_0: string), .name=(_1: string)}: Selectors)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 45, 3, 45, 47), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 38, 3, 38, 55)], &[])),
-            types::__Arng_Selectors_1.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Selectors{.k=(_0: string), .v=(_1: string), .ty=(ReplicaSet{}: Object), .namespace=(_2: string), .name=(_: string)}: Selectors)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 26, 3, 26, 49)], &[])),
+            types::__Arng_Selectors_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Selectors{.k=(_: string), .v=(_: string), .ty=(Service{}: Object), .namespace=(_0: string), .name=(_1: string)}: Selectors)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 51, 3, 51, 47), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 44, 3, 44, 55)], &[])),
+            types::__Arng_Selectors_1.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Selectors{.k=(_0: string), .v=(_1: string), .ty=(ReplicaSet{}: Object), .namespace=(_2: string), .name=(_: string)}: Selectors)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 32, 3, 32, 49)], &[])),
         ],
         change_cb: ::core::option::Option::None,
     };
     let PodsToReplicaSet = ::differential_datalog::program::Relation {
         name: ::std::borrow::Cow::Borrowed("PodsToReplicaSet"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 23, 1, 24, 1),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 29, 1, 30, 1),
         input: false,
         distinct: true,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
@@ -1137,14 +1222,14 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
             types::__Rule_PodsToReplicaSet_0.clone(),
         ],
         arrangements: vec![
-            types::__Arng_PodsToReplicaSet_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(PodsToReplicaSet{.namespace=(_0: string), .rs=(_: string), .pod=(_1: string)}: PodsToReplicaSet)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 32, 3, 32, 39)], &[])),
-            types::__Arng_PodsToReplicaSet_1.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(PodsToReplicaSet{.namespace=_0, .rs=(_: string), .pod=_1}: PodsToReplicaSet)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 24, 1, 25, 1)], &[::std::borrow::Cow::Borrowed("ToReplicaSet")])),
+            types::__Arng_PodsToReplicaSet_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(PodsToReplicaSet{.namespace=(_0: string), .rs=(_: string), .pod=(_1: string)}: PodsToReplicaSet)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 38, 3, 38, 39)], &[])),
+            types::__Arng_PodsToReplicaSet_1.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(PodsToReplicaSet{.namespace=_0, .rs=(_: string), .pod=_1}: PodsToReplicaSet)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 30, 1, 31, 1)], &[::std::borrow::Cow::Borrowed("ToReplicaSet")])),
         ],
         change_cb: ::core::option::Option::Some(::std::sync::Arc::clone(&__update_cb)),
     };
     let NodesToReplicaSet = ::differential_datalog::program::Relation {
         name: ::std::borrow::Cow::Borrowed("NodesToReplicaSet"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 29, 1, 30, 1),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 35, 1, 36, 1),
         input: false,
         distinct: true,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
@@ -1154,13 +1239,13 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
             types::__Rule_NodesToReplicaSet_0.clone(),
         ],
         arrangements: vec![
-            types::__Arng_NodesToReplicaSet_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(NodesToReplicaSet{.namespace=_0, .rs=_1, .node=(_: string)}: NodesToReplicaSet)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 30, 1, 31, 1)], &[::std::borrow::Cow::Borrowed("ToNodes")])),
+            types::__Arng_NodesToReplicaSet_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(NodesToReplicaSet{.namespace=_0, .rs=_1, .node=(_: string)}: NodesToReplicaSet)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 36, 1, 37, 1)], &[::std::borrow::Cow::Borrowed("ToNodes")])),
         ],
         change_cb: ::core::option::Option::Some(::std::sync::Arc::clone(&__update_cb)),
     };
     let Services = ::differential_datalog::program::Relation {
         name: ::std::borrow::Cow::Borrowed("Services"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 15, 1, 16, 1),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 21, 1, 22, 1),
         input: true,
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
@@ -1169,13 +1254,13 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
         rules: vec![
         ],
         arrangements: vec![
-            types::__Arng_Services_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Services{.namespace=(_0: string), .name=(_1: string), .ty=(LoadBalancer{}: ServiceType)}: Services)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 37, 3, 37, 49)], &[])),
+            types::__Arng_Services_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Services{.namespace=(_0: string), .name=(_1: string), .ty=(LoadBalancer{}: ServiceType)}: Services)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 43, 3, 43, 49)], &[])),
         ],
         change_cb: ::core::option::Option::None,
     };
     let IsPublic = ::differential_datalog::program::Relation {
         name: ::std::borrow::Cow::Borrowed("IsPublic"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 35, 1, 36, 1),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 41, 1, 42, 1),
         input: false,
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
@@ -1186,7 +1271,67 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
             types::__Rule_IsPublic_1.clone(),
         ],
         arrangements: vec![
-            types::__Arng_IsPublic_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(IsPublic{.namespace=(_0: string), .pod=(_1: string)}: IsPublic)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 42, 3, 42, 30)], &[])),
+            types::__Arng_IsPublic_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(IsPublic{.namespace=(_0: string), .pod=(_1: string)}: IsPublic)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 48, 3, 48, 30)], &[])),
+        ],
+        change_cb: ::core::option::Option::Some(::std::sync::Arc::clone(&__update_cb)),
+    };
+    let corev1_Pods2 = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("corev1::Pods2"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 18, 1, 21, 1),
+        input: true,
+        distinct: false,
+        caching_mode: ::differential_datalog::program::CachingMode::Set,
+        key_func: ::core::option::Option::Some(types__corev1::__Key_corev1_Pods2),
+        id: 11,
+        rules: vec![
+        ],
+        arrangements: vec![
+            types__corev1::__Arng_corev1_Pods2_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(_: ddlog_std::Ref<corev1::Pods2>)"), &[::ddlog_profiler::SourcePosition::new_range("corev1.dl", 33, 3, 33, 13)], &[])),
+        ],
+        change_cb: ::core::option::Option::None,
+    };
+    let corev1_Pods2Dump = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("corev1::Pods2Dump"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 36, 1, 37, 1),
+        input: false,
+        distinct: false,
+        caching_mode: ::differential_datalog::program::CachingMode::Set,
+        key_func: ::core::option::Option::None,
+        id: 12,
+        rules: vec![
+            types__corev1::__Rule_corev1_Pods2Dump_0.clone(),
+        ],
+        arrangements: vec![
+        ],
+        change_cb: ::core::option::Option::Some(::std::sync::Arc::clone(&__update_cb)),
+    };
+    let corev1_TemplateSelectors = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("corev1::TemplateSelectors"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 27, 1, 28, 1),
+        input: true,
+        distinct: false,
+        caching_mode: ::differential_datalog::program::CachingMode::Set,
+        key_func: ::core::option::Option::None,
+        id: 14,
+        rules: vec![
+        ],
+        arrangements: vec![
+            types__corev1::__Arng_corev1_TemplateSelectors_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(corev1::TemplateSelectors{.s=(_: selectors::LabelSelector)}: corev1::TemplateSelectors)"), &[::ddlog_profiler::SourcePosition::new_range("corev1.dl", 32, 3, 32, 30)], &[])),
+        ],
+        change_cb: ::core::option::Option::None,
+    };
+    let corev1_Pods2Label = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("corev1::Pods2Label"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 30, 1, 31, 1),
+        input: false,
+        distinct: false,
+        caching_mode: ::differential_datalog::program::CachingMode::Set,
+        key_func: ::core::option::Option::None,
+        id: 13,
+        rules: vec![
+            types__corev1::__Rule_corev1_Pods2Label_0.clone(),
+        ],
+        arrangements: vec![
         ],
         change_cb: ::core::option::Option::Some(::std::sync::Arc::clone(&__update_cb)),
     };
@@ -1197,7 +1342,7 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
         key_func: ::core::option::Option::None,
-        id: 11,
+        id: 15,
         rules: vec![
         ],
         arrangements: vec![
@@ -1216,10 +1361,16 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
             program::ProgNode::Rel{rel: NodesToReplicaSet},
             program::ProgNode::Rel{rel: Services},
             program::ProgNode::Scc{rels: vec![program::RecursiveRelation{rel: IsPublic, distinct: true}]},
+            program::ProgNode::Rel{rel: corev1_Pods2},
+            program::ProgNode::Rel{rel: corev1_Pods2Dump},
+            program::ProgNode::Rel{rel: corev1_TemplateSelectors},
+            program::ProgNode::Rel{rel: corev1_Pods2Label},
             program::ProgNode::Rel{rel: ddlog_std_Singleton}
     ];
     let delayed_rels = vec![];
-    let init_data: std::vec::Vec<(program::RelId, ::differential_datalog::ddval::DDValue)> = vec![ddlog_std::__Fact_ddlog_std_Singleton_0.clone()];
+    let init_data: std::vec::Vec<(program::RelId, ::differential_datalog::ddval::DDValue)> = vec![types__corev1::__Fact_corev1_Pods2_0.clone(),
+                                                                                                  types__corev1::__Fact_corev1_TemplateSelectors_0.clone(),
+                                                                                                  ddlog_std::__Fact_ddlog_std_Singleton_0.clone()];
     program::Program {
         nodes,
         delayed_rels,
@@ -1228,10 +1379,13 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
 }
 static SOURCES: &'static [ddlog_profiler::SourceFile] = &[
     ddlog_profiler::SourceFile{filename: "pallograph.dl", contents: std::include_str!("/home/andrew/src/github.com/williamsandrew/pallograph/pallograph.dl")},
+    ddlog_profiler::SourceFile{filename: "corev1.dl", contents: std::include_str!("/home/andrew/src/github.com/williamsandrew/pallograph/corev1.dl")},
     ddlog_profiler::SourceFile{filename: "ddlog_bigint.dl", contents: std::include_str!("/opt/ddlog/ddlog-1.2.3/lib/ddlog_bigint.dl")},
     ddlog_profiler::SourceFile{filename: "ddlog_log.dl", contents: std::include_str!("/opt/ddlog/ddlog-1.2.3/lib/ddlog_log.dl")},
     ddlog_profiler::SourceFile{filename: "ddlog_rt.dl", contents: std::include_str!("/opt/ddlog/ddlog-1.2.3/lib/ddlog_rt.dl")},
     ddlog_profiler::SourceFile{filename: "ddlog_std.dl", contents: std::include_str!("/opt/ddlog/ddlog-1.2.3/lib/ddlog_std.dl")},
     ddlog_profiler::SourceFile{filename: "debug.dl", contents: std::include_str!("/opt/ddlog/ddlog-1.2.3/lib/debug.dl")},
-    ddlog_profiler::SourceFile{filename: "internment.dl", contents: std::include_str!("/opt/ddlog/ddlog-1.2.3/lib/internment.dl")}
+    ddlog_profiler::SourceFile{filename: "internment.dl", contents: std::include_str!("/opt/ddlog/ddlog-1.2.3/lib/internment.dl")},
+    ddlog_profiler::SourceFile{filename: "metav1.dl", contents: std::include_str!("/home/andrew/src/github.com/williamsandrew/pallograph/metav1.dl")},
+    ddlog_profiler::SourceFile{filename: "selectors.dl", contents: std::include_str!("/home/andrew/src/github.com/williamsandrew/pallograph/selectors.dl")}
 ];

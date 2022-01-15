@@ -77,6 +77,8 @@ crate-type = ["rlib", "staticlib"]
 
 [dependencies.types]
 path = "types/"
+[dependencies.types__corev1]
+path = "types/corev1"
 [dependencies.ddlog_bigint]
 path = "types/ddlog_bigint"
 [dependencies.ddlog_log]
@@ -89,6 +91,10 @@ path = "types/ddlog_std"
 path = "types/debug"
 [dependencies.internment]
 path = "types/internment"
+[dependencies.types__metav1]
+path = "types/metav1"
+[dependencies.types__selectors]
+path = "types/selectors"
 
 [profile.release]
 opt-level = 2

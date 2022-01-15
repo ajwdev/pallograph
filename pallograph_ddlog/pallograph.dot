@@ -10,7 +10,11 @@ digraph {
     8 [label=ReplicaSets];
     9 [label=Selectors];
     10 [label=Services];
-    11 [label="ddlog_std::Singleton"];
+    11 [label="corev1::Pods2"];
+    12 [label="corev1::Pods2Dump"];
+    13 [label="corev1::Pods2Label"];
+    14 [label="corev1::TemplateSelectors"];
+    15 [label="ddlog_std::Singleton"];
     0 -> 2;
     1 -> 2;
     2 -> 2;
@@ -24,4 +28,7 @@ digraph {
     9 -> 2;
     9 -> 7;
     10 -> 2;
+    11 -> 12;
+    11 -> 13;
+    14 -> 13;
 }

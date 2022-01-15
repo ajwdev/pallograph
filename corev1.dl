@@ -1,0 +1,37 @@
+import metav1
+import selectors
+
+typedef Phase = Running
+              | Pending
+              | Failed
+              | Succeeded
+              | Unknown
+
+typedef PodSpec = PodSpec {
+  nodeName: string,
+}
+
+typedef PodStatus = PodStatus {
+  phase: Phase,
+}
+
+input relation &Pods2(meta: ObjectMeta, spec: PodSpec, status: PodStatus)
+primary key (x) (x.meta.namespace, x.meta.name)
+
+Pods2[Pods2{
+  ObjectMeta{.namespace="test", .name="test", .labels=["foo" -> "bar", "app" -> "test"]},
+  PodSpec{.nodeName="test-1"},
+  PodStatus{.phase=Running},
+}.ref_new()].
+
+input relation TemplateSelectors(s: LabelSelector)
+TemplateSelectors(LabelSelector{["app" -> "test", "foo" -> "bar"], vec_empty()}).
+
+output relation Pods2Label(selector: LabelSelector, pod: Ref<Pods2>)
+Pods2Label(selector, pod) :- 
+  TemplateSelectors(selector),
+  Pods2[pod],
+  labelSelectorMatches(Some{selector.ref_new()}, pod.meta.labels).
+
+output relation Pods2Dump(pod: Ref<Pods2>)
+Pods2Dump(pod) :- Pods2[pod].

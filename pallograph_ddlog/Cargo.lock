@@ -955,6 +955,9 @@ dependencies = [
  "timely",
  "triomphe",
  "types",
+ "types__corev1",
+ "types__metav1",
+ "types__selectors",
 ]
 
 [[package]]
@@ -1582,6 +1585,95 @@ dependencies = [
 
 [[package]]
 name = "types"
+version = "0.1.0"
+dependencies = [
+ "abomonation",
+ "ddlog_bigint",
+ "ddlog_derive",
+ "ddlog_log",
+ "ddlog_profiler",
+ "ddlog_rt",
+ "ddlog_std",
+ "debug",
+ "differential-dataflow",
+ "differential_datalog",
+ "erased-serde",
+ "fnv",
+ "internment 0.1.0",
+ "libc",
+ "num",
+ "once_cell",
+ "ordered-float",
+ "serde",
+ "serde_json",
+ "time",
+ "timely",
+ "twox-hash",
+ "types__corev1",
+ "types__metav1",
+ "types__selectors",
+]
+
+[[package]]
+name = "types__corev1"
+version = "0.1.0"
+dependencies = [
+ "abomonation",
+ "ddlog_bigint",
+ "ddlog_derive",
+ "ddlog_log",
+ "ddlog_profiler",
+ "ddlog_rt",
+ "ddlog_std",
+ "debug",
+ "differential-dataflow",
+ "differential_datalog",
+ "erased-serde",
+ "fnv",
+ "internment 0.1.0",
+ "libc",
+ "num",
+ "once_cell",
+ "ordered-float",
+ "serde",
+ "serde_json",
+ "time",
+ "timely",
+ "twox-hash",
+ "types__metav1",
+ "types__selectors",
+]
+
+[[package]]
+name = "types__metav1"
+version = "0.1.0"
+dependencies = [
+ "abomonation",
+ "ddlog_bigint",
+ "ddlog_derive",
+ "ddlog_log",
+ "ddlog_profiler",
+ "ddlog_rt",
+ "ddlog_std",
+ "debug",
+ "differential-dataflow",
+ "differential_datalog",
+ "erased-serde",
+ "fnv",
+ "internment 0.1.0",
+ "libc",
+ "num",
+ "once_cell",
+ "ordered-float",
+ "serde",
+ "serde_json",
+ "time",
+ "timely",
+ "twox-hash",
+]
+
+[[package]]
+name = "types__selectors"
 version = "0.1.0"
 dependencies = [
  "abomonation",

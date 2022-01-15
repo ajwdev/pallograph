@@ -2675,5 +2675,5 @@ pub fn zip<X: ::ddlog_rt::Val,Y: ::ddlog_rt::Val>(v1: Vec<X>, v2: Vec<Y>) -> Vec
 {   vec_zip(v1, v2)
 }
 pub static __Fact_ddlog_std_Singleton_0 : ::once_cell::sync::Lazy<(program::RelId, ::differential_datalog::ddval::DDValue)> = ::once_cell::sync::Lazy::new(|| {
-    (11, ((Singleton{})).into_ddvalue()) /*ddlog_std::Singleton[(ddlog_std::Singleton{}: ddlog_std::Singleton)].*/
+    (15, ((Singleton{})).into_ddvalue()) /*ddlog_std::Singleton[(ddlog_std::Singleton{}: ddlog_std::Singleton)].*/
 });

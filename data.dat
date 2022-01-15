@@ -1,36 +1,44 @@
 start;
 
-insert Pods("default", "pod-a", "node-1"),
-insert Pods("default", "pod-b", "node-1"),
-insert Pods("default", "pod-c", "node-2"),
-insert Pods("default", "pod-d", "node-3"),
-insert Pods("default", "ingress-0", "node-1"),
-insert IngressController("default", "ingress-0"),
+insert_or_update corev1::Pods2[corev1::Pods2{
+  metav1::ObjectMeta{"test", "test2", [("app","test")]},
+  corev1::PodSpec{"test0"},
+  corev1::PodStatus{corev1::Running}
+}];
 
-insert ReplicaSets("default", "test"),
+insert corev1::TemplateSelectors(selectors::LabelSelector{[("app","test")], []});
 
-insert Services("default", "ingress", LoadBalancer),
-insert Services("default", "svc-test", LoadBalancer),
-insert Services("default", "svc-test2", ClusterIP),
+insert Pods("default", "pod-a", "node-1");
+insert Pods("default", "pod-b", "node-1");
+insert Pods("default", "pod-c", "node-2");
+insert Pods("default", "pod-d", "node-3");
+insert Pods("default", "ingress-0", "node-1");
+insert IngressController("default", "ingress-0");
 
-insert Ingresses("default", "svc-test2", "ingress-0", "svc-test2"),
+insert ReplicaSets("default", "test");
 
-insert Labels("app", "test", Pod, "default", "pod-a"),
-insert Labels("pod-template-hash", "558bd4d5db", Pod, "default", "pod-a"),
+insert Services("default", "ingress", LoadBalancer);
+insert Services("default", "svc-test", LoadBalancer);
+insert Services("default", "svc-test2", ClusterIP);
 
-insert Labels("app", "test", Pod, "default", "pod-c"),
-insert Labels("pod-template-hash", "558bd4d5db", Pod, "default", "pod-c"),
+insert Ingresses("default", "svc-test2", "ingress-0", "svc-test2");
 
-insert Labels("app", "test2", Pod, "default", "pod-d"),
+insert Labels("app", "test", Pod, "default", "pod-a");
+insert Labels("pod-template-hash", "558bd4d5db", Pod, "default", "pod-a");
 
-insert Labels("app", "ingress", Pod, "default", "ingress-0"),
+insert Labels("app", "test", Pod, "default", "pod-c");
+insert Labels("pod-template-hash", "558bd4d5db", Pod, "default", "pod-c");
 
-insert Selectors("app", "test", ReplicaSet, "default", "test"),
-insert Selectors("pod-template-hash", "558bd4d5db", ReplicaSet, "default", "test"),
+insert Labels("app", "test2", Pod, "default", "pod-d");
 
-insert Selectors("app", "test", Service, "default", "svc-test"),
-insert Selectors("app", "test2", Service, "default", "svc-test2"),
-insert Selectors("app", "ingress", Service, "default", "ingress"),
+insert Labels("app", "ingress", Pod, "default", "ingress-0");
+
+insert Selectors("app", "test", ReplicaSet, "default", "test");
+insert Selectors("pod-template-hash", "558bd4d5db", ReplicaSet, "default", "test");
+
+insert Selectors("app", "test", Service, "default", "svc-test");
+insert Selectors("app", "test2", Service, "default", "svc-test2");
+insert Selectors("app", "ingress", Service, "default", "ingress");
 
 commit;
 
@@ -44,3 +52,7 @@ echo ToNodes;
 query_index ToNodes("default", "test");
 
 dump IsPublic;
+echo Pods2Dump;
+dump corev1::Pods2Dump;
+echo Pods2Label;
+dump corev1::Pods2Label;
