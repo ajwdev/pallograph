@@ -1,0 +1,33 @@
+import selectors
+import metav1
+import corev1
+
+typedef IngressRule = IngressRule {
+  host: string,
+  // NOTE This doesnt match the actual upstream type, just experimenting so keeping it simple.
+  // This reflects the ingress rule -> ingress path -> ingress backend -> service
+  backend: string,
+}
+
+typedef IngressSpec = IngressSpec {
+  ingressClassName: string,
+  rules: Vec<Ref<IngressRule>>,
+}
+
+typedef IngressStatus = IngressStatus {}
+
+input relation &Ingress(meta: ObjectMeta, spec: IngressSpec, status: IngressStatus)
+primary key (x) (x.meta.namespace, x.meta.name)
+
+relation IngressByName(ing: Ref<Ingress>, ns: string, name: string)
+IngressByName(ing, ns, name) :-
+  ing in &Ingress(),
+  var ns = ing.meta.namespace,
+  var name = ing.meta.name.
+
+output relation IngressToService(ing: Ref<Ingress>, svc: Ref<Service>)
+IngressToService(ing, svc) :- 
+  ing in &Ingress(),
+  var rules = FlatMap(ing.deref().spec.rules),
+  var backend = rules.backend,
+  ServiceByName(svc, ing.meta.namespace, backend).

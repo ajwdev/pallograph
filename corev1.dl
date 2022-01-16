@@ -1,7 +1,7 @@
 import metav1
 import selectors
 
-typedef Phase = Running
+typedef PodPhase = Running
               | Pending
               | Failed
               | Succeeded
@@ -12,26 +12,59 @@ typedef PodSpec = PodSpec {
 }
 
 typedef PodStatus = PodStatus {
-  phase: Phase,
+  phase: PodPhase,
 }
 
-input relation &Pods2(meta: ObjectMeta, spec: PodSpec, status: PodStatus)
+input relation &Pod(meta: ObjectMeta, spec: PodSpec, status: PodStatus)
 primary key (x) (x.meta.namespace, x.meta.name)
 
-Pods2[Pods2{
-  ObjectMeta{.namespace="test", .name="test", .labels=["foo" -> "bar", "app" -> "test"], .annotations=map_empty()},
-  PodSpec{.nodeName="test-1"},
-  PodStatus{.phase=Running},
-}.ref_new()].
+relation PodByName(pod: Ref<Pod>, ns: string, name: string)
+PodByName(pod, ns, name) :-
+  pod in &Pod(),
+  var ns = pod.meta.namespace,
+  var name = pod.meta.name.
 
-input relation TemplateSelectors(s: LabelSelector)
-TemplateSelectors(LabelSelector{["app" -> "test", "foo" -> "bar"], vec_empty()}).
+// Generic relations for matching pods outside of ReplicaSets, Deployments, etc
+input relation Selectors(s: LabelSelector)
+primary key (x) (x)
+// Insert an empty base case that actually matches everything (AJW: Do we actually want this?)
+Selectors(LabelSelector{map_empty(), vec_empty()}).
 
-output relation Pods2Label(selector: LabelSelector, pod: Ref<Pods2>)
-Pods2Label(selector, pod) :- 
-  TemplateSelectors(selector),
-  Pods2[pod],
+output relation MatchesPod(selector: LabelSelector, namespace: string, pod: Ref<Pod>)
+index MatchesPod(selector: LabelSelector, ns: string) on MatchesPod(selector, ns, _)
+index MatchesPodAll(selector: LabelSelector) on MatchesPod(selector, _, _)
+MatchesPod(selector, ns, pod) :-
+  Selectors(selector),
+  PodByName(pod, ns, _),
   labelSelectorMatches(Some{selector.ref_new()}, pod.meta.labels).
 
-output relation Pods2Dump(pod: Ref<Pods2>)
-Pods2Dump(pod) :- Pods2[pod].
+
+// Services
+
+typedef ServiceType = ClusterIP 
+                    | NodePort
+                    | LoadBalancer
+                    | ExternalName
+
+typedef ServiceSpec = ServiceSpec {
+  // XXX "type" is a reserved word so we can't use it
+  typ: ServiceType,
+  selector: LabelSelector,
+}
+
+typedef ServiceStatus = ServiceStatus {}
+
+input relation &Service(meta: ObjectMeta, spec: ServiceSpec, status: ServiceStatus)
+primary key (x) (x.meta.namespace, x.meta.name)
+
+relation ServiceByName(svc: Ref<Service>, ns: string, name: string)
+ServiceByName(svc, ns, name) :-
+  svc in &Service(),
+  var ns = svc.meta.namespace,
+  var name = svc.meta.name.
+
+output relation ServiceMatchesPod(rs: Ref<Service>, pod: Ref<Pod>)
+ServiceMatchesPod(svc, pod) :- 
+  ServiceByName(svc, ns, _),
+  PodByName(pod, ns, _),
+  labelSelectorMatches(Some{svc.spec.selector.ref_new()}, pod.meta.labels).

@@ -364,28 +364,32 @@ pub unsafe extern "C" fn ddlog_run(
 
 pub mod typedefs
 {
-    pub use ::types::Services;
-    pub use ::types::ServiceType;
-    pub use ::types::Selectors;
-    pub use ::types::ReplicaSets;
-    pub use ::types::PodsToReplicaSet;
-    pub use ::types::Pods;
-    pub use ::types::Object;
-    pub use ::types::NodesToReplicaSet;
-    pub use ::types::Nodes;
-    pub use ::types::Labels;
+    pub use ::types::NodesInUse;
     pub use ::types::IsPublic;
-    pub use ::types::Ingresses;
     pub use ::types::IngressController;
+    pub mod appsv1
+    {
+        pub use ::types__appsv1::ReplicaSetStatus;
+        pub use ::types__appsv1::ReplicaSetSpec;
+        pub use ::types__appsv1::ReplicaSetMatchesPod;
+        pub use ::types__appsv1::ReplicaSetByName;
+        pub use ::types__appsv1::ReplicaSet;
+    }
     pub mod corev1
     {
-        pub use ::types__corev1::TemplateSelectors;
-        pub use ::types__corev1::Pods2Label;
-        pub use ::types__corev1::Pods2Dump;
-        pub use ::types__corev1::Pods2;
+        pub use ::types__corev1::ServiceType;
+        pub use ::types__corev1::ServiceStatus;
+        pub use ::types__corev1::ServiceSpec;
+        pub use ::types__corev1::ServiceMatchesPod;
+        pub use ::types__corev1::ServiceByName;
+        pub use ::types__corev1::Service;
+        pub use ::types__corev1::Selectors;
         pub use ::types__corev1::PodStatus;
         pub use ::types__corev1::PodSpec;
-        pub use ::types__corev1::Phase;
+        pub use ::types__corev1::PodPhase;
+        pub use ::types__corev1::PodByName;
+        pub use ::types__corev1::Pod;
+        pub use ::types__corev1::MatchesPod;
     }
     pub mod ddlog_std
     {
@@ -685,6 +689,15 @@ pub mod typedefs
     {
         pub use ::types__metav1::ObjectMeta;
     }
+    pub mod networkingv1
+    {
+        pub use ::types__networkingv1::IngressToService;
+        pub use ::types__networkingv1::IngressStatus;
+        pub use ::types__networkingv1::IngressSpec;
+        pub use ::types__networkingv1::IngressRule;
+        pub use ::types__networkingv1::IngressByName;
+        pub use ::types__networkingv1::Ingress;
+    }
     pub mod selectors
     {
         pub use ::types__selectors::LabelSelectorRequirement;
@@ -694,27 +707,28 @@ pub mod typedefs
         pub use ::types__selectors::labelSelectorMatches;
     }
 }
-decl_any_deserialize!((0u64 , types::IngressController), (1u64 , types::Ingresses), (2u64 , types::IsPublic), (3u64 , types::Labels), (4u64 , types::Nodes), (5u64 , types::NodesToReplicaSet), (6u64 , types::Pods), (7u64 , types::PodsToReplicaSet), (8u64 , types::ReplicaSets), (9u64 , types::Selectors), (10u64 , types::Services), (11u64 , ddlog_std::Ref<types__corev1::Pods2>), (12u64 , types__corev1::Pods2Dump), (13u64 , types__corev1::Pods2Label), (14u64 , types__corev1::TemplateSelectors));
+decl_any_deserialize!((0u64 , types::IngressController), (1u64 , types::IsPublic), (2u64 , types::NodesInUse), (3u64 , ddlog_std::Ref<types__appsv1::ReplicaSet>), (5u64 , types__appsv1::ReplicaSetMatchesPod), (6u64 , types__corev1::MatchesPod), (7u64 , ddlog_std::Ref<types__corev1::Pod>), (9u64 , types__corev1::Selectors), (10u64 , ddlog_std::Ref<types__corev1::Service>), (12u64 , types__corev1::ServiceMatchesPod), (14u64 , ddlog_std::Ref<types__networkingv1::Ingress>), (16u64 , types__networkingv1::IngressToService));
 impl TryFrom<&str> for Relations {
     type Error = ();
     fn try_from(rname: &str) -> ::std::result::Result<Self, ()> {
          match rname {
         "IngressController" => Ok(Relations::IngressController),
-        "Ingresses" => Ok(Relations::Ingresses),
         "IsPublic" => Ok(Relations::IsPublic),
-        "Labels" => Ok(Relations::Labels),
-        "Nodes" => Ok(Relations::Nodes),
-        "NodesToReplicaSet" => Ok(Relations::NodesToReplicaSet),
-        "Pods" => Ok(Relations::Pods),
-        "PodsToReplicaSet" => Ok(Relations::PodsToReplicaSet),
-        "ReplicaSets" => Ok(Relations::ReplicaSets),
-        "Selectors" => Ok(Relations::Selectors),
-        "Services" => Ok(Relations::Services),
-        "corev1::Pods2" => Ok(Relations::corev1_Pods2),
-        "corev1::Pods2Dump" => Ok(Relations::corev1_Pods2Dump),
-        "corev1::Pods2Label" => Ok(Relations::corev1_Pods2Label),
-        "corev1::TemplateSelectors" => Ok(Relations::corev1_TemplateSelectors),
+        "NodesInUse" => Ok(Relations::NodesInUse),
+        "appsv1::ReplicaSet" => Ok(Relations::appsv1_ReplicaSet),
+        "appsv1::ReplicaSetByName" => Ok(Relations::appsv1_ReplicaSetByName),
+        "appsv1::ReplicaSetMatchesPod" => Ok(Relations::appsv1_ReplicaSetMatchesPod),
+        "corev1::MatchesPod" => Ok(Relations::corev1_MatchesPod),
+        "corev1::Pod" => Ok(Relations::corev1_Pod),
+        "corev1::PodByName" => Ok(Relations::corev1_PodByName),
+        "corev1::Selectors" => Ok(Relations::corev1_Selectors),
+        "corev1::Service" => Ok(Relations::corev1_Service),
+        "corev1::ServiceByName" => Ok(Relations::corev1_ServiceByName),
+        "corev1::ServiceMatchesPod" => Ok(Relations::corev1_ServiceMatchesPod),
         "ddlog_std::Singleton" => Ok(Relations::ddlog_std_Singleton),
+        "networkingv1::Ingress" => Ok(Relations::networkingv1_Ingress),
+        "networkingv1::IngressByName" => Ok(Relations::networkingv1_IngressByName),
+        "networkingv1::IngressToService" => Ok(Relations::networkingv1_IngressToService),
              _  => Err(()),
          }
     }
@@ -723,11 +737,11 @@ impl Relations {
     pub fn is_output(&self) -> bool {
         match self {
         Relations::IsPublic => true,
-        Relations::Nodes => true,
-        Relations::NodesToReplicaSet => true,
-        Relations::PodsToReplicaSet => true,
-        Relations::corev1_Pods2Dump => true,
-        Relations::corev1_Pods2Label => true,
+        Relations::NodesInUse => true,
+        Relations::appsv1_ReplicaSetMatchesPod => true,
+        Relations::corev1_MatchesPod => true,
+        Relations::corev1_ServiceMatchesPod => true,
+        Relations::networkingv1_IngressToService => true,
             _  => false
         }
     }
@@ -736,14 +750,11 @@ impl Relations {
     pub fn is_input(&self) -> bool {
         match self {
         Relations::IngressController => true,
-        Relations::Ingresses => true,
-        Relations::Labels => true,
-        Relations::Pods => true,
-        Relations::ReplicaSets => true,
-        Relations::Selectors => true,
-        Relations::Services => true,
-        Relations::corev1_Pods2 => true,
-        Relations::corev1_TemplateSelectors => true,
+        Relations::appsv1_ReplicaSet => true,
+        Relations::corev1_Pod => true,
+        Relations::corev1_Selectors => true,
+        Relations::corev1_Service => true,
+        Relations::networkingv1_Ingress => true,
             _  => false
         }
     }
@@ -752,21 +763,22 @@ impl Relations {
     pub fn type_id(&self) -> ::std::any::TypeId {
         match self {
             Relations::IngressController => ::std::any::TypeId::of::<types::IngressController>(),
-            Relations::Ingresses => ::std::any::TypeId::of::<types::Ingresses>(),
             Relations::IsPublic => ::std::any::TypeId::of::<types::IsPublic>(),
-            Relations::Labels => ::std::any::TypeId::of::<types::Labels>(),
-            Relations::Nodes => ::std::any::TypeId::of::<types::Nodes>(),
-            Relations::NodesToReplicaSet => ::std::any::TypeId::of::<types::NodesToReplicaSet>(),
-            Relations::Pods => ::std::any::TypeId::of::<types::Pods>(),
-            Relations::PodsToReplicaSet => ::std::any::TypeId::of::<types::PodsToReplicaSet>(),
-            Relations::ReplicaSets => ::std::any::TypeId::of::<types::ReplicaSets>(),
-            Relations::Selectors => ::std::any::TypeId::of::<types::Selectors>(),
-            Relations::Services => ::std::any::TypeId::of::<types::Services>(),
-            Relations::corev1_Pods2 => ::std::any::TypeId::of::<ddlog_std::Ref<types__corev1::Pods2>>(),
-            Relations::corev1_Pods2Dump => ::std::any::TypeId::of::<types__corev1::Pods2Dump>(),
-            Relations::corev1_Pods2Label => ::std::any::TypeId::of::<types__corev1::Pods2Label>(),
-            Relations::corev1_TemplateSelectors => ::std::any::TypeId::of::<types__corev1::TemplateSelectors>(),
+            Relations::NodesInUse => ::std::any::TypeId::of::<types::NodesInUse>(),
+            Relations::appsv1_ReplicaSet => ::std::any::TypeId::of::<ddlog_std::Ref<types__appsv1::ReplicaSet>>(),
+            Relations::appsv1_ReplicaSetByName => ::std::any::TypeId::of::<types__appsv1::ReplicaSetByName>(),
+            Relations::appsv1_ReplicaSetMatchesPod => ::std::any::TypeId::of::<types__appsv1::ReplicaSetMatchesPod>(),
+            Relations::corev1_MatchesPod => ::std::any::TypeId::of::<types__corev1::MatchesPod>(),
+            Relations::corev1_Pod => ::std::any::TypeId::of::<ddlog_std::Ref<types__corev1::Pod>>(),
+            Relations::corev1_PodByName => ::std::any::TypeId::of::<types__corev1::PodByName>(),
+            Relations::corev1_Selectors => ::std::any::TypeId::of::<types__corev1::Selectors>(),
+            Relations::corev1_Service => ::std::any::TypeId::of::<ddlog_std::Ref<types__corev1::Service>>(),
+            Relations::corev1_ServiceByName => ::std::any::TypeId::of::<types__corev1::ServiceByName>(),
+            Relations::corev1_ServiceMatchesPod => ::std::any::TypeId::of::<types__corev1::ServiceMatchesPod>(),
             Relations::ddlog_std_Singleton => ::std::any::TypeId::of::<ddlog_std::Singleton>(),
+            Relations::networkingv1_Ingress => ::std::any::TypeId::of::<ddlog_std::Ref<types__networkingv1::Ingress>>(),
+            Relations::networkingv1_IngressByName => ::std::any::TypeId::of::<types__networkingv1::IngressByName>(),
+            Relations::networkingv1_IngressToService => ::std::any::TypeId::of::<types__networkingv1::IngressToService>(),
         }
     }
 }
@@ -775,21 +787,22 @@ impl TryFrom<program::RelId> for Relations {
     fn try_from(rid: program::RelId) -> ::std::result::Result<Self, ()> {
          match rid {
         0 => Ok(Relations::IngressController),
-        1 => Ok(Relations::Ingresses),
-        2 => Ok(Relations::IsPublic),
-        3 => Ok(Relations::Labels),
-        4 => Ok(Relations::Nodes),
-        5 => Ok(Relations::NodesToReplicaSet),
-        6 => Ok(Relations::Pods),
-        7 => Ok(Relations::PodsToReplicaSet),
-        8 => Ok(Relations::ReplicaSets),
-        9 => Ok(Relations::Selectors),
-        10 => Ok(Relations::Services),
-        11 => Ok(Relations::corev1_Pods2),
-        12 => Ok(Relations::corev1_Pods2Dump),
-        13 => Ok(Relations::corev1_Pods2Label),
-        14 => Ok(Relations::corev1_TemplateSelectors),
-        15 => Ok(Relations::ddlog_std_Singleton),
+        1 => Ok(Relations::IsPublic),
+        2 => Ok(Relations::NodesInUse),
+        3 => Ok(Relations::appsv1_ReplicaSet),
+        4 => Ok(Relations::appsv1_ReplicaSetByName),
+        5 => Ok(Relations::appsv1_ReplicaSetMatchesPod),
+        6 => Ok(Relations::corev1_MatchesPod),
+        7 => Ok(Relations::corev1_Pod),
+        8 => Ok(Relations::corev1_PodByName),
+        9 => Ok(Relations::corev1_Selectors),
+        10 => Ok(Relations::corev1_Service),
+        11 => Ok(Relations::corev1_ServiceByName),
+        12 => Ok(Relations::corev1_ServiceMatchesPod),
+        13 => Ok(Relations::ddlog_std_Singleton),
+        14 => Ok(Relations::networkingv1_Ingress),
+        15 => Ok(Relations::networkingv1_IngressByName),
+        16 => Ok(Relations::networkingv1_IngressToService),
              _  => Err(())
          }
     }
@@ -797,21 +810,22 @@ impl TryFrom<program::RelId> for Relations {
 pub fn relid2name(rid: program::RelId) -> ::std::option::Option<&'static str> {
    match rid {
         0 => ::core::option::Option::Some("IngressController"),
-        1 => ::core::option::Option::Some("Ingresses"),
-        2 => ::core::option::Option::Some("IsPublic"),
-        3 => ::core::option::Option::Some("Labels"),
-        4 => ::core::option::Option::Some("Nodes"),
-        5 => ::core::option::Option::Some("NodesToReplicaSet"),
-        6 => ::core::option::Option::Some("Pods"),
-        7 => ::core::option::Option::Some("PodsToReplicaSet"),
-        8 => ::core::option::Option::Some("ReplicaSets"),
-        9 => ::core::option::Option::Some("Selectors"),
-        10 => ::core::option::Option::Some("Services"),
-        11 => ::core::option::Option::Some("corev1::Pods2"),
-        12 => ::core::option::Option::Some("corev1::Pods2Dump"),
-        13 => ::core::option::Option::Some("corev1::Pods2Label"),
-        14 => ::core::option::Option::Some("corev1::TemplateSelectors"),
-        15 => ::core::option::Option::Some("ddlog_std::Singleton"),
+        1 => ::core::option::Option::Some("IsPublic"),
+        2 => ::core::option::Option::Some("NodesInUse"),
+        3 => ::core::option::Option::Some("appsv1::ReplicaSet"),
+        4 => ::core::option::Option::Some("appsv1::ReplicaSetByName"),
+        5 => ::core::option::Option::Some("appsv1::ReplicaSetMatchesPod"),
+        6 => ::core::option::Option::Some("corev1::MatchesPod"),
+        7 => ::core::option::Option::Some("corev1::Pod"),
+        8 => ::core::option::Option::Some("corev1::PodByName"),
+        9 => ::core::option::Option::Some("corev1::Selectors"),
+        10 => ::core::option::Option::Some("corev1::Service"),
+        11 => ::core::option::Option::Some("corev1::ServiceByName"),
+        12 => ::core::option::Option::Some("corev1::ServiceMatchesPod"),
+        13 => ::core::option::Option::Some("ddlog_std::Singleton"),
+        14 => ::core::option::Option::Some("networkingv1::Ingress"),
+        15 => ::core::option::Option::Some("networkingv1::IngressByName"),
+        16 => ::core::option::Option::Some("networkingv1::IngressToService"),
        _  => None
    }
 }
@@ -822,21 +836,22 @@ pub fn relid2cname(rid: program::RelId) -> ::std::option::Option<&'static ::std:
 pub fn rel_name2orig_name(rname: &str) -> ::std::option::Option<&'static str> {
    match rname {
         "IngressController" => ::core::option::Option::Some("IngressController"),
-        "Ingresses" => ::core::option::Option::Some("Ingresses"),
         "IsPublic" => ::core::option::Option::Some("IsPublic"),
-        "Labels" => ::core::option::Option::Some("Labels"),
-        "Nodes" => ::core::option::Option::Some("Nodes"),
-        "NodesToReplicaSet" => ::core::option::Option::Some("NodesToReplicaSet"),
-        "Pods" => ::core::option::Option::Some("Pods"),
-        "PodsToReplicaSet" => ::core::option::Option::Some("PodsToReplicaSet"),
-        "ReplicaSets" => ::core::option::Option::Some("ReplicaSets"),
-        "Selectors" => ::core::option::Option::Some("Selectors"),
-        "Services" => ::core::option::Option::Some("Services"),
-        "corev1::Pods2" => ::core::option::Option::Some("corev1::Pods2"),
-        "corev1::Pods2Dump" => ::core::option::Option::Some("corev1::Pods2Dump"),
-        "corev1::Pods2Label" => ::core::option::Option::Some("corev1::Pods2Label"),
-        "corev1::TemplateSelectors" => ::core::option::Option::Some("corev1::TemplateSelectors"),
+        "NodesInUse" => ::core::option::Option::Some("NodesInUse"),
+        "appsv1::ReplicaSet" => ::core::option::Option::Some("appsv1::ReplicaSet"),
+        "appsv1::ReplicaSetByName" => ::core::option::Option::Some("appsv1::ReplicaSetByName"),
+        "appsv1::ReplicaSetMatchesPod" => ::core::option::Option::Some("appsv1::ReplicaSetMatchesPod"),
+        "corev1::MatchesPod" => ::core::option::Option::Some("corev1::MatchesPod"),
+        "corev1::Pod" => ::core::option::Option::Some("corev1::Pod"),
+        "corev1::PodByName" => ::core::option::Option::Some("corev1::PodByName"),
+        "corev1::Selectors" => ::core::option::Option::Some("corev1::Selectors"),
+        "corev1::Service" => ::core::option::Option::Some("corev1::Service"),
+        "corev1::ServiceByName" => ::core::option::Option::Some("corev1::ServiceByName"),
+        "corev1::ServiceMatchesPod" => ::core::option::Option::Some("corev1::ServiceMatchesPod"),
         "ddlog_std::Singleton" => ::core::option::Option::Some("ddlog_std::Singleton"),
+        "networkingv1::Ingress" => ::core::option::Option::Some("networkingv1::Ingress"),
+        "networkingv1::IngressByName" => ::core::option::Option::Some("networkingv1::IngressByName"),
+        "networkingv1::IngressToService" => ::core::option::Option::Some("networkingv1::IngressToService"),
        _  => None
    }
 }
@@ -844,103 +859,104 @@ pub fn rel_name2orig_name(rname: &str) -> ::std::option::Option<&'static str> {
 pub fn rel_name2orig_cname(rname: &str) -> ::std::option::Option<&'static ::std::ffi::CStr> {
    match rname {
         "IngressController" => Some(::std::ffi::CStr::from_bytes_with_nul(b"IngressController\0") .expect("Unreachable: A null byte was specifically inserted")),
-        "Ingresses" => Some(::std::ffi::CStr::from_bytes_with_nul(b"Ingresses\0") .expect("Unreachable: A null byte was specifically inserted")),
         "IsPublic" => Some(::std::ffi::CStr::from_bytes_with_nul(b"IsPublic\0") .expect("Unreachable: A null byte was specifically inserted")),
-        "Labels" => Some(::std::ffi::CStr::from_bytes_with_nul(b"Labels\0") .expect("Unreachable: A null byte was specifically inserted")),
-        "Nodes" => Some(::std::ffi::CStr::from_bytes_with_nul(b"Nodes\0") .expect("Unreachable: A null byte was specifically inserted")),
-        "NodesToReplicaSet" => Some(::std::ffi::CStr::from_bytes_with_nul(b"NodesToReplicaSet\0") .expect("Unreachable: A null byte was specifically inserted")),
-        "Pods" => Some(::std::ffi::CStr::from_bytes_with_nul(b"Pods\0") .expect("Unreachable: A null byte was specifically inserted")),
-        "PodsToReplicaSet" => Some(::std::ffi::CStr::from_bytes_with_nul(b"PodsToReplicaSet\0") .expect("Unreachable: A null byte was specifically inserted")),
-        "ReplicaSets" => Some(::std::ffi::CStr::from_bytes_with_nul(b"ReplicaSets\0") .expect("Unreachable: A null byte was specifically inserted")),
-        "Selectors" => Some(::std::ffi::CStr::from_bytes_with_nul(b"Selectors\0") .expect("Unreachable: A null byte was specifically inserted")),
-        "Services" => Some(::std::ffi::CStr::from_bytes_with_nul(b"Services\0") .expect("Unreachable: A null byte was specifically inserted")),
-        "corev1::Pods2" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pods2\0") .expect("Unreachable: A null byte was specifically inserted")),
-        "corev1::Pods2Dump" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pods2Dump\0") .expect("Unreachable: A null byte was specifically inserted")),
-        "corev1::Pods2Label" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pods2Label\0") .expect("Unreachable: A null byte was specifically inserted")),
-        "corev1::TemplateSelectors" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::TemplateSelectors\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "NodesInUse" => Some(::std::ffi::CStr::from_bytes_with_nul(b"NodesInUse\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "appsv1::ReplicaSet" => Some(::std::ffi::CStr::from_bytes_with_nul(b"appsv1::ReplicaSet\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "appsv1::ReplicaSetByName" => Some(::std::ffi::CStr::from_bytes_with_nul(b"appsv1::ReplicaSetByName\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "appsv1::ReplicaSetMatchesPod" => Some(::std::ffi::CStr::from_bytes_with_nul(b"appsv1::ReplicaSetMatchesPod\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "corev1::MatchesPod" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::MatchesPod\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "corev1::Pod" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pod\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "corev1::PodByName" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::PodByName\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "corev1::Selectors" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::Selectors\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "corev1::Service" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::Service\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "corev1::ServiceByName" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::ServiceByName\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "corev1::ServiceMatchesPod" => Some(::std::ffi::CStr::from_bytes_with_nul(b"corev1::ServiceMatchesPod\0") .expect("Unreachable: A null byte was specifically inserted")),
         "ddlog_std::Singleton" => Some(::std::ffi::CStr::from_bytes_with_nul(b"ddlog_std::Singleton\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "networkingv1::Ingress" => Some(::std::ffi::CStr::from_bytes_with_nul(b"networkingv1::Ingress\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "networkingv1::IngressByName" => Some(::std::ffi::CStr::from_bytes_with_nul(b"networkingv1::IngressByName\0") .expect("Unreachable: A null byte was specifically inserted")),
+        "networkingv1::IngressToService" => Some(::std::ffi::CStr::from_bytes_with_nul(b"networkingv1::IngressToService\0") .expect("Unreachable: A null byte was specifically inserted")),
        _  => None
    }
 }
 pub fn orig_rel_name2name(rname: &str) -> ::std::option::Option<&'static str> {
    match rname {
         "IngressController" => ::core::option::Option::Some("IngressController"),
-        "Ingresses" => ::core::option::Option::Some("Ingresses"),
         "IsPublic" => ::core::option::Option::Some("IsPublic"),
-        "Labels" => ::core::option::Option::Some("Labels"),
-        "Nodes" => ::core::option::Option::Some("Nodes"),
-        "NodesToReplicaSet" => ::core::option::Option::Some("NodesToReplicaSet"),
-        "Pods" => ::core::option::Option::Some("Pods"),
-        "PodsToReplicaSet" => ::core::option::Option::Some("PodsToReplicaSet"),
-        "ReplicaSets" => ::core::option::Option::Some("ReplicaSets"),
-        "Selectors" => ::core::option::Option::Some("Selectors"),
-        "Services" => ::core::option::Option::Some("Services"),
-        "corev1::Pods2" => ::core::option::Option::Some("corev1::Pods2"),
-        "corev1::Pods2Dump" => ::core::option::Option::Some("corev1::Pods2Dump"),
-        "corev1::Pods2Label" => ::core::option::Option::Some("corev1::Pods2Label"),
-        "corev1::TemplateSelectors" => ::core::option::Option::Some("corev1::TemplateSelectors"),
+        "NodesInUse" => ::core::option::Option::Some("NodesInUse"),
+        "appsv1::ReplicaSet" => ::core::option::Option::Some("appsv1::ReplicaSet"),
+        "appsv1::ReplicaSetByName" => ::core::option::Option::Some("appsv1::ReplicaSetByName"),
+        "appsv1::ReplicaSetMatchesPod" => ::core::option::Option::Some("appsv1::ReplicaSetMatchesPod"),
+        "corev1::MatchesPod" => ::core::option::Option::Some("corev1::MatchesPod"),
+        "corev1::Pod" => ::core::option::Option::Some("corev1::Pod"),
+        "corev1::PodByName" => ::core::option::Option::Some("corev1::PodByName"),
+        "corev1::Selectors" => ::core::option::Option::Some("corev1::Selectors"),
+        "corev1::Service" => ::core::option::Option::Some("corev1::Service"),
+        "corev1::ServiceByName" => ::core::option::Option::Some("corev1::ServiceByName"),
+        "corev1::ServiceMatchesPod" => ::core::option::Option::Some("corev1::ServiceMatchesPod"),
         "ddlog_std::Singleton" => ::core::option::Option::Some("ddlog_std::Singleton"),
+        "networkingv1::Ingress" => ::core::option::Option::Some("networkingv1::Ingress"),
+        "networkingv1::IngressByName" => ::core::option::Option::Some("networkingv1::IngressByName"),
+        "networkingv1::IngressToService" => ::core::option::Option::Some("networkingv1::IngressToService"),
        _  => None
    }
 }
 /// A map of `RelId`s to their name as an `&'static str`
 pub static RELIDMAP: ::once_cell::sync::Lazy<::fnv::FnvHashMap<Relations, &'static str>> =
     ::once_cell::sync::Lazy::new(|| {
-        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(16, ::fnv::FnvBuildHasher::default());
+        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(17, ::fnv::FnvBuildHasher::default());
         map.insert(Relations::IngressController, "IngressController");
-        map.insert(Relations::Ingresses, "Ingresses");
         map.insert(Relations::IsPublic, "IsPublic");
-        map.insert(Relations::Labels, "Labels");
-        map.insert(Relations::Nodes, "Nodes");
-        map.insert(Relations::NodesToReplicaSet, "NodesToReplicaSet");
-        map.insert(Relations::Pods, "Pods");
-        map.insert(Relations::PodsToReplicaSet, "PodsToReplicaSet");
-        map.insert(Relations::ReplicaSets, "ReplicaSets");
-        map.insert(Relations::Selectors, "Selectors");
-        map.insert(Relations::Services, "Services");
-        map.insert(Relations::corev1_Pods2, "corev1::Pods2");
-        map.insert(Relations::corev1_Pods2Dump, "corev1::Pods2Dump");
-        map.insert(Relations::corev1_Pods2Label, "corev1::Pods2Label");
-        map.insert(Relations::corev1_TemplateSelectors, "corev1::TemplateSelectors");
+        map.insert(Relations::NodesInUse, "NodesInUse");
+        map.insert(Relations::appsv1_ReplicaSet, "appsv1::ReplicaSet");
+        map.insert(Relations::appsv1_ReplicaSetByName, "appsv1::ReplicaSetByName");
+        map.insert(Relations::appsv1_ReplicaSetMatchesPod, "appsv1::ReplicaSetMatchesPod");
+        map.insert(Relations::corev1_MatchesPod, "corev1::MatchesPod");
+        map.insert(Relations::corev1_Pod, "corev1::Pod");
+        map.insert(Relations::corev1_PodByName, "corev1::PodByName");
+        map.insert(Relations::corev1_Selectors, "corev1::Selectors");
+        map.insert(Relations::corev1_Service, "corev1::Service");
+        map.insert(Relations::corev1_ServiceByName, "corev1::ServiceByName");
+        map.insert(Relations::corev1_ServiceMatchesPod, "corev1::ServiceMatchesPod");
         map.insert(Relations::ddlog_std_Singleton, "ddlog_std::Singleton");
+        map.insert(Relations::networkingv1_Ingress, "networkingv1::Ingress");
+        map.insert(Relations::networkingv1_IngressByName, "networkingv1::IngressByName");
+        map.insert(Relations::networkingv1_IngressToService, "networkingv1::IngressToService");
         map
     });
 /// A map of `RelId`s to their name as an `&'static CStr`
 #[cfg(feature = "c_api")]
 pub static RELIDMAPC: ::once_cell::sync::Lazy<::fnv::FnvHashMap<program::RelId, &'static ::std::ffi::CStr>> =
     ::once_cell::sync::Lazy::new(|| {
-        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(16, ::fnv::FnvBuildHasher::default());
+        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(17, ::fnv::FnvBuildHasher::default());
         map.insert(0, ::std::ffi::CStr::from_bytes_with_nul(b"IngressController\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(1, ::std::ffi::CStr::from_bytes_with_nul(b"Ingresses\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(2, ::std::ffi::CStr::from_bytes_with_nul(b"IsPublic\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(3, ::std::ffi::CStr::from_bytes_with_nul(b"Labels\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(4, ::std::ffi::CStr::from_bytes_with_nul(b"Nodes\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(5, ::std::ffi::CStr::from_bytes_with_nul(b"NodesToReplicaSet\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(6, ::std::ffi::CStr::from_bytes_with_nul(b"Pods\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(7, ::std::ffi::CStr::from_bytes_with_nul(b"PodsToReplicaSet\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(8, ::std::ffi::CStr::from_bytes_with_nul(b"ReplicaSets\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(9, ::std::ffi::CStr::from_bytes_with_nul(b"Selectors\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(10, ::std::ffi::CStr::from_bytes_with_nul(b"Services\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(11, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pods2\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(12, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pods2Dump\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(13, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pods2Label\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(14, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::TemplateSelectors\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(15, ::std::ffi::CStr::from_bytes_with_nul(b"ddlog_std::Singleton\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(1, ::std::ffi::CStr::from_bytes_with_nul(b"IsPublic\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(2, ::std::ffi::CStr::from_bytes_with_nul(b"NodesInUse\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(3, ::std::ffi::CStr::from_bytes_with_nul(b"appsv1::ReplicaSet\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(4, ::std::ffi::CStr::from_bytes_with_nul(b"appsv1::ReplicaSetByName\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(5, ::std::ffi::CStr::from_bytes_with_nul(b"appsv1::ReplicaSetMatchesPod\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(6, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::MatchesPod\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(7, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::Pod\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(8, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::PodByName\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(9, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::Selectors\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(10, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::Service\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(11, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::ServiceByName\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(12, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::ServiceMatchesPod\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(13, ::std::ffi::CStr::from_bytes_with_nul(b"ddlog_std::Singleton\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(14, ::std::ffi::CStr::from_bytes_with_nul(b"networkingv1::Ingress\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(15, ::std::ffi::CStr::from_bytes_with_nul(b"networkingv1::IngressByName\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(16, ::std::ffi::CStr::from_bytes_with_nul(b"networkingv1::IngressToService\0").expect("Unreachable: A null byte was specifically inserted"));
         map
     });
 /// A map of input `Relations`s to their name as an `&'static str`
 pub static INPUT_RELIDMAP: ::once_cell::sync::Lazy<::fnv::FnvHashMap<Relations, &'static str>> =
     ::once_cell::sync::Lazy::new(|| {
-        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(9, ::fnv::FnvBuildHasher::default());
+        let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(6, ::fnv::FnvBuildHasher::default());
         map.insert(Relations::IngressController, "IngressController");
-        map.insert(Relations::Ingresses, "Ingresses");
-        map.insert(Relations::Labels, "Labels");
-        map.insert(Relations::Pods, "Pods");
-        map.insert(Relations::ReplicaSets, "ReplicaSets");
-        map.insert(Relations::Selectors, "Selectors");
-        map.insert(Relations::Services, "Services");
-        map.insert(Relations::corev1_Pods2, "corev1::Pods2");
-        map.insert(Relations::corev1_TemplateSelectors, "corev1::TemplateSelectors");
+        map.insert(Relations::appsv1_ReplicaSet, "appsv1::ReplicaSet");
+        map.insert(Relations::corev1_Pod, "corev1::Pod");
+        map.insert(Relations::corev1_Selectors, "corev1::Selectors");
+        map.insert(Relations::corev1_Service, "corev1::Service");
+        map.insert(Relations::networkingv1_Ingress, "networkingv1::Ingress");
         map
     });
 /// A map of output `Relations`s to their name as an `&'static str`
@@ -948,19 +964,19 @@ pub static OUTPUT_RELIDMAP: ::once_cell::sync::Lazy<::fnv::FnvHashMap<Relations,
     ::once_cell::sync::Lazy::new(|| {
         let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(6, ::fnv::FnvBuildHasher::default());
         map.insert(Relations::IsPublic, "IsPublic");
-        map.insert(Relations::Nodes, "Nodes");
-        map.insert(Relations::NodesToReplicaSet, "NodesToReplicaSet");
-        map.insert(Relations::PodsToReplicaSet, "PodsToReplicaSet");
-        map.insert(Relations::corev1_Pods2Dump, "corev1::Pods2Dump");
-        map.insert(Relations::corev1_Pods2Label, "corev1::Pods2Label");
+        map.insert(Relations::NodesInUse, "NodesInUse");
+        map.insert(Relations::appsv1_ReplicaSetMatchesPod, "appsv1::ReplicaSetMatchesPod");
+        map.insert(Relations::corev1_MatchesPod, "corev1::MatchesPod");
+        map.insert(Relations::corev1_ServiceMatchesPod, "corev1::ServiceMatchesPod");
+        map.insert(Relations::networkingv1_IngressToService, "networkingv1::IngressToService");
         map
     });
 impl TryFrom<&str> for Indexes {
     type Error = ();
     fn try_from(iname: &str) -> ::std::result::Result<Self, ()> {
          match iname {
-        "ToNodes" => Ok(Indexes::ToNodes),
-        "ToReplicaSet" => Ok(Indexes::ToReplicaSet),
+        "corev1::MatchesPod" => Ok(Indexes::corev1_MatchesPod),
+        "corev1::MatchesPodAll" => Ok(Indexes::corev1_MatchesPodAll),
              _  => Err(())
          }
     }
@@ -969,16 +985,16 @@ impl TryFrom<program::IdxId> for Indexes {
     type Error = ();
     fn try_from(iid: program::IdxId) -> ::core::result::Result<Self, ()> {
          match iid {
-        0 => Ok(Indexes::ToNodes),
-        1 => Ok(Indexes::ToReplicaSet),
+        0 => Ok(Indexes::corev1_MatchesPod),
+        1 => Ok(Indexes::corev1_MatchesPodAll),
              _  => Err(())
          }
     }
 }
 pub fn indexid2name(iid: program::IdxId) -> ::std::option::Option<&'static str> {
    match iid {
-        0 => ::core::option::Option::Some("ToNodes"),
-        1 => ::core::option::Option::Some("ToReplicaSet"),
+        0 => ::core::option::Option::Some("corev1::MatchesPod"),
+        1 => ::core::option::Option::Some("corev1::MatchesPodAll"),
        _  => None
    }
 }
@@ -990,8 +1006,8 @@ pub fn indexid2cname(iid: program::IdxId) -> ::std::option::Option<&'static ::st
 pub static IDXIDMAP: ::once_cell::sync::Lazy<::fnv::FnvHashMap<Indexes, &'static str>> =
     ::once_cell::sync::Lazy::new(|| {
         let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(2, ::fnv::FnvBuildHasher::default());
-        map.insert(Indexes::ToNodes, "ToNodes");
-        map.insert(Indexes::ToReplicaSet, "ToReplicaSet");
+        map.insert(Indexes::corev1_MatchesPod, "corev1::MatchesPod");
+        map.insert(Indexes::corev1_MatchesPodAll, "corev1::MatchesPodAll");
         map
     });
 /// A map of `IdxId`s to their name as an `&'static CStr`
@@ -999,8 +1015,8 @@ pub static IDXIDMAP: ::once_cell::sync::Lazy<::fnv::FnvHashMap<Indexes, &'static
 pub static IDXIDMAPC: ::once_cell::sync::Lazy<::fnv::FnvHashMap<program::IdxId, &'static ::std::ffi::CStr>> =
     ::once_cell::sync::Lazy::new(|| {
         let mut map = ::fnv::FnvHashMap::with_capacity_and_hasher(2, ::fnv::FnvBuildHasher::default());
-        map.insert(0, ::std::ffi::CStr::from_bytes_with_nul(b"ToNodes\0").expect("Unreachable: A null byte was specifically inserted"));
-        map.insert(1, ::std::ffi::CStr::from_bytes_with_nul(b"ToReplicaSet\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(0, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::MatchesPod\0").expect("Unreachable: A null byte was specifically inserted"));
+        map.insert(1, ::std::ffi::CStr::from_bytes_with_nul(b"corev1::MatchesPodAll\0").expect("Unreachable: A null byte was specifically inserted"));
         map
     });
 pub fn relval_from_record(relation: Relations, record: &::differential_datalog::record::Record) -> ::std::result::Result<::differential_datalog::ddval::DDValue, ::std::string::String> {
@@ -1008,56 +1024,71 @@ pub fn relval_from_record(relation: Relations, record: &::differential_datalog::
         Relations::IngressController => {
             Ok(<types::IngressController as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
-        Relations::Ingresses => {
-            Ok(<types::Ingresses as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
-        },
         Relations::IsPublic => {
             Ok(<types::IsPublic as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
-        Relations::Labels => {
-            Ok(<types::Labels as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        Relations::NodesInUse => {
+            Ok(<types::NodesInUse as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
-        Relations::Nodes => {
-            Ok(<types::Nodes as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        Relations::appsv1_ReplicaSet => {
+            Ok(<ddlog_std::Ref<types__appsv1::ReplicaSet> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
-        Relations::NodesToReplicaSet => {
-            Ok(<types::NodesToReplicaSet as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        Relations::appsv1_ReplicaSetByName => {
+            Ok(<types__appsv1::ReplicaSetByName as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
-        Relations::Pods => {
-            Ok(<types::Pods as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        Relations::appsv1_ReplicaSetMatchesPod => {
+            Ok(<types__appsv1::ReplicaSetMatchesPod as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
-        Relations::PodsToReplicaSet => {
-            Ok(<types::PodsToReplicaSet as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        Relations::corev1_MatchesPod => {
+            Ok(<types__corev1::MatchesPod as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
-        Relations::ReplicaSets => {
-            Ok(<types::ReplicaSets as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        Relations::corev1_Pod => {
+            Ok(<ddlog_std::Ref<types__corev1::Pod> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
-        Relations::Selectors => {
-            Ok(<types::Selectors as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        Relations::corev1_PodByName => {
+            Ok(<types__corev1::PodByName as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
-        Relations::Services => {
-            Ok(<types::Services as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        Relations::corev1_Selectors => {
+            Ok(<types__corev1::Selectors as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
-        Relations::corev1_Pods2 => {
-            Ok(<ddlog_std::Ref<types__corev1::Pods2> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        Relations::corev1_Service => {
+            Ok(<ddlog_std::Ref<types__corev1::Service> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
-        Relations::corev1_Pods2Dump => {
-            Ok(<types__corev1::Pods2Dump as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        Relations::corev1_ServiceByName => {
+            Ok(<types__corev1::ServiceByName as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
-        Relations::corev1_Pods2Label => {
-            Ok(<types__corev1::Pods2Label as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
-        },
-        Relations::corev1_TemplateSelectors => {
-            Ok(<types__corev1::TemplateSelectors as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        Relations::corev1_ServiceMatchesPod => {
+            Ok(<types__corev1::ServiceMatchesPod as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
         Relations::ddlog_std_Singleton => {
             Ok(<ddlog_std::Singleton as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        },
+        Relations::networkingv1_Ingress => {
+            Ok(<ddlog_std::Ref<types__networkingv1::Ingress> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        },
+        Relations::networkingv1_IngressByName => {
+            Ok(<types__networkingv1::IngressByName as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        },
+        Relations::networkingv1_IngressToService => {
+            Ok(<types__networkingv1::IngressToService as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         }
     }
 }
 pub fn relkey_from_record(relation: Relations, record: &::differential_datalog::record::Record) -> ::std::result::Result<::differential_datalog::ddval::DDValue, ::std::string::String> {
     match relation {
-        Relations::corev1_Pods2 => {
+        Relations::appsv1_ReplicaSet => {
+            Ok(<ddlog_std::tuple2<String, String> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        },
+        Relations::corev1_Pod => {
+            Ok(<ddlog_std::tuple2<String, String> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        },
+        Relations::corev1_Selectors => {
+            Ok(<types__corev1::Selectors as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        },
+        Relations::corev1_Service => {
+            Ok(<ddlog_std::tuple2<String, String> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        },
+        Relations::networkingv1_Ingress => {
             Ok(<ddlog_std::tuple2<String, String> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         }
         _ => Err(format!("relation {:?} does not have a primary key", relation)),
@@ -1065,49 +1096,50 @@ pub fn relkey_from_record(relation: Relations, record: &::differential_datalog::
 }
 pub fn idxkey_from_record(idx: Indexes, record: &::differential_datalog::record::Record) -> ::std::result::Result<::differential_datalog::ddval::DDValue, ::std::string::String> {
     match idx {
-        Indexes::ToNodes => {
-            Ok(<ddlog_std::tuple2<String, String> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        Indexes::corev1_MatchesPod => {
+            Ok(<ddlog_std::tuple2<types__selectors::LabelSelector, String> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         },
-        Indexes::ToReplicaSet => {
-            Ok(<ddlog_std::tuple2<String, String> as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
+        Indexes::corev1_MatchesPodAll => {
+            Ok(<types__selectors::LabelSelector as ::differential_datalog::record::FromRecord>::from_record(record)?.into_ddvalue())
         }
     }
 }
 pub fn indexes2arrid(idx: Indexes) -> program::ArrId {
     match idx {
-        Indexes::ToNodes => ( 5, 0),
-        Indexes::ToReplicaSet => ( 7, 1),
+        Indexes::corev1_MatchesPod => ( 6, 0),
+        Indexes::corev1_MatchesPodAll => ( 6, 1),
     }
 }
 #[derive(Copy,Clone,Debug,PartialEq,Eq,Hash)]
 pub enum Relations {
     IngressController = 0,
-    Ingresses = 1,
-    IsPublic = 2,
-    Labels = 3,
-    Nodes = 4,
-    NodesToReplicaSet = 5,
-    Pods = 6,
-    PodsToReplicaSet = 7,
-    ReplicaSets = 8,
-    Selectors = 9,
-    Services = 10,
-    corev1_Pods2 = 11,
-    corev1_Pods2Dump = 12,
-    corev1_Pods2Label = 13,
-    corev1_TemplateSelectors = 14,
-    ddlog_std_Singleton = 15
+    IsPublic = 1,
+    NodesInUse = 2,
+    appsv1_ReplicaSet = 3,
+    appsv1_ReplicaSetByName = 4,
+    appsv1_ReplicaSetMatchesPod = 5,
+    corev1_MatchesPod = 6,
+    corev1_Pod = 7,
+    corev1_PodByName = 8,
+    corev1_Selectors = 9,
+    corev1_Service = 10,
+    corev1_ServiceByName = 11,
+    corev1_ServiceMatchesPod = 12,
+    ddlog_std_Singleton = 13,
+    networkingv1_Ingress = 14,
+    networkingv1_IngressByName = 15,
+    networkingv1_IngressToService = 16
 }
 #[derive(Copy,Clone,Debug,PartialEq,Eq,Hash)]
 pub enum Indexes {
-    ToNodes = 0,
-    ToReplicaSet = 1
+    corev1_MatchesPod = 0,
+    corev1_MatchesPodAll = 1
 }
 impl_trait_d3log!();
 pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> program::Program {
     let IngressController = ::differential_datalog::program::Relation {
         name: ::std::borrow::Cow::Borrowed("IngressController"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 23, 1, 24, 1),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 7, 1, 9, 1),
         input: true,
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
@@ -1116,220 +1148,174 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
         rules: vec![
         ],
         arrangements: vec![
-            types::__Arng_IngressController_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(IngressController{.namespace=(_0: string), .name=(_1: string)}: IngressController)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 49, 3, 49, 39)], &[])),
+            types::__Arng_IngressController_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(IngressController{.ns=_0, .name=_1, .className=(_: string)}: IngressController)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 21, 3, 21, 72)], &[])),
         ],
         change_cb: ::core::option::Option::None,
     };
-    let Ingresses = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("Ingresses"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 22, 1, 23, 1),
+    let appsv1_ReplicaSet = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("appsv1::ReplicaSet"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("appsv1.dl", 11, 1, 14, 1),
         input: true,
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
-        key_func: ::core::option::Option::None,
-        id: 1,
-        rules: vec![
-        ],
-        arrangements: vec![
-            types::__Arng_Ingresses_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Ingresses{.namespace=(_0: string), .name=(_: string), .controller=(_1: string), .serviceName=(_: string)}: Ingresses)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 50, 3, 50, 39)], &[])),
-        ],
-        change_cb: ::core::option::Option::None,
-    };
-    let Labels = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("Labels"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 16, 1, 17, 1),
-        input: true,
-        distinct: false,
-        caching_mode: ::differential_datalog::program::CachingMode::Set,
-        key_func: ::core::option::Option::None,
+        key_func: ::core::option::Option::Some(types__appsv1::__Key_appsv1_ReplicaSet),
         id: 3,
         rules: vec![
         ],
         arrangements: vec![
-            types::__Arng_Labels_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Labels{.k=(_0: string), .v=(_1: string), .ty=(Pod{}: Object), .namespace=(_2: string), .name=(_: string)}: Labels)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 33, 3, 33, 40), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 52, 3, 52, 40), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 45, 3, 45, 40)], &[])),
         ],
         change_cb: ::core::option::Option::None,
     };
-    let Pods = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("Pods"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 19, 1, 21, 1),
-        input: true,
-        distinct: false,
-        caching_mode: ::differential_datalog::program::CachingMode::Set,
-        key_func: ::core::option::Option::None,
-        id: 6,
-        rules: vec![
-        ],
-        arrangements: vec![
-            types::__Arng_Pods_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Pods{.namespace=(_0: string), .name=(_1: string), .node=(_: string)}: Pods)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 39, 3, 39, 29)], &[])),
-        ],
-        change_cb: ::core::option::Option::None,
-    };
-    let Nodes = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("Nodes"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 26, 1, 27, 1),
+    let appsv1_ReplicaSetByName = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("appsv1::ReplicaSetByName"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("appsv1.dl", 14, 1, 15, 1),
         input: false,
-        distinct: true,
+        distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
         key_func: ::core::option::Option::None,
         id: 4,
         rules: vec![
-            types::__Rule_Nodes_0.clone(),
+            types__appsv1::__Rule_appsv1_ReplicaSetByName_0.clone(),
+        ],
+        arrangements: vec![
+            types__appsv1::__Arng_appsv1_ReplicaSetByName_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(appsv1::ReplicaSetByName{.rs=(_: ddlog_std::Ref<appsv1::ReplicaSet>), .ns=(_0: string), .name=(_: string)}: appsv1::ReplicaSetByName)"), &[::ddlog_profiler::SourcePosition::new_range("appsv1.dl", 22, 3, 22, 30)], &[])),
+        ],
+        change_cb: ::core::option::Option::None,
+    };
+    let corev1_Pod = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("corev1::Pod"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 18, 1, 21, 1),
+        input: true,
+        distinct: false,
+        caching_mode: ::differential_datalog::program::CachingMode::Set,
+        key_func: ::core::option::Option::Some(types__corev1::__Key_corev1_Pod),
+        id: 7,
+        rules: vec![
+        ],
+        arrangements: vec![
+        ],
+        change_cb: ::core::option::Option::None,
+    };
+    let NodesInUse = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("NodesInUse"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 9, 1, 10, 1),
+        input: false,
+        distinct: true,
+        caching_mode: ::differential_datalog::program::CachingMode::Set,
+        key_func: ::core::option::Option::None,
+        id: 2,
+        rules: vec![
+            types::__Rule_NodesInUse_0.clone(),
         ],
         arrangements: vec![
         ],
         change_cb: ::core::option::Option::Some(::std::sync::Arc::clone(&__update_cb)),
     };
-    let ReplicaSets = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("ReplicaSets"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 24, 1, 26, 1),
-        input: true,
+    let corev1_PodByName = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("corev1::PodByName"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 21, 1, 22, 1),
+        input: false,
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
         key_func: ::core::option::Option::None,
         id: 8,
         rules: vec![
+            types__corev1::__Rule_corev1_PodByName_0.clone(),
         ],
         arrangements: vec![
+            types__corev1::__Arng_corev1_PodByName_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(corev1::PodByName{.pod=(_: ddlog_std::Ref<corev1::Pod>), .ns=(_0: string), .name=(_: string)}: corev1::PodByName)"), &[::ddlog_profiler::SourcePosition::new_range("corev1.dl", 69, 3, 69, 24), ::ddlog_profiler::SourcePosition::new_range("appsv1.dl", 23, 3, 23, 24)], &[])),
+            types__corev1::__Arng_corev1_PodByName_1.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(corev1::PodByName{.pod=(_: ddlog_std::Ref<corev1::Pod>), .ns=(_: string), .name=(_: string)}: corev1::PodByName)"), &[::ddlog_profiler::SourcePosition::new_range("corev1.dl", 38, 3, 38, 24)], &[])),
         ],
         change_cb: ::core::option::Option::None,
     };
-    let Selectors = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("Selectors"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 17, 1, 19, 1),
-        input: true,
-        distinct: false,
-        caching_mode: ::differential_datalog::program::CachingMode::Set,
-        key_func: ::core::option::Option::None,
-        id: 9,
-        rules: vec![
-        ],
-        arrangements: vec![
-            types::__Arng_Selectors_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Selectors{.k=(_: string), .v=(_: string), .ty=(Service{}: Object), .namespace=(_0: string), .name=(_1: string)}: Selectors)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 51, 3, 51, 47), ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 44, 3, 44, 55)], &[])),
-            types::__Arng_Selectors_1.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Selectors{.k=(_0: string), .v=(_1: string), .ty=(ReplicaSet{}: Object), .namespace=(_2: string), .name=(_: string)}: Selectors)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 32, 3, 32, 49)], &[])),
-        ],
-        change_cb: ::core::option::Option::None,
-    };
-    let PodsToReplicaSet = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("PodsToReplicaSet"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 29, 1, 30, 1),
-        input: false,
-        distinct: true,
-        caching_mode: ::differential_datalog::program::CachingMode::Set,
-        key_func: ::core::option::Option::None,
-        id: 7,
-        rules: vec![
-            types::__Rule_PodsToReplicaSet_0.clone(),
-        ],
-        arrangements: vec![
-            types::__Arng_PodsToReplicaSet_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(PodsToReplicaSet{.namespace=(_0: string), .rs=(_: string), .pod=(_1: string)}: PodsToReplicaSet)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 38, 3, 38, 39)], &[])),
-            types::__Arng_PodsToReplicaSet_1.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(PodsToReplicaSet{.namespace=_0, .rs=(_: string), .pod=_1}: PodsToReplicaSet)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 30, 1, 31, 1)], &[::std::borrow::Cow::Borrowed("ToReplicaSet")])),
-        ],
-        change_cb: ::core::option::Option::Some(::std::sync::Arc::clone(&__update_cb)),
-    };
-    let NodesToReplicaSet = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("NodesToReplicaSet"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 35, 1, 36, 1),
+    let appsv1_ReplicaSetMatchesPod = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("appsv1::ReplicaSetMatchesPod"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("appsv1.dl", 20, 1, 21, 1),
         input: false,
         distinct: true,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
         key_func: ::core::option::Option::None,
         id: 5,
         rules: vec![
-            types::__Rule_NodesToReplicaSet_0.clone(),
+            types__appsv1::__Rule_appsv1_ReplicaSetMatchesPod_0.clone(),
         ],
         arrangements: vec![
-            types::__Arng_NodesToReplicaSet_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(NodesToReplicaSet{.namespace=_0, .rs=_1, .node=(_: string)}: NodesToReplicaSet)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 36, 1, 37, 1)], &[::std::borrow::Cow::Borrowed("ToNodes")])),
         ],
         change_cb: ::core::option::Option::Some(::std::sync::Arc::clone(&__update_cb)),
     };
-    let Services = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("Services"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 21, 1, 22, 1),
+    let corev1_Selectors = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("corev1::Selectors"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 28, 1, 31, 1),
         input: true,
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
+        key_func: ::core::option::Option::Some(types__corev1::__Key_corev1_Selectors),
+        id: 9,
+        rules: vec![
+        ],
+        arrangements: vec![
+            types__corev1::__Arng_corev1_Selectors_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(corev1::Selectors{.s=(_: selectors::LabelSelector)}: corev1::Selectors)"), &[::ddlog_profiler::SourcePosition::new_range("corev1.dl", 37, 3, 37, 22)], &[])),
+        ],
+        change_cb: ::core::option::Option::None,
+    };
+    let corev1_MatchesPod = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("corev1::MatchesPod"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 33, 1, 34, 1),
+        input: false,
+        distinct: true,
+        caching_mode: ::differential_datalog::program::CachingMode::Set,
         key_func: ::core::option::Option::None,
+        id: 6,
+        rules: vec![
+            types__corev1::__Rule_corev1_MatchesPod_0.clone(),
+        ],
+        arrangements: vec![
+            types__corev1::__Arng_corev1_MatchesPod_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(corev1::MatchesPod{.selector=_0, .namespace=_1, .pod=(_: ddlog_std::Ref<corev1::Pod>)}: corev1::MatchesPod)"), &[::ddlog_profiler::SourcePosition::new_range("corev1.dl", 34, 1, 35, 1)], &[::std::borrow::Cow::Borrowed("corev1::MatchesPod")])),
+            types__corev1::__Arng_corev1_MatchesPod_1.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(corev1::MatchesPod{.selector=_0, .namespace=(_: string), .pod=(_: ddlog_std::Ref<corev1::Pod>)}: corev1::MatchesPod)"), &[::ddlog_profiler::SourcePosition::new_range("corev1.dl", 35, 1, 36, 1)], &[::std::borrow::Cow::Borrowed("corev1::MatchesPodAll")])),
+        ],
+        change_cb: ::core::option::Option::Some(::std::sync::Arc::clone(&__update_cb)),
+    };
+    let corev1_Service = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("corev1::Service"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 57, 1, 60, 1),
+        input: true,
+        distinct: false,
+        caching_mode: ::differential_datalog::program::CachingMode::Set,
+        key_func: ::core::option::Option::Some(types__corev1::__Key_corev1_Service),
         id: 10,
         rules: vec![
         ],
         arrangements: vec![
-            types::__Arng_Services_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(Services{.namespace=(_0: string), .name=(_1: string), .ty=(LoadBalancer{}: ServiceType)}: Services)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 43, 3, 43, 49)], &[])),
         ],
         change_cb: ::core::option::Option::None,
     };
-    let IsPublic = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("IsPublic"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 41, 1, 42, 1),
+    let corev1_ServiceByName = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("corev1::ServiceByName"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 60, 1, 61, 1),
         input: false,
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
         key_func: ::core::option::Option::None,
-        id: 2,
-        rules: vec![
-            types::__Rule_IsPublic_0.clone(),
-            types::__Rule_IsPublic_1.clone(),
-        ],
-        arrangements: vec![
-            types::__Arng_IsPublic_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(IsPublic{.namespace=(_0: string), .pod=(_1: string)}: IsPublic)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 48, 3, 48, 30)], &[])),
-        ],
-        change_cb: ::core::option::Option::Some(::std::sync::Arc::clone(&__update_cb)),
-    };
-    let corev1_Pods2 = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("corev1::Pods2"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 18, 1, 21, 1),
-        input: true,
-        distinct: false,
-        caching_mode: ::differential_datalog::program::CachingMode::Set,
-        key_func: ::core::option::Option::Some(types__corev1::__Key_corev1_Pods2),
         id: 11,
         rules: vec![
+            types__corev1::__Rule_corev1_ServiceByName_0.clone(),
         ],
         arrangements: vec![
-            types__corev1::__Arng_corev1_Pods2_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(_: ddlog_std::Ref<corev1::Pods2>)"), &[::ddlog_profiler::SourcePosition::new_range("corev1.dl", 33, 3, 33, 13)], &[])),
+            types__corev1::__Arng_corev1_ServiceByName_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(corev1::ServiceByName{.svc=(_: ddlog_std::Ref<corev1::Service>), .ns=(_0: string), .name=(_: string)}: corev1::ServiceByName)"), &[::ddlog_profiler::SourcePosition::new_range("corev1.dl", 68, 3, 68, 28)], &[])),
+            types__corev1::__Arng_corev1_ServiceByName_1.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(corev1::ServiceByName{.svc=(_: ddlog_std::Ref<corev1::Service>), .ns=_0, .name=(_1: string)}: corev1::ServiceByName)"), &[::ddlog_profiler::SourcePosition::new_range("networkingv1.dl", 33, 3, 33, 50)], &[])),
         ],
         change_cb: ::core::option::Option::None,
     };
-    let corev1_Pods2Dump = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("corev1::Pods2Dump"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 36, 1, 37, 1),
+    let corev1_ServiceMatchesPod = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("corev1::ServiceMatchesPod"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 66, 1, 67, 1),
         input: false,
-        distinct: false,
+        distinct: true,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
         key_func: ::core::option::Option::None,
         id: 12,
         rules: vec![
-            types__corev1::__Rule_corev1_Pods2Dump_0.clone(),
-        ],
-        arrangements: vec![
-        ],
-        change_cb: ::core::option::Option::Some(::std::sync::Arc::clone(&__update_cb)),
-    };
-    let corev1_TemplateSelectors = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("corev1::TemplateSelectors"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 27, 1, 28, 1),
-        input: true,
-        distinct: false,
-        caching_mode: ::differential_datalog::program::CachingMode::Set,
-        key_func: ::core::option::Option::None,
-        id: 14,
-        rules: vec![
-        ],
-        arrangements: vec![
-            types__corev1::__Arng_corev1_TemplateSelectors_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(corev1::TemplateSelectors{.s=(_: selectors::LabelSelector)}: corev1::TemplateSelectors)"), &[::ddlog_profiler::SourcePosition::new_range("corev1.dl", 32, 3, 32, 30)], &[])),
-        ],
-        change_cb: ::core::option::Option::None,
-    };
-    let corev1_Pods2Label = ::differential_datalog::program::Relation {
-        name: ::std::borrow::Cow::Borrowed("corev1::Pods2Label"),
-        source_pos: ::ddlog_profiler::SourcePosition::new_range("corev1.dl", 30, 1, 31, 1),
-        input: false,
-        distinct: false,
-        caching_mode: ::differential_datalog::program::CachingMode::Set,
-        key_func: ::core::option::Option::None,
-        id: 13,
-        rules: vec![
-            types__corev1::__Rule_corev1_Pods2Label_0.clone(),
+            types__corev1::__Rule_corev1_ServiceMatchesPod_0.clone(),
         ],
         arrangements: vec![
         ],
@@ -1342,34 +1328,96 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
         distinct: false,
         caching_mode: ::differential_datalog::program::CachingMode::Set,
         key_func: ::core::option::Option::None,
-        id: 15,
+        id: 13,
         rules: vec![
         ],
         arrangements: vec![
         ],
         change_cb: ::core::option::Option::None,
     };
+    let networkingv1_Ingress = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("networkingv1::Ingress"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("networkingv1.dl", 19, 1, 22, 1),
+        input: true,
+        distinct: false,
+        caching_mode: ::differential_datalog::program::CachingMode::Set,
+        key_func: ::core::option::Option::Some(types__networkingv1::__Key_networkingv1_Ingress),
+        id: 14,
+        rules: vec![
+        ],
+        arrangements: vec![
+        ],
+        change_cb: ::core::option::Option::None,
+    };
+    let networkingv1_IngressToService = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("networkingv1::IngressToService"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("networkingv1.dl", 28, 1, 29, 1),
+        input: false,
+        distinct: true,
+        caching_mode: ::differential_datalog::program::CachingMode::Set,
+        key_func: ::core::option::Option::None,
+        id: 16,
+        rules: vec![
+            types__networkingv1::__Rule_networkingv1_IngressToService_0.clone(),
+        ],
+        arrangements: vec![
+            types__networkingv1::__Arng_networkingv1_IngressToService_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(networkingv1::IngressToService{.ing=(_0: ddlog_std::Ref<networkingv1::Ingress>), .svc=(_: ddlog_std::Ref<corev1::Service>)}: networkingv1::IngressToService)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 23, 3, 23, 43)], &[])),
+        ],
+        change_cb: ::core::option::Option::Some(::std::sync::Arc::clone(&__update_cb)),
+    };
+    let networkingv1_IngressByName = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("networkingv1::IngressByName"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("networkingv1.dl", 22, 1, 23, 1),
+        input: false,
+        distinct: false,
+        caching_mode: ::differential_datalog::program::CachingMode::Set,
+        key_func: ::core::option::Option::None,
+        id: 15,
+        rules: vec![
+            types__networkingv1::__Rule_networkingv1_IngressByName_0.clone(),
+        ],
+        arrangements: vec![
+            types__networkingv1::__Arng_networkingv1_IngressByName_0.clone().set_debug_info(::ddlog_profiler::ArrangementDebugInfo::new(::std::borrow::Cow::Borrowed("(networkingv1::IngressByName{.ing=(_: ddlog_std::Ref<networkingv1::Ingress>), .ns=_0, .name=_1}: networkingv1::IngressByName)"), &[::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 22, 3, 22, 76)], &[])),
+        ],
+        change_cb: ::core::option::Option::None,
+    };
+    let IsPublic = ::differential_datalog::program::Relation {
+        name: ::std::borrow::Cow::Borrowed("IsPublic"),
+        source_pos: ::ddlog_profiler::SourcePosition::new_range("pallograph.dl", 14, 1, 15, 1),
+        input: false,
+        distinct: false,
+        caching_mode: ::differential_datalog::program::CachingMode::Set,
+        key_func: ::core::option::Option::None,
+        id: 1,
+        rules: vec![
+            types::__Rule_IsPublic_0.clone(),
+            types::__Rule_IsPublic_1.clone(),
+        ],
+        arrangements: vec![
+        ],
+        change_cb: ::core::option::Option::Some(::std::sync::Arc::clone(&__update_cb)),
+    };
     let nodes: std::vec::Vec<program::ProgNode> = vec![
             program::ProgNode::Rel{rel: IngressController},
-            program::ProgNode::Rel{rel: Ingresses},
-            program::ProgNode::Rel{rel: Labels},
-            program::ProgNode::Rel{rel: Pods},
-            program::ProgNode::Rel{rel: Nodes},
-            program::ProgNode::Rel{rel: ReplicaSets},
-            program::ProgNode::Rel{rel: Selectors},
-            program::ProgNode::Rel{rel: PodsToReplicaSet},
-            program::ProgNode::Rel{rel: NodesToReplicaSet},
-            program::ProgNode::Rel{rel: Services},
-            program::ProgNode::Scc{rels: vec![program::RecursiveRelation{rel: IsPublic, distinct: true}]},
-            program::ProgNode::Rel{rel: corev1_Pods2},
-            program::ProgNode::Rel{rel: corev1_Pods2Dump},
-            program::ProgNode::Rel{rel: corev1_TemplateSelectors},
-            program::ProgNode::Rel{rel: corev1_Pods2Label},
-            program::ProgNode::Rel{rel: ddlog_std_Singleton}
+            program::ProgNode::Rel{rel: appsv1_ReplicaSet},
+            program::ProgNode::Rel{rel: appsv1_ReplicaSetByName},
+            program::ProgNode::Rel{rel: corev1_Pod},
+            program::ProgNode::Rel{rel: NodesInUse},
+            program::ProgNode::Rel{rel: corev1_PodByName},
+            program::ProgNode::Rel{rel: appsv1_ReplicaSetMatchesPod},
+            program::ProgNode::Rel{rel: corev1_Selectors},
+            program::ProgNode::Rel{rel: corev1_MatchesPod},
+            program::ProgNode::Rel{rel: corev1_Service},
+            program::ProgNode::Rel{rel: corev1_ServiceByName},
+            program::ProgNode::Rel{rel: corev1_ServiceMatchesPod},
+            program::ProgNode::Rel{rel: ddlog_std_Singleton},
+            program::ProgNode::Rel{rel: networkingv1_Ingress},
+            program::ProgNode::Rel{rel: networkingv1_IngressToService},
+            program::ProgNode::Rel{rel: networkingv1_IngressByName},
+            program::ProgNode::Scc{rels: vec![program::RecursiveRelation{rel: IsPublic, distinct: true}]}
     ];
     let delayed_rels = vec![];
-    let init_data: std::vec::Vec<(program::RelId, ::differential_datalog::ddval::DDValue)> = vec![types__corev1::__Fact_corev1_Pods2_0.clone(),
-                                                                                                  types__corev1::__Fact_corev1_TemplateSelectors_0.clone(),
+    let init_data: std::vec::Vec<(program::RelId, ::differential_datalog::ddval::DDValue)> = vec![types__corev1::__Fact_corev1_Selectors_0.clone(),
                                                                                                   ddlog_std::__Fact_ddlog_std_Singleton_0.clone()];
     program::Program {
         nodes,
@@ -1379,6 +1427,7 @@ pub fn prog(__update_cb: std::sync::Arc<dyn program::RelationCallback>) -> progr
 }
 static SOURCES: &'static [ddlog_profiler::SourceFile] = &[
     ddlog_profiler::SourceFile{filename: "pallograph.dl", contents: std::include_str!("/home/andrew/src/github.com/williamsandrew/pallograph/pallograph.dl")},
+    ddlog_profiler::SourceFile{filename: "appsv1.dl", contents: std::include_str!("/home/andrew/src/github.com/williamsandrew/pallograph/appsv1.dl")},
     ddlog_profiler::SourceFile{filename: "corev1.dl", contents: std::include_str!("/home/andrew/src/github.com/williamsandrew/pallograph/corev1.dl")},
     ddlog_profiler::SourceFile{filename: "ddlog_bigint.dl", contents: std::include_str!("/opt/ddlog/ddlog-1.2.3/lib/ddlog_bigint.dl")},
     ddlog_profiler::SourceFile{filename: "ddlog_log.dl", contents: std::include_str!("/opt/ddlog/ddlog-1.2.3/lib/ddlog_log.dl")},
@@ -1387,5 +1436,6 @@ static SOURCES: &'static [ddlog_profiler::SourceFile] = &[
     ddlog_profiler::SourceFile{filename: "debug.dl", contents: std::include_str!("/opt/ddlog/ddlog-1.2.3/lib/debug.dl")},
     ddlog_profiler::SourceFile{filename: "internment.dl", contents: std::include_str!("/opt/ddlog/ddlog-1.2.3/lib/internment.dl")},
     ddlog_profiler::SourceFile{filename: "metav1.dl", contents: std::include_str!("/home/andrew/src/github.com/williamsandrew/pallograph/metav1.dl")},
+    ddlog_profiler::SourceFile{filename: "networkingv1.dl", contents: std::include_str!("/home/andrew/src/github.com/williamsandrew/pallograph/networkingv1.dl")},
     ddlog_profiler::SourceFile{filename: "selectors.dl", contents: std::include_str!("/home/andrew/src/github.com/williamsandrew/pallograph/selectors.dl")}
 ];

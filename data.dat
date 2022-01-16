@@ -1,58 +1,68 @@
 start;
 
-insert_or_update corev1::Pods2[corev1::Pods2{
+insert corev1::Selectors(selectors::LabelSelector{[("app","test")], []});
+
+insert_or_update corev1::Pod[corev1::Pod{
+  metav1::ObjectMeta{"test", "test1", [("app","test")], []},
+  corev1::PodSpec{"node0"},
+  corev1::PodStatus{corev1::Running}
+}];
+insert_or_update corev1::Pod[corev1::Pod{
   metav1::ObjectMeta{"test", "test2", [("app","test")], []},
-  corev1::PodSpec{"test0"},
+  corev1::PodSpec{"node0"},
+  corev1::PodStatus{corev1::Running}
+}];
+insert_or_update corev1::Pod[corev1::Pod{
+  metav1::ObjectMeta{"kube-system", "test", [("app","test"),("foo","bar")], []},
+  corev1::PodSpec{"node0"},
   corev1::PodStatus{corev1::Running}
 }];
 
-insert corev1::TemplateSelectors(selectors::LabelSelector{[("app","test")], []});
+insert_or_update appsv1::ReplicaSet[appsv1::ReplicaSet{
+  metav1::ObjectMeta{"test", "test2", [("app","test")], []},
+  appsv1::ReplicaSetSpec{selectors::LabelSelector{[("app","test")], []}},
+  appsv1::ReplicaSetStatus{}
+}];
 
-insert Pods("default", "pod-a", "node-1");
-insert Pods("default", "pod-b", "node-1");
-insert Pods("default", "pod-c", "node-2");
-insert Pods("default", "pod-d", "node-3");
-insert Pods("default", "ingress-0", "node-1");
-insert IngressController("default", "ingress-0");
+insert_or_update corev1::Service[corev1::Service{
+  metav1::ObjectMeta{"test", "test2", [], []},
+  corev1::ServiceSpec{corev1::ClusterIP, selectors::LabelSelector{[("app","test")], []}},
+  corev1::ServiceStatus{}
+}];
 
-insert ReplicaSets("default", "test");
+insert_or_update corev1::Service[corev1::Service{
+  metav1::ObjectMeta{"test", "ingress", [], []},
+  corev1::ServiceSpec{corev1::LoadBalancer, selectors::LabelSelector{[("app","ingress")], []}},
+  corev1::ServiceStatus{}
+}];
 
-insert Services("default", "ingress", LoadBalancer);
-insert Services("default", "svc-test", LoadBalancer);
-insert Services("default", "svc-test2", ClusterIP);
+insert_or_update networkingv1::Ingress[networkingv1::Ingress{
+  metav1::ObjectMeta{"test", "ingress", [], []},
+  networkingv1::IngressSpec{"default-class", [networkingv1::IngressRule{"example.com", "test2"}]},
+  networkingv1::IngressStatus{}
+}];
 
-insert Ingresses("default", "svc-test2", "ingress-0", "svc-test2");
-
-insert Labels("app", "test", Pod, "default", "pod-a");
-insert Labels("pod-template-hash", "558bd4d5db", Pod, "default", "pod-a");
-
-insert Labels("app", "test", Pod, "default", "pod-c");
-insert Labels("pod-template-hash", "558bd4d5db", Pod, "default", "pod-c");
-
-insert Labels("app", "test2", Pod, "default", "pod-d");
-
-insert Labels("app", "ingress", Pod, "default", "ingress-0");
-
-insert Selectors("app", "test", ReplicaSet, "default", "test");
-insert Selectors("pod-template-hash", "558bd4d5db", ReplicaSet, "default", "test");
-
-insert Selectors("app", "test", Service, "default", "svc-test");
-insert Selectors("app", "test2", Service, "default", "svc-test2");
-insert Selectors("app", "ingress", Service, "default", "ingress");
+insert IngressController("test", "ingress", "default-class");
 
 commit;
 
-dump Nodes;
-dump PodsToReplicaSet;
+dump NodesInUse;
 
-echo ToReplicaSet;
-query_index ToReplicaSet("default", "pod-a");
+echo IngressToService;
+dump networkingv1::IngressToService;
 
-echo ToNodes;
-query_index ToNodes("default", "test");
-
+echo Public Service;
 dump IsPublic;
-echo Pods2Dump;
-dump corev1::Pods2Dump;
-echo Pods2Label;
-dump corev1::Pods2Label;
+
+echo
+MatchesPods;
+dump corev1::MatchesPod;
+
+echo MatchesPods Index;
+query_index corev1::MatchesPod(selectors::LabelSelector{[("app","test")], []}, "test");
+echo MatchesPodsAll Index;
+query_index corev1::MatchesPodAll(selectors::LabelSelector{[("app","test")], []});
+
+echo ReplicaSet Matches;
+dump appsv1::ReplicaSetMatchesPod;
+

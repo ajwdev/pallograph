@@ -1,52 +1,24 @@
 import selectors
 import metav1
-import corev1
+import corev1 as corev1
+import appsv1 as appsv1
+import networkingv1 as networkingv1
 
-typedef Object = Pod 
-               | ReplicaSet
-               | Node
-               | Service
+input relation IngressController(ns: string, name: string, className: string)
 
-typedef ServiceType = ClusterIP 
-                    | NodePort
-                    | LoadBalancer
-                    | ExternalName
+output relation NodesInUse(name: string)
+NodesInUse(n) :-
+  pod in &corev1::Pod(),
+  var n = pod.spec.nodeName.
 
-
-input relation Labels(k: string, v: string, ty: Object, namespace: string, name: string)
-input relation Selectors(k: string, v: string, ty: Object, namespace: string, name: string)
-
-input relation Pods(namespace: string, name: string, node: string)
-
-input relation Services(namespace: string, name: string, ty: ServiceType)
-input relation Ingresses(namespace: string, name: string, controller: string, serviceName: string)
-input relation IngressController(namespace: string, name: string)
-input relation ReplicaSets(namespace: string, name: string)
-
-output relation Nodes(name: string)
-Nodes(n) :- Pods(_, _, n).
-
-output relation PodsToReplicaSet(namespace: string, rs: string, pod: string)
-index ToReplicaSet(namespace: string, pod: string) on PodsToReplicaSet(namespace, _, pod)
-PodsToReplicaSet(namespace, rs, pod) :- 
-  Selectors(key, val, ReplicaSet, namespace, rs), 
-  Labels(key, val, Pod, namespace, pod). 
-
-output relation NodesToReplicaSet(namespace: string, rs: string, node: string)
-index ToNodes(namespace: string, rs: string) on NodesToReplicaSet(namespace, rs, _)
-NodesToReplicaSet(namespace, rs, node) :- 
-  PodsToReplicaSet(namespace, rs, pod),
-  Pods(namespace, pod, node).
-
-output relation IsPublic(namespace: string, pod: string)
-IsPublic(namespace, pod) :- 
-  Services(namespace, serviceName, LoadBalancer),
-  Selectors(key, val, Service, namespace, serviceName), 
-  Labels(key, val, Pod, namespace, pod). 
+output relation IsPublic(svc: Ref<corev1::Service>)
+IsPublic(svc) :- 
+  svc in &corev1::Service(.spec = spec),
+  spec.typ == corev1::LoadBalancer.
 // Public via ingress
-IsPublic(namespace, pod) :- 
-  IsPublic(namespace, ingPod),
-  IngressController(namespace, ingPod),
-  Ingresses(namespace, _, ingPod, svc),
-  Selectors(key, val, Service, namespace, svc), 
-  Labels(key, val, Pod, namespace, pod). 
+IsPublic(svc) :- 
+  IsPublic(ingSvc),
+  IngressController(ingSvc.meta.namespace, ingSvc.meta.name, className),
+  networkingv1::IngressByName(ing, ingSvc.meta.namespace, ingSvc.meta.name),
+  networkingv1::IngressToService(ing, svc),
+  ing.spec.ingressClassName == className.

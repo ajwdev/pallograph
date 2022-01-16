@@ -1,0 +1,24 @@
+import selectors
+import metav1
+import corev1
+
+typedef ReplicaSetSpec = ReplicaSetSpec {
+  selector: LabelSelector,
+}
+
+typedef ReplicaSetStatus = ReplicaSetStatus {}
+
+input relation &ReplicaSet(meta: ObjectMeta, spec: ReplicaSetSpec, status: ReplicaSetStatus)
+primary key (x) (x.meta.namespace, x.meta.name)
+
+relation ReplicaSetByName(rs: Ref<ReplicaSet>, ns: string, name: string)
+ReplicaSetByName(rs, ns, name) :-
+  rs in &ReplicaSet(),
+  var ns = rs.meta.namespace,
+  var name = rs.meta.name.
+
+output relation ReplicaSetMatchesPod(rs: Ref<ReplicaSet>, pod: Ref<Pod>)
+ReplicaSetMatchesPod(rs, pod) :- 
+  ReplicaSetByName(rs, ns, _),
+  PodByName(pod, ns, _),
+  labelSelectorMatches(Some{rs.spec.selector.ref_new()}, pod.meta.labels).

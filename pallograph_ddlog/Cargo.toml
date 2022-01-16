@@ -77,6 +77,8 @@ crate-type = ["rlib", "staticlib"]
 
 [dependencies.types]
 path = "types/"
+[dependencies.types__appsv1]
+path = "types/appsv1"
 [dependencies.types__corev1]
 path = "types/corev1"
 [dependencies.ddlog_bigint]
@@ -93,6 +95,8 @@ path = "types/debug"
 path = "types/internment"
 [dependencies.types__metav1]
 path = "types/metav1"
+[dependencies.types__networkingv1]
+path = "types/networkingv1"
 [dependencies.types__selectors]
 path = "types/selectors"
 
