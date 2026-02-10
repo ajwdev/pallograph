@@ -34,8 +34,8 @@ func removeNulls(data map[string]any) {
 	}
 }
 
-// loadJSONFacts reads a JSON-lines file and adds facts to the store with the given predicate name
-func loadJSONFacts(store factstore.SimpleInMemoryStore, filename, predicateName string) (int, error) {
+// loadK8sObjects reads a JSON-lines file of Kubernetes objects and adds them as k8s/5 facts
+func loadK8sObjects(store factstore.SimpleInMemoryStore, filename string) (int, error) {
 	fd, err := os.Open(filename)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open file %s: %w", filename, err)
@@ -63,15 +63,19 @@ func loadJSONFacts(store factstore.SimpleInMemoryStore, filename, predicateName 
 			return count, err
 		}
 
-		// Extract namespace and name from metadata
+		// Extract TypeMeta (apiVersion, kind) and ObjectMeta (namespace, name)
+		apiVersion := m["apiVersion"].(string)
+		kind := m["kind"].(string)
 		metadata := m["metadata"].(map[string]any)
-		namespace := metadata["namespace"].(string)
+		namespace, _ := metadata["namespace"].(string) // may be empty for cluster-scoped
 		name := metadata["name"].(string)
 
-		// Create a fact (atom) with namespace, name, and full struct
+		// Create a k8s/5 fact: k8s(ApiVersion, Kind, Namespace, Name, Data)
 		fact := ast.Atom{
-			Predicate: ast.PredicateSym{Symbol: predicateName, Arity: 3},
+			Predicate: ast.PredicateSym{Symbol: "k8s", Arity: 5},
 			Args: []ast.BaseTerm{
+				ast.String(apiVersion),
+				ast.String(kind),
 				ast.String(namespace),
 				ast.String(name),
 				mangleStruct,
@@ -80,7 +84,7 @@ func loadJSONFacts(store factstore.SimpleInMemoryStore, filename, predicateName 
 
 		store.Add(fact)
 		count++
-		fmt.Printf("Inserted %s: %s/%s\n", predicateName, namespace, name)
+		fmt.Printf("Inserted %s/%s: %s/%s\n", apiVersion, kind, namespace, name)
 	}
 	return count, nil
 }
@@ -88,77 +92,41 @@ func loadJSONFacts(store factstore.SimpleInMemoryStore, filename, predicateName 
 func main() {
 	store := factstore.NewSimpleInMemoryStore()
 
-	// Load pods
-	podCount, err := loadJSONFacts(store, "allpods.json", "pod")
-	if err != nil {
-		log.Fatal(err)
+	// Load all Kubernetes objects into a single k8s/5 predicate
+	files := []string{"allpods.json", "serviceaccounts.json"}
+	var totalCount int
+	for _, f := range files {
+		count, err := loadK8sObjects(store, f)
+		if err != nil {
+			log.Fatal(err)
+		}
+		totalCount += count
 	}
-	fmt.Printf("Loaded %d pods\n", podCount)
-
-	// Load service accounts
-	saCount, err := loadJSONFacts(store, "serviceaccounts.json", "serviceaccount")
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Loaded %d service accounts\n", saCount)
-
-	fmt.Printf("\nPredicates: %v\n", store.ListPredicates())
+	fmt.Printf("\nLoaded %d total Kubernetes objects\n", totalCount)
+	fmt.Printf("Predicates: %v\n", store.ListPredicates())
 
 	// Create an interpreter for running queries
 	interp := interpreter.New(os.Stdout, ".", nil)
 
 	// Preload our fact store into the interpreter
-	// The interpreter needs declarations for our predicates
+	// Only need to declare the base k8s/5 predicate
 	knownPredicates := map[ast.PredicateSym]ast.Decl{
-		{Symbol: "pod", Arity: 3}:            {DeclaredAtom: ast.Atom{Predicate: ast.PredicateSym{Symbol: "pod", Arity: 3}}},
-		{Symbol: "serviceaccount", Arity: 3}: {DeclaredAtom: ast.Atom{Predicate: ast.PredicateSym{Symbol: "serviceaccount", Arity: 3}}},
+		{Symbol: "k8s", Arity: 5}: {DeclaredAtom: ast.Atom{Predicate: ast.PredicateSym{Symbol: "k8s", Arity: 5}}},
 	}
 	if err := interp.Preload(nil, store, knownPredicates); err != nil {
 		log.Fatalf("failed to preload: %v", err)
 	}
 
-	// Example 1: Query all pods (returns all pod facts)
-	fmt.Println("\n=== Query 1: All pods ===")
-	query1, _ := interp.ParseQuery("pod(Namespace, Name, _)")
-	results1, err := interp.Query(query1)
-	if err != nil {
-		log.Printf("Query error: %v", err)
-	}
-	for _, r := range results1 {
-		fmt.Printf("  %s/%s\n", r.Args[0], r.Args[1])
-	}
-
-	// Example 2: Query pods in a specific namespace
-	fmt.Println("\n=== Query 2: Pods in kube-system ===")
-	query2, _ := interp.ParseQuery(`pod("kube-system", Name, _)`)
-	results2, err := interp.Query(query2)
-	if err != nil {
-		log.Printf("Query error: %v", err)
-	}
-	for _, r := range results2 {
-		fmt.Printf("  %s\n", r.Args[1])
-	}
-
-	// Example 3: Query all service accounts
-	fmt.Println("\n=== Query 3: All service accounts ===")
-	query3, _ := interp.ParseQuery("serviceaccount(Namespace, Name, _)")
-	results3, err := interp.Query(query3)
-	if err != nil {
-		log.Printf("Query error: %v", err)
-	}
-	for _, r := range results3 {
-		fmt.Printf("  %s/%s\n", r.Args[0], r.Args[1])
-	}
-
-	// Example 4: Interactive query (shows formatted output)
-	fmt.Println("\n=== Query 4: Interactive query for pods in local-path-storage ===")
-	interp.QueryInteractive(`pod("local-path-storage", Name, Data)`)
-
 	// Define all rules at once
-	// Uses :match_field(Struct, /fieldname, Value) to extract nested fields
-	// Field names are prefixed with / in Mangle
 	fmt.Println("\n=== Defining rules ===")
-	err = interp.Define(`
+	err := interp.Define(`
+		# Convenience predicates derived from the base k8s/5 predicate
+		pod(Namespace, Name, Data) :-
+			k8s("v1", "Pod", Namespace, Name, Data).
+
+		serviceaccount(Namespace, Name, Data) :-
+			k8s("v1", "ServiceAccount", Namespace, Name, Data).
+
 		# Extract serviceAccountName from pods
 		pod_sa(Namespace, PodName, SAName) :-
 			pod(Namespace, PodName, Data),
@@ -172,24 +140,53 @@ func main() {
 			:match_field(Spec, /serviceAccountName, SAName),
 			serviceaccount(Namespace, SAName, _).
 
-		# Extract container images using :list:member to iterate over list
-		# :list:member(Element, List) - Element is output, List is input
+		# Extract container images
 		pod_image(Namespace, PodName, Image) :-
 			pod(Namespace, PodName, Data),
 			:match_field(Data, /spec, Spec),
 			:match_field(Spec, /containers, Containers),
 			:list:member(Container, Containers),
 			:match_field(Container, /image, Image).
+
+		# Find all objects in a namespace (demonstrates generic querying)
+		objects_in_ns(Namespace, Kind, Name) :-
+			k8s(_, Kind, Namespace, Name, _).
+
+		# Service accounts that ARE used by pods (helper for orphaned check)
+		sa_in_use(Namespace, SAName) :-
+			pod_sa(Namespace, _, SAName).
+
+		# Find orphaned service accounts (no pod references them)
+		# Uses stratified negation - sa_in_use must be computed first
+		orphaned_sa(Namespace, SAName) :-
+			serviceaccount(Namespace, SAName, _),
+			!sa_in_use(Namespace, SAName).
 	`)
 	if err != nil {
 		log.Printf("Define error: %v", err)
 	}
 
+	// Query 1: All pods using the derived predicate
+	fmt.Println("\n=== Query 1: All pods (via derived predicate) ===")
+	interp.QueryInteractive(`pod(Namespace, Name, _)`)
+
+	// Query 2: Pods in kube-system
+	fmt.Println("\n=== Query 2: Pods in kube-system ===")
+	interp.QueryInteractive(`pod("kube-system", Name, _)`)
+
+	// Query 3: All service accounts
+	fmt.Println("\n=== Query 3: All service accounts ===")
+	interp.QueryInteractive(`serviceaccount(Namespace, Name, _)`)
+
+	// Query 4: Direct query on k8s/5 - all objects in a namespace
+	fmt.Println("\n=== Query 4: All objects in kube-system (generic query) ===")
+	interp.QueryInteractive(`objects_in_ns("kube-system", Kind, Name)`)
+
 	// Query 5: Pods with their service account names
 	fmt.Println("\n=== Query 5: Pods with their service account names ===")
 	interp.QueryInteractive(`pod_sa(Namespace, PodName, SAName)`)
 
-	// Query 6: Pods using a specific service account
+	// Query 6: Pods using 'coredns' service account
 	fmt.Println("\n=== Query 6: Pods using 'coredns' service account ===")
 	interp.QueryInteractive(`pod_sa(Namespace, PodName, "coredns")`)
 
@@ -200,4 +197,8 @@ func main() {
 	// Query 8: Container images
 	fmt.Println("\n=== Query 8: Container images ===")
 	interp.QueryInteractive(`pod_image(Namespace, PodName, Image)`)
+
+	// Query 9: Orphaned service accounts
+	fmt.Println("\n=== Query 9: Orphaned service accounts (not used by any pod) ===")
+	interp.QueryInteractive(`orphaned_sa(Namespace, SAName)`)
 }
