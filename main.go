@@ -2,16 +2,21 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 
+	"github.com/ajwdev/pallograph/pkg/policy"
 	"github.com/google/mangle/ast"
 	"github.com/google/mangle/factstore"
 	"github.com/google/mangle/interpreter"
 	"github.com/google/mangle/json2struct"
+	"github.com/google/mangle/parse"
 )
 
 // removeNulls recursively removes null values from JSON data
@@ -89,10 +94,25 @@ func loadK8sObjects(store factstore.SimpleInMemoryStore, filename string) (int, 
 	return count, nil
 }
 
+// loadRulesFromFile parses a .mg file into a SourceUnit
+func loadRulesFromFile(path string) (parse.SourceUnit, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return parse.SourceUnit{}, err
+	}
+	defer f.Close()
+	return parse.Unit(f)
+}
+
 func main() {
+	repl := flag.Bool("repl", false, "start interactive query REPL after evaluation")
+	flag.Parse()
+
+	// Fact store for k8s objects. The engine holds this as its source of truth;
+	// a controller reconcile loop would mutate it and call engine.Evaluate again.
 	store := factstore.NewSimpleInMemoryStore()
 
-	// Load all Kubernetes objects into a single k8s/5 predicate
+	// Load all Kubernetes objects
 	files := []string{"allpods.json", "serviceaccounts.json"}
 	var totalCount int
 	for _, f := range files {
@@ -103,102 +123,97 @@ func main() {
 		totalCount += count
 	}
 	fmt.Printf("\nLoaded %d total Kubernetes objects\n", totalCount)
-	fmt.Printf("Predicates: %v\n", store.ListPredicates())
 
-	// Create an interpreter for running queries
-	interp := interpreter.New(os.Stdout, ".", nil)
+	// Load rule files from the rules directory
+	ruleFiles, err := filepath.Glob("rules/*.mg")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Found rule files: %v\n", ruleFiles)
 
-	// Preload our fact store into the interpreter
-	// Only need to declare the base k8s/5 predicate
+	var ruleUnits []parse.SourceUnit
+	for _, rf := range ruleFiles {
+		unit, err := loadRulesFromFile(rf)
+		if err != nil {
+			log.Fatalf("failed to load %s: %v", rf, err)
+		}
+		ruleUnits = append(ruleUnits, unit)
+		fmt.Printf("Loaded rules from: %s\n", rf)
+	}
+
+	// Declare the base k8s/5 predicate so rules can reference it
 	knownPredicates := map[ast.PredicateSym]ast.Decl{
 		{Symbol: "k8s", Arity: 5}: {DeclaredAtom: ast.Atom{Predicate: ast.PredicateSym{Symbol: "k8s", Arity: 5}}},
 	}
-	if err := interp.Preload(nil, store, knownPredicates); err != nil {
-		log.Fatalf("failed to preload: %v", err)
-	}
 
-	// Define all rules at once
-	fmt.Println("\n=== Defining rules ===")
-	err := interp.Define(`
-		# Convenience predicates derived from the base k8s/5 predicate
-		pod(Namespace, Name, Data) :-
-			k8s("v1", "Pod", Namespace, Name, Data).
-
-		serviceaccount(Namespace, Name, Data) :-
-			k8s("v1", "ServiceAccount", Namespace, Name, Data).
-
-		# Extract serviceAccountName from pods
-		pod_sa(Namespace, PodName, SAName) :-
-			pod(Namespace, PodName, Data),
-			:match_field(Data, /spec, Spec),
-			:match_field(Spec, /serviceAccountName, SAName).
-
-		# Join pods with existing service accounts
-		pod_with_sa(Namespace, PodName, SAName) :-
-			pod(Namespace, PodName, Data),
-			:match_field(Data, /spec, Spec),
-			:match_field(Spec, /serviceAccountName, SAName),
-			serviceaccount(Namespace, SAName, _).
-
-		# Extract container images
-		pod_image(Namespace, PodName, Image) :-
-			pod(Namespace, PodName, Data),
-			:match_field(Data, /spec, Spec),
-			:match_field(Spec, /containers, Containers),
-			:list:member(Container, Containers),
-			:match_field(Container, /image, Image).
-
-		# Find all objects in a namespace (demonstrates generic querying)
-		objects_in_ns(Namespace, Kind, Name) :-
-			k8s(_, Kind, Namespace, Name, _).
-
-		# Service accounts that ARE used by pods (helper for orphaned check)
-		sa_in_use(Namespace, SAName) :-
-			pod_sa(Namespace, _, SAName).
-
-		# Find orphaned service accounts (no pod references them)
-		# Uses stratified negation - sa_in_use must be computed first
-		orphaned_sa(Namespace, SAName) :-
-			serviceaccount(Namespace, SAName, _),
-			!sa_in_use(Namespace, SAName).
-	`)
+	// Build policy engine. Rules are compiled once here; on each Evaluate call
+	// a fresh derived-fact overlay is computed and discarded, so re-evaluation
+	// after store mutations always reflects current state.
+	engine, err := policy.New(store, ruleUnits, knownPredicates)
 	if err != nil {
-		log.Printf("Define error: %v", err)
+		log.Fatalf("failed to build policy engine: %v", err)
 	}
 
-	// Query 1: All pods using the derived predicate
-	fmt.Println("\n=== Query 1: All pods (via derived predicate) ===")
-	interp.QueryInteractive(`pod(Namespace, Name, _)`)
+	dryRun := &policy.DryRunCollector{}
+	logHandler := &policy.LogHandler{}
 
-	// Query 2: Pods in kube-system
-	fmt.Println("\n=== Query 2: Pods in kube-system ===")
-	interp.QueryInteractive(`pod("kube-system", Name, _)`)
+	for _, pred := range []string{"orphaned_sa", "host_network_pod", "privileged_pod"} {
+		if err := engine.Register(pred, logHandler, dryRun); err != nil {
+			log.Fatalf("register predicate %q: %v", pred, err)
+		}
+	}
 
-	// Query 3: All service accounts
-	fmt.Println("\n=== Query 3: All service accounts ===")
-	interp.QueryInteractive(`serviceaccount(Namespace, Name, _)`)
+	fmt.Println("\n=== Evaluating policies ===")
+	if err := engine.Evaluate(context.Background()); err != nil {
+		log.Fatalf("policy evaluation: %v", err)
+	}
+	dryRun.PrintSummary()
 
-	// Query 4: Direct query on k8s/5 - all objects in a namespace
-	fmt.Println("\n=== Query 4: All objects in kube-system (generic query) ===")
-	interp.QueryInteractive(`objects_in_ns("kube-system", Kind, Name)`)
+	if !*repl {
+		return
+	}
 
-	// Query 5: Pods with their service account names
-	fmt.Println("\n=== Query 5: Pods with their service account names ===")
-	interp.QueryInteractive(`pod_sa(Namespace, PodName, SAName)`)
+	// REPL gets its own interpreter; it's a separate concern from policy evaluation.
+	interp := interpreter.New(os.Stdout, ".", nil)
+	if err := interp.Preload(ruleUnits, store, knownPredicates); err != nil {
+		log.Fatalf("failed to build REPL interpreter: %v", err)
+	}
 
-	// Query 6: Pods using 'coredns' service account
-	fmt.Println("\n=== Query 6: Pods using 'coredns' service account ===")
-	interp.QueryInteractive(`pod_sa(Namespace, PodName, "coredns")`)
+	fmt.Println("\n=== Interactive Query Mode ===")
+	fmt.Println("Enter queries or rules. Examples:")
+	fmt.Println("  pod(Ns, Name, _)                    # query all pods")
+	fmt.Println("  pod_sa(\"kube-system\", Pod, SA)      # pods with SAs in kube-system")
+	fmt.Println("  ::define my_rule(X) :- pod(X, _, _). # define a new rule")
+	fmt.Println("  ::show all                          # list all predicates")
+	fmt.Println("  ::quit                              # exit")
+	fmt.Println()
 
-	// Query 7: Pods joined with existing service accounts
-	fmt.Println("\n=== Query 7: Pods with existing service accounts (join) ===")
-	interp.QueryInteractive(`pod_with_sa(Namespace, PodName, SAName)`)
-
-	// Query 8: Container images
-	fmt.Println("\n=== Query 8: Container images ===")
-	interp.QueryInteractive(`pod_image(Namespace, PodName, Image)`)
-
-	// Query 9: Orphaned service accounts
-	fmt.Println("\n=== Query 9: Orphaned service accounts (not used by any pod) ===")
-	interp.QueryInteractive(`orphaned_sa(Namespace, SAName)`)
+	scanner := bufio.NewScanner(os.Stdin)
+	for {
+		fmt.Print("mangle> ")
+		if !scanner.Scan() {
+			break
+		}
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		if line == "::quit" || line == "::exit" {
+			break
+		}
+		if line == "::show all" {
+			interp.Show("all")
+			continue
+		}
+		if len(line) > 9 && line[:9] == "::define " {
+			rule := line[9:]
+			if err := interp.Define(rule); err != nil {
+				fmt.Printf("Error: %v\n", err)
+			} else {
+				fmt.Println("Rule defined.")
+			}
+			continue
+		}
+		interp.QueryInteractive(line)
+	}
 }
