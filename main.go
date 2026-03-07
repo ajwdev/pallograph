@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ajwdev/pallograph/pkg/policy"
 	"github.com/google/mangle/ast"
@@ -94,6 +95,37 @@ func loadK8sObjects(store factstore.SimpleInMemoryStore, filename string) (int, 
 	return count, nil
 }
 
+// loadApiResources reads the output of `kubectl api-resources -o name` and
+// adds api_resource(ApiGroup, Resource) facts to the store. Lines starting
+// with '#' are treated as comments and skipped.
+//
+// Format: core resources are just the resource name (e.g. "pods"); named-group
+// resources are "resource.apigroup" (e.g. "deployments.apps").
+func loadApiResources(store factstore.SimpleInMemoryStore, filename string) (int, error) {
+	fd, err := os.Open(filename)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open file %s: %w", filename, err)
+	}
+	defer fd.Close()
+
+	var count int
+	scanner := bufio.NewScanner(fd)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		resource, apiGroup, _ := strings.Cut(line, ".")
+		store.Add(ast.Atom{
+			Predicate: ast.PredicateSym{Symbol: "api_resource", Arity: 2},
+			Args:      []ast.BaseTerm{ast.String(apiGroup), ast.String(resource)},
+		})
+		count++
+	}
+	return count, scanner.Err()
+}
+
 // loadRulesFromFile parses a .mg file into a SourceUnit
 func loadRulesFromFile(path string) (parse.SourceUnit, error) {
 	f, err := os.Open(path)
@@ -113,7 +145,7 @@ func main() {
 	store := factstore.NewSimpleInMemoryStore()
 
 	// Load all Kubernetes objects
-	files := []string{"allpods.json", "serviceaccounts.json"}
+	files := []string{"allpods.json", "serviceaccounts.json", "rbac.json"}
 	var totalCount int
 	for _, f := range files {
 		count, err := loadK8sObjects(store, f)
@@ -123,6 +155,13 @@ func main() {
 		totalCount += count
 	}
 	fmt.Printf("\nLoaded %d total Kubernetes objects\n", totalCount)
+
+	// Load API resource types (output of `kubectl api-resources -o name`)
+	apiResourceCount, err := loadApiResources(store, "api-resources.txt")
+	if err != nil {
+		log.Fatalf("failed to load api-resources.txt: %v", err)
+	}
+	fmt.Printf("Loaded %d API resource types\n", apiResourceCount)
 
 	// Load rule files from the rules directory
 	ruleFiles, err := filepath.Glob("rules/*.mg")
@@ -141,9 +180,13 @@ func main() {
 		fmt.Printf("Loaded rules from: %s\n", rf)
 	}
 
-	// Declare the base k8s/5 predicate so rules can reference it
+	// Declare EDB (Extensional Database) predicates so rules can reference them.
+	// user_groups/2 is populated at query time from a UserInfo struct.
+	// api_resource/2 is loaded from `kubectl api-resources -o name` output.
 	knownPredicates := map[ast.PredicateSym]ast.Decl{
-		{Symbol: "k8s", Arity: 5}: {DeclaredAtom: ast.Atom{Predicate: ast.PredicateSym{Symbol: "k8s", Arity: 5}}},
+		{Symbol: "k8s", Arity: 5}:         {DeclaredAtom: ast.Atom{Predicate: ast.PredicateSym{Symbol: "k8s", Arity: 5}}},
+		{Symbol: "user_groups", Arity: 2}: {DeclaredAtom: ast.Atom{Predicate: ast.PredicateSym{Symbol: "user_groups", Arity: 2}}},
+		{Symbol: "api_resource", Arity: 2}: {DeclaredAtom: ast.Atom{Predicate: ast.PredicateSym{Symbol: "api_resource", Arity: 2}}},
 	}
 
 	// Build policy engine. Rules are compiled once here; on each Evaluate call
