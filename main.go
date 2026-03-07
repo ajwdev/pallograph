@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/ajwdev/pallograph/pkg/policy"
+	"github.com/chzyer/readline"
 	"github.com/google/mangle/ast"
 	"github.com/google/mangle/factstore"
 	"github.com/google/mangle/interpreter"
@@ -217,39 +218,66 @@ func main() {
 	}
 
 	// REPL gets its own interpreter; it's a separate concern from policy evaluation.
-	interp := interpreter.New(os.Stdout, ".", nil)
+	rw := &replWriter{out: os.Stdout, pretty: true}
+	interp := interpreter.New(rw, ".", nil)
 	if err := interp.Preload(ruleUnits, store, knownPredicates); err != nil {
 		log.Fatalf("failed to build REPL interpreter: %v", err)
 	}
 
 	fmt.Println("\n=== Interactive Query Mode ===")
 	fmt.Println("Enter queries or rules. Examples:")
-	fmt.Println("  pod(Ns, Name, _)                    # query all pods")
-	fmt.Println("  pod_sa(\"kube-system\", Pod, SA)      # pods with SAs in kube-system")
+	fmt.Println("  pod(Ns, Name, _)                     # query all pods")
+	fmt.Println("  pod_sa(\"kube-system\", Pod, SA)       # pods with SAs in kube-system")
 	fmt.Println("  ::define my_rule(X) :- pod(X, _, _). # define a new rule")
-	fmt.Println("  ::show all                          # list all predicates")
-	fmt.Println("  ::quit                              # exit")
+	fmt.Println("  ::show all                           # list all predicates")
+	fmt.Println("  ::pretty                             # toggle pretty printing (currently on)")
+	fmt.Println("  ::quit                               # exit")
 	fmt.Println()
 
-	scanner := bufio.NewScanner(os.Stdin)
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          "mangle> ",
+		HistoryFile:     os.ExpandEnv("$HOME/.pallograph_history"),
+		InterruptPrompt: "^C",
+		EOFPrompt:       "::quit",
+	})
+	if err != nil {
+		log.Fatalf("failed to initialize readline: %v", err)
+	}
+	defer rl.Close()
+
 	for {
-		fmt.Print("mangle> ")
-		if !scanner.Scan() {
+		line, err := rl.Readline()
+		if err == readline.ErrInterrupt {
+			if line == "" {
+				break
+			}
+			continue
+		}
+		if err == io.EOF {
 			break
 		}
-		line := scanner.Text()
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		if line == "::quit" || line == "::exit" {
 			break
 		}
+		if line == "::pretty" {
+			rw.pretty = !rw.pretty
+			if rw.pretty {
+				fmt.Println("Pretty printing enabled.")
+			} else {
+				fmt.Println("Pretty printing disabled.")
+			}
+			continue
+		}
 		if line == "::show all" {
 			interp.Show("all")
 			continue
 		}
-		if len(line) > 9 && line[:9] == "::define " {
-			rule := line[9:]
+		if strings.HasPrefix(line, "::define ") {
+			rule := strings.TrimPrefix(line, "::define ")
 			if err := interp.Define(rule); err != nil {
 				fmt.Printf("Error: %v\n", err)
 			} else {
