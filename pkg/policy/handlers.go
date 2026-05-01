@@ -8,7 +8,31 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/google/mangle/ast"
 )
+
+// Violation is a single match of a policy predicate.
+type Violation struct {
+	// Policy is the predicate name, e.g. "orphaned_sa".
+	Policy string
+	// Args are the matched argument values from the query result.
+	Args []ast.BaseTerm
+}
+
+// ArgStrings returns the string representation of each argument.
+func (v Violation) ArgStrings() []string {
+	out := make([]string, len(v.Args))
+	for i, a := range v.Args {
+		out[i] = a.String()
+	}
+	return out
+}
+
+// Handler processes a policy violation.
+type Handler interface {
+	Handle(ctx context.Context, v Violation) error
+}
 
 // LogHandler emits a structured log line for each violation.
 type LogHandler struct {

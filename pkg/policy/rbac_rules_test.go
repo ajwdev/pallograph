@@ -182,8 +182,8 @@ func TestRBAC_UserClusterRoleBinding(t *testing.T) {
 
 	get := &collectHandler{}
 	list := &collectHandler{}
-	require.NoError(t, engine.RegisterQuery(`can_i("alice", "pods", "get")`, get))
-	require.NoError(t, engine.RegisterQuery(`can_i("alice", "pods", "list")`, list))
+	require.NoError(t, engine.RegisterQuery(`can("alice", "pods", "get")`, get))
+	require.NoError(t, engine.RegisterQuery(`can("alice", "pods", "list")`, list))
 	assert.NoError(t, engine.Evaluate(context.Background()))
 
 	assert.Len(t, get.violations, 1)
@@ -272,7 +272,7 @@ func TestRBAC_GroupInheritedPermissions(t *testing.T) {
 	)
 
 	h := &collectHandler{}
-	require.NoError(t, engine.RegisterQuery(`can_i("dave", "secrets", "get")`, h))
+	require.NoError(t, engine.RegisterQuery(`can("dave", "secrets", "get")`, h))
 	assert.NoError(t, engine.Evaluate(context.Background()))
 
 	assert.Len(t, h.violations, 1)
@@ -313,9 +313,9 @@ func TestRBAC_WildcardResource(t *testing.T) {
 	)
 
 	h := &collectHandler{}
-	require.NoError(t, engine.RegisterQuery(`can_i("eve", "pods", "get")`, h))
-	require.NoError(t, engine.RegisterQuery(`can_i("eve", "secrets", "get")`, h))
-	require.NoError(t, engine.RegisterQuery(`can_i("eve", "deployments", "list")`, h))
+	require.NoError(t, engine.RegisterQuery(`can("eve", "pods", "get")`, h))
+	require.NoError(t, engine.RegisterQuery(`can("eve", "secrets", "get")`, h))
+	require.NoError(t, engine.RegisterQuery(`can("eve", "deployments", "list")`, h))
 	assert.NoError(t, engine.Evaluate(context.Background()))
 
 	assert.Len(t, h.violations, 3)
@@ -337,8 +337,8 @@ func TestRBAC_WildcardVerb(t *testing.T) {
 	)
 
 	h := &collectHandler{}
-	require.NoError(t, engine.RegisterQuery(`can_i("frank", "pods", "get")`, h))
-	require.NoError(t, engine.RegisterQuery(`can_i("frank", "pods", "delete")`, h))
+	require.NoError(t, engine.RegisterQuery(`can("frank", "pods", "get")`, h))
+	require.NoError(t, engine.RegisterQuery(`can("frank", "pods", "delete")`, h))
 	assert.NoError(t, engine.Evaluate(context.Background()))
 
 	assert.Len(t, h.violations, 2)

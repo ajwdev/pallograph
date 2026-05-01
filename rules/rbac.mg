@@ -244,7 +244,7 @@ all_user_perm(Username, ApiGroup, Resource, Verb) :-
 
 # ---- resource_type / verb_type ----
 #
-# Bounding sets used by can_i to keep derived facts finite.
+# Bounding sets used by can to keep derived facts finite.
 #
 # resource_type is derived from api_resource (EDB loaded from
 # `kubectl api-resources -o name`), giving the canonical set of resource names
@@ -260,7 +260,7 @@ resource_type(Resource) :- api_resource(_, Resource).
 verb_type(Verb) :- role_perm(_, _, _, _, Verb).
 verb_type(Verb) :- clusterrole_perm(_, _, _, Verb).
 
-# ---- can_i ----
+# ---- can ----
 #
 # SubjectAccessReview equivalent. Returns true if Username has permission
 # to perform Verb on Resource, accounting for Kubernetes wildcard semantics:
@@ -270,18 +270,18 @@ verb_type(Verb) :- clusterrole_perm(_, _, _, Verb).
 # stays finite — one row per (username, resource, verb) triple where the user
 # has access.
 
-can_i(Username, Resource, Verb) :-
+can(Username, Resource, Verb) :-
     resource_type(Resource), verb_type(Verb),
     all_user_perm(Username, _, Resource, Verb).
 
-can_i(Username, Resource, Verb) :-
+can(Username, Resource, Verb) :-
     resource_type(Resource), verb_type(Verb),
     all_user_perm(Username, _, "*", Verb).
 
-can_i(Username, Resource, Verb) :-
+can(Username, Resource, Verb) :-
     resource_type(Resource), verb_type(Verb),
     all_user_perm(Username, _, Resource, "*").
 
-can_i(Username, Resource, Verb) :-
+can(Username, Resource, Verb) :-
     resource_type(Resource), verb_type(Verb),
     all_user_perm(Username, _, "*", "*").

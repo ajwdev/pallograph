@@ -41,6 +41,12 @@ func removeNulls(data map[string]any) {
 	}
 }
 
+// edbDecl builds the minimal ast.Decl needed to register an EDB predicate with the analyzer.
+func edbDecl(sym string, arity int) ast.Decl {
+	pred := ast.PredicateSym{Symbol: sym, Arity: arity}
+	return ast.Decl{DeclaredAtom: ast.Atom{Predicate: pred}}
+}
+
 // loadK8sObjects reads a JSON-lines file of Kubernetes objects and adds them as k8s/5 facts
 func loadK8sObjects(store factstore.SimpleInMemoryStore, filename string) (int, error) {
 	fd, err := os.Open(filename)
@@ -90,6 +96,7 @@ func loadK8sObjects(store factstore.SimpleInMemoryStore, filename string) (int, 
 		}
 
 		store.Add(fact)
+		extractLabelsAndSelectors(store, apiVersion, kind, namespace, name, m)
 		count++
 		fmt.Printf("Inserted %s/%s: %s/%s\n", apiVersion, kind, namespace, name)
 	}
@@ -184,10 +191,17 @@ func main() {
 	// Declare EDB (Extensional Database) predicates so rules can reference them.
 	// user_groups/2 is populated at query time from a UserInfo struct.
 	// api_resource/2 is loaded from `kubectl api-resources -o name` output.
+	// object_label/6 and selector_*/5,6 are extracted at load time by extractLabelsAndSelectors.
 	knownPredicates := map[ast.PredicateSym]ast.Decl{
-		{Symbol: "k8s", Arity: 5}:         {DeclaredAtom: ast.Atom{Predicate: ast.PredicateSym{Symbol: "k8s", Arity: 5}}},
-		{Symbol: "user_groups", Arity: 2}: {DeclaredAtom: ast.Atom{Predicate: ast.PredicateSym{Symbol: "user_groups", Arity: 2}}},
-		{Symbol: "api_resource", Arity: 2}: {DeclaredAtom: ast.Atom{Predicate: ast.PredicateSym{Symbol: "api_resource", Arity: 2}}},
+		{Symbol: "k8s", Arity: 5}:                     edbDecl("k8s", 5),
+		{Symbol: "user_groups", Arity: 2}:             edbDecl("user_groups", 2),
+		{Symbol: "api_resource", Arity: 2}:            edbDecl("api_resource", 2),
+		{Symbol: "object_label", Arity: 6}:            edbDecl("object_label", 6),
+		{Symbol: "selector_match_label", Arity: 6}:    edbDecl("selector_match_label", 6),
+		{Symbol: "selector_expr_in", Arity: 6}:        edbDecl("selector_expr_in", 6),
+		{Symbol: "selector_expr_notin", Arity: 6}:     edbDecl("selector_expr_notin", 6),
+		{Symbol: "selector_expr_exists", Arity: 5}:    edbDecl("selector_expr_exists", 5),
+		{Symbol: "selector_expr_notexists", Arity: 5}: edbDecl("selector_expr_notexists", 5),
 	}
 
 	// Build policy engine. Rules are compiled once here; on each Evaluate call
@@ -276,8 +290,8 @@ func main() {
 			interp.Show("all")
 			continue
 		}
-		if strings.HasPrefix(line, "::define ") {
-			rule := strings.TrimPrefix(line, "::define ")
+		if after, ok := strings.CutPrefix(line, "::define "); ok {
+			rule := after
 			if err := interp.Define(rule); err != nil {
 				fmt.Printf("Error: %v\n", err)
 			} else {

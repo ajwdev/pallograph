@@ -11,28 +11,6 @@ import (
 	"github.com/google/mangle/parse"
 )
 
-// Violation is a single match of a policy predicate.
-type Violation struct {
-	// Policy is the predicate name, e.g. "orphaned_sa".
-	Policy string
-	// Args are the matched argument values from the query result.
-	Args []ast.BaseTerm
-}
-
-// ArgStrings returns the string representation of each argument.
-func (v Violation) ArgStrings() []string {
-	out := make([]string, len(v.Args))
-	for i, a := range v.Args {
-		out[i] = a.String()
-	}
-	return out
-}
-
-// Handler processes a policy violation.
-type Handler interface {
-	Handle(ctx context.Context, v Violation) error
-}
-
 type policyEntry struct {
 	// query is the atom used for GetFacts. Constants in the query act as filters;
 	// variables match anything. Produced by ast.NewQuery for Register, or parsed
@@ -49,13 +27,13 @@ type policyEntry struct {
 // controller reconcile loop).
 type Engine struct {
 	// Store is the base fact store. Callers add and remove facts here directly.
-	Store       factstore.SimpleInMemoryStore
+	Store       factstore.FactStoreWithRemove
 	programInfo *analysis.ProgramInfo
 	policies    map[string]policyEntry
 }
 
 // New compiles ruleUnits into a ProgramInfo and returns an Engine ready to evaluate.
-func New(store factstore.SimpleInMemoryStore, ruleUnits []parse.SourceUnit, knownPredicates map[ast.PredicateSym]ast.Decl) (*Engine, error) {
+func New(store factstore.FactStoreWithRemove, ruleUnits []parse.SourceUnit, knownPredicates map[ast.PredicateSym]ast.Decl) (*Engine, error) {
 	programInfo, err := analysis.AnalyzeAndCheckBounds(ruleUnits, knownPredicates, analysis.ErrorForBoundsMismatch)
 	if err != nil {
 		return nil, fmt.Errorf("policy engine: analyze rules: %w", err)
