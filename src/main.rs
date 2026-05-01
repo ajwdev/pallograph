@@ -1,6 +1,7 @@
 mod edb;
 mod engine;
 mod handlers;
+mod query;
 mod repl;
 mod value;
 
