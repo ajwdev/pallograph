@@ -1,27 +1,31 @@
 {
   inputs = {
-    nixpkgs.url = "nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
-    goflake.url = "github:sagikazarmark/go-flake";
-    goflake.inputs.nixpkgs.follows = "nixpkgs";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    utils.url = "github:numtide/flake-utils";
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, goflake, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
+  outputs = { self, utils, nixpkgs, fenix, }: utils.lib.eachDefaultSystem (system: let
+    pkgs = nixpkgs.legacyPackages.${system};
+    rust = fenix.packages.${system};
+  in {
+    devShell = pkgs.mkShell {
+      buildInputs = with pkgs; [
+        (rust.complete.withComponents [
+          "cargo"
+          "clippy"
+          "rust-src"
+          "rustc"
+          "rustfmt"
+        ])
+        rust-analyzer
+        pkg-config
+      ];
 
-          overlays = [ goflake.overlay ];
-        };
-        buildDeps = with pkgs; [ go_1_25 ];
-        devDeps = with pkgs; buildDeps ++ [
-          gopls
-          golangci-lint
-          protobuf
-          protoc-gen-go
-          gnumake
-        ];
-      in
-      { devShell = pkgs.mkShell { buildInputs = devDeps; }; });
+      RUST_BACKTRACE = 1;
+    };
+  });
 }
