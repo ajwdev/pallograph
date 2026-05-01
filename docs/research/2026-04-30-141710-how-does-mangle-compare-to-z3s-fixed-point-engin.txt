@@ -1,0 +1,1343 @@
+ ▐▛███▜▌   Claude Code v2.1.112
+▝▜█████▛▘  Opus 4.7 (1M context) · Claude Max
+  ▘▘ ▝▝    ~/src/github.com/ajwdev/pallograph
+  ⎿  SessionStart:startup hook error                                                                        ⎿  Failed with non-blocking status code: /bin/sh: line 1: 
+
+❯ How does Mangle compare to Z3's fixed point engine?                           
+
+● Let me look at the project to understand the context before answering.
+
+● Explore(Explore pallograph project structure)
+  ⎿  Done (18 tool uses · 46.5k tokens · 39s)
+  (ctrl+o to expand)
+
+● Both are fixed-point Datalog engines, but they differ significantly in design
+  goals:
+
+  Z3 Spacer (PDR/IC3)
+  - Targets Horn clause verification: finds invariants that prove or refute a
+  property
+  - Uses SMT reasoning internally — handles arithmetic, bitvectors, arrays
+  - Output is a proof/counterexample, not a fact set
+  - Scales poorly on large EDBs; the constraint-solving overhead is expensive
+  per clause
+
+  Mangle
+  - Targets bottom-up evaluation over a concrete fact store
+  - Pure Datalog (no arithmetic constraints beyond built-in functions like
+  :list:member)
+  - Semi-naive fixpoint: only re-derives facts that could have changed each
+  round — efficient for large EDBs
+  - Stratified negation-as-failure, but no true negation or quantifier
+  alternation
+  - Output is the full derived IDB — you query it after evaluation
+
+  Key tradeoffs:
+
+  ┌────────────────────────┬──────────────────────┬─────────────────────────┐
+  │                        │        Mangle        │      Z3 Fixedpoint      │
+  ├────────────────────────┼──────────────────────┼─────────────────────────┤
+  │ EDB scale              │ Good (in-memory fact │ Poor (SMT per clause)   │
+  │                        │  store)              │                         │
+  ├────────────────────────┼──────────────────────┼─────────────────────────┤
+  │ Arithmetic/constraints │ No                   │ Yes (full SMT)          │
+  ├────────────────────────┼──────────────────────┼─────────────────────────┤
+  │ Recursive rules        │ Yes (semi-naive)     │ Yes (PDR for CHC)       │
+  ├────────────────────────┼──────────────────────┼─────────────────────────┤
+  │ Negation               │ Stratified NAF only  │ Full                    │
+  │                        │                      │ under-approximation     │
+  ├────────────────────────┼──────────────────────┼─────────────────────────┤
+  │ Use case               │ Policy/query over    │ Safety/reachability     │
+  │                        │ data                 │ proofs                  │
+  └────────────────────────┴──────────────────────┴─────────────────────────┘
+
+  For pallograph's use case — evaluating RBAC, label selectors, and reachability
+   over a K8s cluster snapshot — Mangle is the right fit. Z3's fixed-point
+  engine would let you express richer properties (e.g., "there exists no path
+  from SA X to secret Y under any RBAC binding") but would be far slower and
+  require encoding the EDB as Horn clauses rather than loading raw facts.
+
+✻ Worked for 56s
+
+❯ Got it. Is there a way to pipe facts from Mangle into Z3                      
+
+● There's no existing bridge, but it's buildable. The natural seam is Z3's
+  fixedpoint API (its built-in Datalog engine), which accepts ground facts and
+  Horn rules in the same format.
+
+  Two practical approaches:
+
+  1. Export Mangle's derived IDB as ground facts → Z3 Horn clauses
+  After EvalProgram(), iterate the fact store and emit each derived fact as a
+  unit clause in SMT-LIB2:
+  (declare-rel can (String String String))
+  (rule (can "alice" "get" "pods"))
+  (rule (can "bob" "*" "*"))
+  Then write your verification query as a Horn clause Z3 has to solve — e.g.,
+  "does any principal with can(_, "*", "*") also reach a sensitive namespace?"
+  Z3 handles the universal/existential reasoning Mangle can't.
+
+  2. Export Mangle rules + EDB directly as Z3 Datalog
+  Skip Mangle's evaluation entirely for certain rule strata and re-express them
+  in Z3's fixedpoint dialect. Lets Z3 reason over the rules rather than just the
+   derived facts. More powerful but more work to translate Mangle syntax →
+  SMT-LIB2 (rule ...) forms.
+
+  Practical friction:
+  - Go Z3 bindings (go-z3) are thin and incomplete; you'd likely emit SMT-LIB2
+  files and shell out to z3
+  - Mangle's built-in functions (:list:member, :match_field) have no Z3 analog —
+   those facts need to be pre-expanded before export
+  - Ground fact sets from a real cluster can be large; Z3's Datalog engine
+  doesn't scale as well as Mangle's semi-naive evaluation
+
+  Best fit for pallograph: use Mangle for the heavy EDB evaluation (RBAC
+  flattening, label matching, reachability), then export a filtered subset of
+  derived facts to Z3 only for queries requiring arithmetic or universal
+  quantification — e.g., proving that no path exists, or reasoning about numeric
+   resource limits.
+
+  Want me to sketch what the export code would look like?
+
+※ recap: Exploring how to integrate Mangle's Datalog evaluation with Z3 for richer policy verification in pallograph. Next action: decide whether to sketch the fact-export bridge code. (disable recaps in /config)
+
+❯ No just curious. Also, curious, if I was to pull in Z3, I wonder if Go is the 
+   wrong language? How it Mangle's and Z3s rust support?                        
+
+● Mangle: Go only. It's a Google Go project with no Rust bindings and no C API
+  to wrap. You'd have to either keep a Go process for Mangle or reimplement the
+  Datalog evaluation layer — at which point you'd probably reach for a native
+  Rust Datalog engine instead.
+
+  Z3: Good Rust support. The z3 crate wraps the C API and is actively
+  maintained; it's used in serious tools (e.g., Kani, Prusti). Not as ergonomic
+  as the Python bindings (which Z3 was basically designed around), but solid.
+
+  So if you pulled in Z3:
+  - Stay in Go: mediocre Z3 bindings (go-z3 is thin, not well-maintained), but
+  you keep Mangle natively. Probably fine if Z3 usage is narrow — just shelling
+  out to z3 with SMT-LIB2 files avoids the binding problem entirely.
+  - Move to Rust: good Z3 bindings, but you lose Mangle and need a replacement.
+  Rust Datalog options are real though — Differential Datalog (DDlog) is
+  production-grade, crepe is a lightweight proc-macro Datalog that compiles to
+  Rust, Soufflé can emit Rust.
+  - Python: best Z3 ergonomics by far, but obviously wrong here.
+
+  If Z3 became a first-class part of pallograph rather than an occasional query
+  target, Rust + DDlog/crepe + z3 crate is a coherent stack. For occasional Z3
+  queries bolted onto the existing engine, just stay in Go and emit SMT-LIB2.
+
+❯ Mangle has a Rust port in-tree. Please review                                 
+
+● Let me find it.
+
+● Explore(Explore Mangle Rust port in pallograph)
+  ⎿  Bash(git log --all --oneline)
+     Bash(find /home/andrew/src/github.com/ajwdev/pallograph -name "*.rs" -o
+         -name "Cargo.toml" -o -name "Cargo.lock" 2>/dev/null | wc -l)
+     Read(README.md)
+     +14 more tool uses (ctrl+o to expand)
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ See https://github.com/google/mangle/tree/main/rust                           
+
+● Explore(Review Mangle Rust port on GitHub)
+  ⎿  Done (40 tool uses · 36.6k tokens · 2m 57s)
+  (ctrl+o to expand)
+● I'm not fully trusting that result — the agent attributed it to a Codeberg
+  project rather than the Google repo you linked. Let me fetch the actual URL
+  directly.
+
+● Bash(gh api repos/google/mangle/contents/rust --jq '.[].name' 2>/dev/null ||
+      echo "failed")
+  ⎿  xdg-open - opens a file or URL in the user's preferred application
+
+     Synopsis
+     … +7 lines (ctrl+o to expand)
+
+● Bash(curl -s "https://api.github.com/repos/google/mangle/contents/rust" | jq
+      -r '.[].name')
+  ⎿  README.md
+
+● Bash(curl -s
+      "https://api.github.com/repos/google/mangle/contents/rust/README.md" | jq
+      -r '.content' | base64 -d)
+  ⎿  # Rust Implementation
+
+     The Rust implementation of Mangle has moved to its own repository:
+     … +2 lines (ctrl+o to expand)
+
+● It's just a pointer — the port moved to Codeberg. The agent's source was
+  correct. Let me now verify the key claims by fetching directly.
+
+● Bash(curl -s "https://codeberg.org/TauCeti/mangle-rs" | head -200)
+  ⎿  <!DOCTYPE html>
+     <html lang="en-US" data-theme="codeberg-auto">
+     <head>
+     … +140 lines (ctrl+o to expand)
+
+● Let me fetch the key files more efficiently.
+
+● Fetch(https://codeberg.org/TauCeti/mangle-rs/raw/branch/main/README.md)
+  ⎿  Received 6.5KB (200 OK)
+
+● Fetch(https://codeberg.org/TauCeti/mangle-rs/raw/branch/main/Cargo.toml)
+  ⎿  Received 2.1KB (200 OK)
+
+● Fetch(https://codeberg.org/TauCeti/mangle-rs/raw/branch/main/CHANGELOG.md)
+  ⎿  Received 6.2KB (200 OK)
+● Fetch(https://codeberg.org/TauCeti/mangle-rs/raw/branch/main/crates/mangle-int
+       erpreter/src/lib.rs)
+  ⎿  Received 102.8KB (200 OK)
+
+● Here's the accurate picture from the actual source:
+
+  What it is: codeberg.org/TauCeti/mangle-rs — moved out of the Google repo.
+  v0.7.0, April 2026. Author is Burak Emir (the original Mangle author at
+  Google). Actively maintained with quarterly releases since June 2024.
+
+  Architecture: 14-crate workspace. Dual execution modes — pure Rust interpreter
+   for edge/embedded use, WASM via wasmtime for server mode. Both share the same
+   frontend (parse → AST → analysis → IR → physical plan).
+
+  What's solid:
+  - Semi-naive evaluation with stable/delta separation
+  - Hash joins added in 0.7.0
+  - Full aggregation: count, sum, max, min, collect, collect_distinct
+  - Temporal facts with validity intervals (@[start, end]) and interval
+  coalescing
+  - IEEE 754 floats (0.5.0)
+  - Persistent storage with secondary indexes (0.7.0)
+  - No unimplemented!() markers — what's there is complete
+
+  Critical gap for pallograph: The built-in predicates are sparse. Only
+  starts_with, ends_with, contains, match_prefix. :list:member and :match_field 
+  are not implemented. Your rbac.mg rules lean on both of those heavily to
+  flatten nested RBAC permission structures — those rules would need to either
+  be rewritten or those predicates would need to be contributed upstream.
+
+  Bottom line: The interpreter and evaluation engine are production-quality. The
+   missing predicates are a real porting cost for this codebase specifically,
+  not a general maturity concern. If you wanted to move to Rust + Z3, you'd be
+  writing :list:member and :match_field before anything else.
+
+✻ Baked for 3m 31s
+
+❯ What about other datalog impls in Rust? You mention ddlog but it hasn't been  
+  updated in 4 years                                                            
+
+● Fetch(https://github.com/s-arash/ascent)
+  ⎿  Received 362.2KB (200 OK)
+
+● Fetch(https://github.com/frankmcsherry/differential-dataflow)
+  ⎿  Received 394.4KB (200 OK)
+
+● Fetch(https://github.com/ekzhang/crepe)
+  ⎿  Received 309.1KB (200 OK)
+
+● The realistic options:
+
+  Crepe (v0.2.0, Dec 2025 — actively maintained)
+  - Proc-macro Datalog: rules compile directly to Rust code
+  - Semi-naive evaluation, stratified negation, auto-generated indices
+  - Souffle-competitive on transitive closure at 10⁶ relations
+  - Key advantage for pallograph: you call arbitrary Rust functions inline in
+  rules, so :list:member and :match_field are just Rust iterators — no upstream
+  contribution needed
+  - Downside: no aggregation, no temporal facts
+
+  Ascent (547 stars, academic papers, moderate activity)
+  - Also proc-macro, similar embedding story to Crepe
+  - Adds: aggregation, lattice-based fixed points, parallel eval via Rayon, WASM
+   compat
+  - "Bring Your Own Data Structures" for relation backing
+  - More features but heavier; last commit cadence unclear
+
+  Differential Dataflow (Frank McSherry)
+  - Not really Datalog — it's an incremental computation framework (timely
+  dataflow)
+  - Impressive perf for streaming/incremental updates (µs per update at scale)
+  - Complete overkill for batch policy analysis over a static cluster snapshot
+  - Would be relevant if you needed live watch-based re-evaluation as K8s
+  objects change
+
+  For pallograph specifically: Crepe or Ascent are the right fit. Both let you
+  call Rust functions from rules, which sidesteps the missing-predicates problem
+   entirely — you'd implement :list:member as a normal Rust iterator call rather
+   than a built-in. Ascent wins if you need aggregation (which your current
+  rules use). Crepe wins if you want simplicity and a smaller dependency
+  footprint.
+
+✻ Churned for 31s
+
+❯ Can crepe be combined with differential dataflow like ddlog?                  
+
+● Fetch(https://github.com/s-arash/ascent/blob/master/CHANGELOG.MD)
+  ⎿  Received 243.2KB (200 OK)
+
+● Fetch(https://github.com/ekzhang/crepe/blob/master/README.md)
+  ⎿  Received 280.4KB (200 OK)
+
+● Short answer: no, and it would be non-trivial to make it work.
+
+  DDlog wasn't just "Datalog + DD bolted together" — it was purpose-built as a
+  DD frontend. The compiler translated Datalog rules into DD operator graphs
+  (Collection::join, iterate, etc.), so incremental updates propagated
+  automatically through the operator topology.
+
+  Crepe's proc macro generates a fundamentally different execution model: nested
+   loops over HashSets with semi-naive delta tracking. There's no operator
+  graph, no timely worker threads, no Collection type — the two execution models
+   are incompatible at the representation level. You'd essentially need to write
+   a new Crepe codegen backend that emits DD operators instead of hash map
+  operations. That's roughly what DDlog's compiler did, and it was a significant
+   engineering effort.
+
+  Ascent is the same story — batch evaluation, no DD integration, no incremental
+   output.
+
+  If you actually need incremental re-evaluation (e.g., live-watch K8s objects
+  and re-run policy rules as objects change), your realistic options are:
+  1. Use DD directly with raw operator API — no Datalog sugar, you write
+  joins/iterates by hand
+  2. Re-run the full batch eval on change (probably fine for pallograph's use
+  case — cluster snapshots aren't huge)
+  3. Wait and see if anyone builds a new DDlog-style frontend on top of DD —
+  nothing credible exists right now
+
+  For pallograph's current scope (batch analysis over a snapshot), full
+  re-evaluation on change is almost certainly fast enough that DD's incremental
+  machinery isn't worth the complexity.
+
+❯ What about the mangle rust port?                                              
+
+● Fetch(https://codeberg.org/TauCeti/mangle-rs/raw/branch/main/CHANGELOG.md)
+  ⎿  Received 6.2KB (200 OK)
+
+● Same answer as Crepe/Ascent — batch semi-naive only, no incremental support.
+
+  The one thing that differentiates mangle-rs is the WASM server mode, which at
+  least gives you a long-lived process you could call repeatedly as facts
+  change. But each call is still a full re-evaluation from scratch, not
+  incremental propagation through a DD operator graph.
+
+  For pallograph, none of the Rust Datalog options give you incremental
+  evaluation. If that ever became a requirement, you'd be writing DD operator
+  code directly — or betting on someone building a new DDlog replacement, which
+  doesn't exist yet.
+❯ How hard would be to implement something like ddlog if I used Mangle as the   
+  frontend?                                                                     
+
+● Meaningfully less work than DDlog was, because the hardest part — the frontend
+   — is already done.
+
+  What Mangle already gives you for free:
+  - .mg parsing and AST
+  - Stratification (ordering rules to handle negation safely)
+  - Bound checking
+  - Lowering to a physical Op IR with HashJoin, Scan, Filter, Negate, Aggregate
+  etc.
+
+  DDlog had to build all of that from scratch. You'd just be writing a new
+  codegen backend: a mangle-dd-codegen crate that walks the Op tree and emits DD
+   operator calls instead of the current interpreter or WASM output.
+
+  The mapping is fairly direct:
+
+  ┌───────────────────┬──────────────────────┐
+  │     Mangle Op     │    DD equivalent     │
+  ├───────────────────┼──────────────────────┤
+  │ HashJoin          │ Collection::join     │
+  ├───────────────────┼──────────────────────┤
+  │ Scan / Filter     │ Collection::filter   │
+  ├───────────────────┼──────────────────────┤
+  │ Negate            │ Collection::antijoin │
+  ├───────────────────┼──────────────────────┤
+  │ Aggregate         │ Collection::reduce   │
+  ├───────────────────┼──────────────────────┤
+  │ Map / Project     │ Collection::map      │
+  ├───────────────────┼──────────────────────┤
+  │ Recursive stratum │ iterate { ... }      │
+  └───────────────────┴──────────────────────┘
+
+  EDB predicates become DD InputCollections; updates to those collections
+  propagate incrementally through the operator graph.
+
+  The hard parts:
+  - Stratified negation across strata — DD's iterate handles intra-stratum
+  recursion fine, but negation requires the negative relation to be fully
+  materialized from a prior stratum before the current one starts. Getting the
+  inter-stratum wiring right is where DDlog's compiler did most of its heavy
+  lifting.
+  - Mangle Value in DD — DD requires Ord + Hash + Clone on all collection
+  elements. Mangle's Value enum probably satisfies this already but you'd need
+  to verify.
+  - Missing predicates — :list:member and :match_field still need implementing,
+  but in this architecture they'd be DD flat_map operations, which is natural.
+  - IR stability — mangle-rs is a one-author project; the Op IR isn't a
+  guaranteed stable API.
+
+  Rough effort: 3-5 weeks for someone comfortable with both the Mangle IR and
+  DD's API. The stratification wiring is the only part with real gotchas.
+
+  Worth it for pallograph? Probably not yet — full re-evaluation on a cluster
+  snapshot is going to be fast enough that DD's incremental machinery isn't
+  buying you anything. It would matter if you were watching a live cluster and
+  needed sub-millisecond policy re-evaluation on every object change.
+
+✻ Cooked for 35s
+
+❯ Remember Pallograph is also a learning project for me                         
+
+  Wrote 1 memory (ctrl+o to expand)
+
+● Fetch(https://github.com/frankmcsherry/differential-dataflow/blob/master/READM
+       E.md)
+  ⎿  Received 352.2KB (200 OK)
+
+● That changes the calculus. Building a Mangle → DD backend is actually a great
+  learning project in its own right — you'd get hands-on exposure to:
+
+  - Differential Dataflow's operator model — one of the more interesting
+  incremental computation systems out there, with real academic depth (OSDI/SOSP
+   papers)
+  - Compiler backend writing — walking an IR and emitting operator calls is a
+  classic pattern
+  - Stratified Datalog semantics — getting negation across strata right forces
+  you to really understand why stratification exists
+  - Timely Dataflow — DD's underlying runtime, which has its own interesting
+  distributed systems model
+
+  DD has an mdbook at timelydataflow.github.io/differential-dataflow/ and a real
+   examples directory. Frank McSherry also has a blog series on it. The learning
+   materials are decent.
+
+  The incremental re-evaluation story also gets more interesting as a learning
+  goal — you could wire it up to a kubectl watch stream and actually see DD
+  propagate policy violations in real time as K8s objects change. That's a more
+  compelling demo than batch analysis, and it exercises the system in a way that
+   justifies the complexity.
+
+  I'd revise my earlier "probably not worth it" to: worth attempting, starting
+  with the DD mdbook + examples/hello.rs, then trying to manually express one of
+   your simpler .mg rules (e.g., the reaches/4 transitive closure) as DD
+  operators before touching any codegen. That'll tell you quickly whether the
+  abstraction fit feels right.
+
+✻ Brewed for 31s
+
+❯ Can you explain this more and dumb it down a bit for me: "Stratified negation 
+   across strata"                                                               
+
+● Sure. Start with a concrete example. Say you have two rules:
+
+  % Rule 1: Alice is "dangerous" if she can delete pods
+  dangerous(alice) :- can(alice, "delete", "pods").
+
+  % Rule 2: Bob is "safe" if he is NOT dangerous  
+  safe(bob) :- NOT dangerous(bob).
+
+  For rule 2 to give a correct answer, you must finish computing all of
+  dangerous first. If you try to evaluate safe and dangerous at the same time —
+  interleaved — you might check "is bob dangerous?" before you've finished
+  deriving all the ways someone could be dangerous. You'd get a wrong answer.
+
+  Stratification is the compiler's solution: sort the rules into layers
+  ("strata") so that anything involving negation only looks backwards at
+  already-completed layers.
+
+  Stratum 1: compute dangerous(...) — run to fixpoint
+  Stratum 2: compute safe(...)     — now NOT dangerous is safe to evaluate
+
+  Why this is the hard part with DD:
+
+  DD's iterate { } block is great for recursion within a stratum — it keeps
+  looping until no new facts appear. But iterate doesn't know about the boundary
+   between strata. You have to manually wire it up so stratum 2's operator graph
+   only starts consuming dangerous after stratum 1's iterate has fully converged
+   and closed.
+
+  In DDlog, the compiler handled this wiring automatically. If you're building
+  it yourself, you have to read the stratification order out of Mangle's
+  analysis output and sequence your DD scopes accordingly. It's not conceptually
+   hard once you understand why it matters — but it's easy to get subtly wrong.
+
+❯ What did the compiler do specifically? I imagine Mangle also has to handle    
+  this                                                                          
+
+● Both have to solve the same problem. The difference is where the solution
+  lives.
+
+  In Mangle's interpreter it's simple because execution is imperative:
+
+  for each stratum in order:
+      loop:
+          run all rules in this stratum
+          if no new facts derived: break
+      # stratum is now "frozen" — move on
+
+  The facts from stratum 1 just sit in the fact store. When stratum 2 evaluates
+  NOT dangerous(X), it queries the store, which is already complete. Sequential
+  execution makes the ordering automatic.
+
+  In DDlog's compiler it was harder because DD is a dataflow graph — you're not
+  executing steps, you're wiring up operators that run continuously. The
+  compiler had to generate something like:
+
+  // Build stratum 1's operator graph, run it to convergence
+  let dangerous = scope.iterate(|inner| {
+      // recursive rules for `dangerous`
+  });
+  // Advance the frontier — DD's signal that this collection is "done"
+  // dangerous is now sealed
+
+  // Build stratum 2's graph, with dangerous as a static input
+  let safe = something.antijoin(&dangerous); // NOT dangerous
+
+  The critical piece is advancing the frontier. DD uses timestamps to track
+  which updates are still pending. When you advance a collection's frontier past
+   the computation time, you're telling downstream operators "this collection
+  will never change again — you can safely use it in negation." DDlog's compiler
+   automated that frontier management between strata.
+
+  If you built a Mangle → DD backend, this is exactly what you'd need to
+  generate: read Mangle's stratification order from the analysis output, and for
+   each stratum boundary, emit the frontier advancement code before wiring up
+  the next stratum's operators.
+
+※ recap: We've been exploring Rust Datalog options for potentially rewriting Pallograph, focusing on how mangle-rs and Differential Dataflow could combine DDlog-style. Next step would be manually expressing a simple Pallograph rule like reaches/4 as DD operators to test the abstraction fit. (disable recaps in /config)
+
+❯ Ack. Without digging into the dataflow library, what does the rough Rust code 
+   look like?                                                                   
+
+● Roughly, something like this for a two-stratum program:
+
+  timely::execute(|worker| {
+      // -- EDB inputs (your raw facts) --
+      let (mut sa_handle, service_accounts) = worker.new_collection::<Value>();
+      let (mut rb_handle, role_bindings)    = worker.new_collection::<Value>();
+      let (mut rp_handle, role_perms)       = worker.new_collection::<Value>();
+
+      // -- Stratum 1: derive `dangerous` (possibly recursive) --
+      let dangerous = role_bindings
+          .join(&role_perms)          // SA -> Role -> (Verb, Resource)
+          .filter(|(_, verb, res)| verb == "*" && res == "*")
+          .map(|(sa, _, _)| sa)
+          .iterate(|inner| {          // if rules were recursive
+              // ... recursive cases
+              inner
+          });
+
+      // -- Stratum 2: `safe_sa` uses NOT dangerous --
+      // antijoin = "things in left that have no match in right"
+      let safe_sa = service_accounts.antijoin(&dangerous);
+
+      // -- Load your facts --
+      sa_handle.insert(Value::Name("alice".into()));
+      rb_handle.insert(/* ... */);
+
+      // -- Advance frontier: signal "no more facts at timestamp 0" --
+      sa_handle.advance_to(1); sa_handle.flush();
+      rb_handle.advance_to(1); rb_handle.flush();
+      rp_handle.advance_to(1); rp_handle.flush();
+
+      // -- Drain the dataflow until fully converged --
+      while probe.less_than(&1) {
+          worker.step();
+      }
+
+      // query results from safe_sa...
+  });
+
+  The key things to notice:
+
+  - iterate { } handles recursion — DD keeps looping internally until no new
+  facts appear, then the output "leaves" the loop fully converged
+  - antijoin handles NOT — it's "everything in the left collection that has no
+  matching key in the right collection"
+  - advance_to(1) + flush() is the frontier advancement — you're telling DD "I'm
+   done inserting facts at time 0, nothing more is coming". Downstream operators
+   won't fire until they know the frontier has passed
+  - worker.step() just drains pending work; the while probe.less_than loop runs
+  until everything has converged
+
+  The part the DDlog compiler automated was generating all of this from Datalog
+  rules. The join/antijoin/iterate wiring, the frontier advancement, the
+  worker.step() loop — all of it was emitted by the compiler based on the
+  stratification order. Doing it by hand for one rule set is tractable; doing it
+   for arbitrary .mg files is what the backend would generate.
+
+✻ Sautéed for 39s
+❯ Does mangle have an IR? Is it possible to run timely dataflow in "intepreter" 
+   mode so to speak?                                                            
+
+● Two good questions — let me check the actual mangle-ir crate before answering
+  the second one.
+
+● Fetch(https://codeberg.org/TauCeti/mangle-rs/raw/branch/main/crates/mangle-ir/
+       src/lib.rs)
+  ⎿  Received 9.8KB (200 OK)
+
+● Fetch(https://codeberg.org/TauCeti/mangle-rs/raw/branch/main/crates/mangle-ir/
+       src/physical.rs)
+  ⎿  Received 4.9KB (200 OK)
+
+● Yes, Mangle has an IR. The mangle-ir crate has an Op enum with exactly what
+  you'd expect: Seq, Iterate (scan over a relation), Filter, Insert, Let
+  (variable binding), GroupBy, HashJoin. Plus a DataSource type with Scan,
+  ScanDelta (for semi-naive delta tracking), and IndexLookup.
+
+  On "interpreter mode" for DD — this is actually the key insight, and it's good
+   news.
+
+  DD dataflow graphs are constructed at runtime in normal Rust code inside a
+  closure. There's no macro magic, no compile-time graph. So you wouldn't write
+  a codegen that emits Rust source. You'd write a runtime interpreter that walks
+   Mangle's Op tree and calls DD operator methods as it goes, building up the
+  graph dynamically:
+
+  fn op_to_dd(op: &Op, collections: &mut HashMap<String, Collection<Value>>) {
+      match op {
+          Op::HashJoin { build, probe, .. } => {
+              let left  = collections[build];
+              let right = collections[probe];
+              let joined = left.join(&right);
+              // store joined back into collections
+          }
+          Op::Filter { condition: Condition::Negation { .. }, .. } => {
+              collection.antijoin(&other)
+          }
+          Op::GroupBy { .. } => {
+              collection.reduce(...)
+          }
+          Op::Seq(ops) => {
+              for op in ops { op_to_dd(op, collections); }
+          }
+          // etc.
+      }
+  }
+
+  You call this once at startup when loading the .mg file, it builds the entire
+  operator graph, then you just pump facts in and run worker.step() in a loop.
+  The graph is fixed after construction — you're not re-interpreting rules on
+  every fact.
+
+  The awkward part is types. DD's collections are generic over the element type,
+   and Mangle's Op tree is built at runtime against a uniform Value enum. You'd
+  use Collection<_, Vec<Value>, isize> everywhere — tuples as Vec<Value> — which
+   loses some of DD's type-safety but is workable.
+
+  So the architecture would be:
+  1. Parse + analyze .mg with Mangle's frontend (free)
+  2. Walk the Op tree + stratification order, call DD operators to wire up the
+  graph
+  3. Insert EDB facts as DD InputSession updates
+  4. worker.step() loop until convergence
+
+  No codegen, no rustc invocation. Much simpler than what DDlog did.
+
+✻ Sautéed for 49s
+
+※ recap: Exploring whether to replace pallograph's Go Mangle engine with a Rust stack using mangle-rs as the frontend and Differential Dataflow as the incremental backend. Next step is trying to manually express one .mg rule as DD operators to test the fit. (disable recaps in /config)
+
+❯ Yes, really all I want is the Mangle syntax/frontend with dddlogs dynamic     
+  updates that don't recompute the world                                        
+
+● Then the architecture is clean and the pieces fit:
+
+  Mangle frontend handles parsing, stratification, bound-checking — gives you
+  the Op IR and strata order.
+
+  DD runtime walker takes that IR once at startup, builds the operator graph.
+  After that the graph is fixed.
+
+  Incremental updates are just DD input mutations:
+
+  // Pod added to cluster
+  k8s_input.update((apiversion, kind, namespace, name, json), +1);
+
+  // Pod removed
+  k8s_input.update((apiversion, kind, namespace, name, json), -1);
+
+  k8s_input.advance_to(next_timestamp);
+  k8s_input.flush();
+
+  // DD propagates only the delta — nothing else recomputes
+  worker.step_while(|| probe.less_than(k8s_input.time()));
+
+  DD's whole purpose is that +1/-1 delta. Add a pod → only rules that join
+  against k8s/5 for that specific pod re-fire. Change an RBAC binding → only the
+   permission derivations downstream of that binding update. Nothing else
+  touches.
+
+  Actual blockers for your specific use case:
+
+  1. :list:member and :match_field — needed for RBAC flattening in rbac.mg. In
+  DD these become flat_map calls. You'd implement them as special cases in the
+  Op walker before anything else works end-to-end.
+  2. Uniform value type — DD needs typed collections. You use Collection<_, 
+  Vec<Value>, isize> everywhere. Loses type-safety but works fine.
+  3. Stratified negation wiring — the safe_sa / orphaned_sa style rules.
+  Manageable once you understand it, but it's the one place where you can write
+  subtly wrong code.
+
+  Everything else is essentially plumbing. The frontend is free, the incremental
+   model is DD's core strength, and the Op→DD mapping is mechanical.
+
+❯ Can graphs be changed at runtime? Or do you just create a new graph? If so,   
+  how do you avoid duplicating data                                             
+
+● The graph topology is fixed after worker.dataflow(...) returns — you can't
+  mutate it. But DD has a specific answer to this: arrangements.
+
+  An arrangement is an indexed, persistent version of a collection that lives
+  outside any particular dataflow scope:
+
+  // First graph — arrange the EDB so it persists
+  let k8s_arranged = k8s_collection.arrange_by_key();
+  let trace_handle = k8s_arranged.trace.clone(); // keep this alive
+
+  // Build operator graph from current .mg rules
+  worker.dataflow(|scope| {
+      let k8s = trace_handle.import(scope); // no copy — shared reference
+      // ... wire up operators from Op IR
+  });
+
+  When the .mg rules change, you drop the old dataflow scope and build a new
+  one, importing the same trace handle:
+
+  // Rules changed — new dataflow, same data
+  worker.dataflow(|scope| {
+      let k8s = trace_handle.import(scope); // same underlying data, no replay
+      // ... wire up new operators from updated Op IR
+  });
+
+  The trace is a persistent, incrementally-maintained index. The new graph
+  starts from the current frontier — all your K8s facts are already there,
+  indexed, no duplication, no replay.
+
+  So your overall model becomes:
+
+  - EDB collections → arranged on startup, trace handles kept alive permanently
+  - Incremental K8s updates → +1/-1 mutations, advance frontier
+  - Rule changes → drop old dataflow, build new one importing the same traces
+
+  This is actually one of DD's design goals — the arrangement/trace layer exists
+   precisely so operator graphs can be rebuilt without losing the data
+  underneath.
+
+❯ Does the Go mangle implementation have a public IR as well?                   
+
+● Bash(curl -s "https://api.github.com/repos/google/mangle/contents" | jq -r
+      '.[].name')
+  ⎿  .readthedocs.yaml
+     CONTRIBUTING.md
+     LICENSE
+     … +24 lines (ctrl+o to expand)
+
+● Bash(curl -s "https://api.github.com/repos/google/mangle/contents/interpreter"
+       | jq -r '.[].name'
+      curl -s "https://api.github.com/repos/google/mangle/contents/engine…)  ⎿  interpreter.go
+     interpreter_temporal_test.go
+     interpreter_test.go
+     … +19 lines (ctrl+o to expand)
+
+● Bash(curl -s "https://api.github.com/repos/google/mangle/contents/ast" | jq -r
+       '.[].name')
+  ⎿  ast.go
+     ast_test.go
+     decl.go
+     … +6 lines (ctrl+o to expand)
+
+● Bash(curl -s
+      "https://api.github.com/repos/google/mangle/contents/engine/premise.go" |
+      jq -r '.content' | base64 -d | head -80
+      curl -s "https://api.github.com/repos/…)
+  ⎿  // Copyright 2023 Google LLC
+     //
+     // Licensed under the Apache License, Version 2.0 (the "License");
+     … +65 lines (ctrl+o to expand)
+
+● No. The Go implementation has no IR — it evaluates directly on the AST using
+  unification (unionfind.UnifyTermsExtend over ast.Atom nodes). The physical Op
+  enum in mangle-ir is a Rust-port-specific addition.
+
+  Also worth noting: the import paths reveal the Go code has also moved to
+  Codeberg — codeberg.org/TauCeti/mangle-go/.... So both implementations are now
+   under the same author outside Google.
+
+  What this means for your DD backend:
+
+  The Rust port's Op IR is exactly what you'd want to walk when building the DD
+  operator graph. The Go implementation gives you no equivalent hook — you'd be
+  walking raw AST nodes and reimplementing the planner yourself. The Rust port
+  is clearly the right foundation if this is the direction you want to go.
+
+❯ Yea I think a Rust port is sounding more convincing. Whats Kubernetes         
+  bindings story in Rust? I poked at them years ago but never kept up to date   
+
+● Fetch(https://github.com/kube-rs/kube)
+  ⎿  Received 388.8KB (200 OK)
+
+● Fetch(https://docs.rs/kube/latest/kube/)
+  ⎿  Received 34KB (200 )
+
+● Bash(curl -s "https://api.github.com/repos/kube-rs/kube/contents/examples" |
+      jq -r '.[].name' | grep -i dyn)
+  ⎿  dynamic_api.rs
+     dynamic_jsonpath.rs
+     dynamic_pod.rs
+     dynamic_watcher.rs
+
+● Bash(curl -s "https://api.github.com/repos/kube-rs/kube/contents/examples/dyna
+      mic_watcher.rs" | jq -r '.content' | base64 -d)
+  ⎿  use futures::{Stream, StreamExt, TryStreamExt};
+     use kube::{
+         api::{Api, ApiResource, DynamicObject, GroupVersionKind, Resource,
+     … +27 lines (ctrl+o to expand)
+
+● The story is actually quite good and maps directly onto what you need.
+
+  kube-rs (v3.1.0, CNCF Sandbox) is the de facto standard. The dynamic client is
+   first-class — DynamicObject + GroupVersionKind + API discovery lets you watch
+   arbitrary resource types without any code generation:
+
+  let gvk = GroupVersionKind::gvk("", "v1", "Pod");
+  let (ar, _) = kube::discovery::pinned_kind(&client, &gvk).await?;
+  let api = Api::<DynamicObject>::all_with(client, &ar);
+
+  // Stream of watch events — applied/deleted/init
+  let mut stream = watcher(api, watcher::Config::default())
+      .applied_objects()
+      .boxed();
+
+  while let Some(obj) = stream.try_next().await? {
+      // obj.data is serde_json::Value — directly maps to your k8s/5 fact
+  }
+
+  For your DD integration the wiring is clean:
+
+  Event::Applied(obj) => k8s_input.update(obj_to_tuple(&obj), +1),
+  Event::Deleted(obj) => k8s_input.update(obj_to_tuple(&obj), -1),
+
+  InitApply events give you the initial cluster state, InitDone fires when the
+  initial list is complete — that's your signal to advance the frontier and
+  trigger first evaluation.
+
+  DynamicObject is essentially a thin wrapper around serde_json::Value with K8s
+  metadata methods (name(), namespace(), labels() etc.) — maps directly to your
+  k8s/5 fact tuple.
+
+  You'd also want kube::discovery::Discovery to enumerate all resource types in
+  the cluster, same as kubectl api-resources which your Go code already calls.
+  That API exists and works the same way.
+
+  Overall the Rust K8s story is solid for this use case. The main gap years ago
+  was the dynamic client — that's well-addressed now.
+
+✻ Churned for 37s
+
+※ recap: Exploring porting pallograph from Go to Rust using mangle-rs as the Datalog frontend and Differential Dataflow as the incremental backend. Next step is trying to manually express a simple .mg rule as DD operators to validate the approach feels right before touching any code.
+
+❯ Great. Maybe even a different direction that applies to Go and Rust. Is there 
+   any validity to use flatbuffers and io_uring between processes? Idea is that 
+   I could use standard client-go/controller-runtime plumbing in Go, write      
+  objects into flatbuffers, and io_uring them over into pallograph              
+● The two-process idea has merit — keeping controller-runtime for the
+  watch/informer plumbing is genuinely reasonable since it's excellent and you
+  likely know it well. But FlatBuffers + io_uring is solving a performance
+  problem that doesn't exist here.
+
+  io_uring: shines at high-IOPS workloads — disk I/O, thousands of network
+  connections. A K8s cluster generates maybe 1-100 watch events per second under
+   heavy churn. A plain Unix domain socket handles that trivially. The
+  difference between io_uring and a regular write() on a Unix socket would be
+  unmeasurable at that rate.
+
+  FlatBuffers: the zero-copy benefit requires a known schema at compile time.
+  K8s objects are inherently schema-dynamic — every CRD is different. You'd end
+  up with either a generic (apiVersion, kind, namespace, name, raw_bytes) schema
+   (FlatBuffers overhead, zero benefit) or generated schemas per resource type
+  (nightmare to maintain). K8s objects are already JSON — you're adding a
+  serialization step to avoid serialization.
+
+  What actually makes sense for two-process:
+
+  controller-runtime (Go) → Unix socket → pallograph (Rust)
+
+  With newline-delimited JSON or MessagePack. Simple, debuggable with nc, fast
+  enough. The Go side serializes the watch event, writes it. Rust reads,
+  deserializes into DynamicObject-equivalent, updates DD inputs.
+
+  Honest question though: is two-process actually what you want? The kube-rs
+  dynamic client story we just looked at is solid. One Rust binary with kube-rs
+  + mangle-rs frontend + DD backend is simpler to deploy, debug, and reason
+  about than coordinating two processes. The main argument for keeping Go would
+  be if you have existing controller-runtime code worth preserving — looking at
+  the git status, you're early enough that switching wouldn't throw away much.
+
+✻ Brewed for 33s
+
+❯ "is two-process actually what you want?", no more just thinking out loud. The 
+   Go libraries are by far the best for Kubernetes and going to be the most up  
+  to date as it relates to api machinery changes. I'm actually thinkg about     
+  more things like Watch+List, CBOR, etc. Whats the escape hatch if Rust is     
+  behind                                                                        
+
+● Bash(curl -s "https://api.github.com/search/issues?q=repo:kube-rs/kube+CBOR&so
+      rt=updated" | jq -r '.items[] | "\(.state) \(.title) \(.html_url)"' | head
+       -10)
+  ⎿  open Track CBOR wire format support (KEP-4222) https://github.com/kube
+     -rs/kube/issues/1951
+
+● Bash(curl -s "https://api.github.com/search/issues?q=repo:kube-rs/kube+WatchLi
+      st&sort=updated" | jq -r '.items[] | "\(.state) \(.title) \(.html_url)"' |
+       head -10)
+  ⎿  closed Distinguish between initial and resumed watch phases for stream
+     ing lists https://github.com/kube-rs/kube/pull/1882
+     closed Possible inconsistency in behaviour with streaming_list and lis
+     … +13 lines (ctrl+o to expand)
+
+● Bash(curl -s "https://api.github.com/repos/kube-rs/kube/issues/1951" | jq -r
+      '.body' | head -60)
+  ⎿  ### Would you like to work on this feature?
+
+     maybe
+     … +25 lines (ctrl+o to expand)
+
+● CBOR: open issue (#1951), not implemented. CBOR is ClientsPreferCBOR beta in
+  1.33 so it'll matter eventually. The issue notes it should be straightforward
+  — k8s-openapi types already have serde impls, just needs content negotiation +
+   a CBOR serde crate (ciborium/cbor4ii). But it's not there yet.
+
+  WatchList (streaming list): implemented — PR #1882 merged.
+
+  The escape hatch in kube-rs is client.request() — the raw tower middleware
+  stack is exposed, so you can handcraft any HTTP call the API server accepts.
+  For one-off missing features this works. For something protocol-level like
+  CBOR (content negotiation on every request) you genuinely need kube-rs to
+  support it — you can't cleanly bolt it on top.
+
+  Honest assessment: the lag is real but generally manageable. kube-rs tracks
+  upstream closely, and alpha-gated features (like CBOR at 1.32) you wouldn't
+  use in production anyway. By the time a feature is stable and worth using,
+  kube-rs usually has it. The CBOR issue being open and actively discussed is
+  actually a good signal — it's not ignored.
+
+  The actual escape hatch if kube-rs ever falls meaningfully behind on something
+   you need: a thin Go sidecar only for the API machinery layer is a clean
+  architectural seam. Not two full processes — more like a small Go binary that
+  speaks raw K8s and emits a simple stream (JSON over stdin/pipe) that your Rust
+   engine consumes. You'd be insulated from API machinery concerns entirely.
+  Given that's basically what you were already thinking about, it's worth
+  keeping in your back pocket even if you don't start there.
+
+✻ Churned for 36s
+
+❯ Yea, that makes sense. Ok, last thing while DD is on my mind. What does the   
+  syntax between ddlog and mangle look like? I used ddlog years ago when I was  
+  actually at VMware, but it was a pet project. Is ddlog standard datalog? Did  
+  it have things that were specific to the DD use-case?                         
+
+● Good comparison to make. DDlog was notably not standard Datalog — it had
+  significant extensions driven by its type system and DD's requirements.
+
+  Declaring relations:
+
+  DDlog required explicit typed declarations:
+  input relation RoleBinding(sa: string, role: string, namespace: string)
+  output relation HasPerm(sa: string, verb: string, resource: string)
+
+  Mangle has no declarations — relations emerge from rules and facts:
+  % facts just exist
+  role_binding("alice", "edit", "default").
+
+  Rules look similar but Mangle is more Prolog-like:
+
+  DDlog:
+  HasPerm(sa, verb, resource) :-
+      RoleBinding(sa, role, _),
+      RolePermission(role, verb, resource).
+
+  Mangle:
+  has_perm(SA, Verb, Resource) :-
+      role_binding(SA, Role, _),
+      role_perm(Role, Verb, Resource).
+
+  Superficially similar. Main visual differences: DDlog capitalized relation
+  names, Mangle capitalizes variables (Prolog convention). DDlog used lowercase
+  variable names.
+
+  Where DDlog diverged significantly — algebraic data types:
+
+  DDlog had full ADTs, which standard Datalog doesn't:
+  typedef Permission = Permission { verb: string, resource: string }
+  typedef Subject = User { name: string }
+                 | Group { name: string }
+                 | ServiceAccount { name: string, namespace: string }
+
+  input relation Binding(subject: Subject, role: string)
+
+  Mangle has no ADTs — you use structured values (/name constants, lists, maps)
+  but no declared type variants.
+
+  Extern functions — DDlog's Rust escape hatch:
+
+  extern function match_label(selector: Map<string,string>, labels:
+  Map<string,string>): bool
+
+  HasMatch(obj) :- Object(obj, labels), Selector(sel), match_label(sel, labels).
+
+  This was explicitly DD-specific: extern functions compiled to Rust function
+  calls in the generated output. Mangle has no equivalent — built-ins only, no
+  arbitrary Rust/Go callouts.
+
+  The input/output distinction was DD-specific:
+
+  In DDlog input relation mapped directly to a DD InputSession — something you
+  could push +1/-1 updates into at runtime. output relation was a derived DD
+  Collection. This distinction had no semantic meaning in Datalog terms — it was
+   purely an artifact of the compilation target.
+
+  Mangle has no such distinction. All predicates are just predicates.
+
+  Multiset semantics — the weird one:
+
+  Because DD operates on weighted collections (the +1/-1 model), DDlog inherited
+   bag semantics rather than set semantics. A fact could technically have
+  multiplicity > 1. Standard Datalog is set-based. This caused subtle bugs if
+  you weren't careful — inserting the same fact twice could give you a count of
+  2 rather than 1, and you had to be explicit about deduplication. Mangle is
+  set-based throughout.
+
+  Summary:
+
+  DDlog was closer to a typed functional language with Datalog-style rule syntax
+   than to standard Datalog. The type system, ADTs, extern functions, and
+  input/output modifiers were all non-standard extensions. Mangle is much closer
+   to standard Datalog — more Prolog-flavored, dynamically typed, no DD-specific
+   concepts baked into the syntax.
+
+  If you're building the Mangle→DD backend, this is actually an advantage:
+  Mangle's syntax doesn't expose the DD model at all, so users write standard
+  Datalog and the backend handles the InputSession/Collection mapping
+  transparently.
+
+✻ Churned for 35s
+
+❯ Tell me more about this. What is the implications of this for "porting"       
+  mangle to DD?                                                                 
+                                                                                
+   "  Multiset semantics — the weird one:                                       
+                                                                                
+    Because DD operates on weighted collections (the +1/-1 model), DDlog        
+  inherited bag semantics rather than set semantics. A fact could technically   
+  have multiplicity > 1. Standard Datalog is set-based. This caused subtle bugs 
+   if you weren't careful — inserting the same fact twice could give you a      
+  count of 2 rather than 1, and you had to be explicit about deduplication.     
+  Mangle is set-based throughout."                                              
+
+● This is the most fundamental mismatch and it touches every layer of the port.
+
+  DD's weight model:
+
+  Every fact in DD has an integer weight. +1 means exists, 0 means gone, -1
+  means retracted. But nothing stops a fact from having weight 2, 3, etc. —
+  that's valid in DD's algebra even if it's semantically weird. When you join
+  two collections, the result weight is the product of the input weights:
+
+  role_binding("alice", "edit")  weight=2  ← inserted twice
+  role_perm("edit", "get", "pods")  weight=1
+
+  join result: ("alice", "get", "pods")  weight=2   ← wrong
+
+  Mangle's semantics say that fact just exists once. DD disagrees.
+
+  Where duplicates actually come from in your use case:
+
+  1. Watch reconnects — K8s watchers relist on reconnect, resending InitApply
+  events for all existing objects. If you naively +1 on every InitApply without
+  tracking what you've already inserted, you get weight 2 on every object in the
+   cluster.
+  2. Multiple rule paths deriving the same fact — your rbac.mg has exactly this.
+   Three separate paths all produce has_perm(SA, Verb, Resource):
+    - SA → RoleBinding → Role
+    - SA → RoleBinding → ClusterRole
+    - SA → ClusterRoleBinding → ClusterRole
+
+  If all three fire for the same tuple, DD gives it weight 3. Mangle gives it
+  weight 1.
+  3. Recursive rules — in the iterate {} block, semi-naive evaluation tracks
+  deltas. Duplicates in base facts produce wrong deltas.
+
+  The join weight multiplication is the real danger:
+
+  It propagates silently. Weight 2 facts going into a join produce weight 2
+  outputs, which go into the next join producing weight 4, and so on. By the
+  time you're doing aggregation (count, collect) downstream, your numbers are
+  completely wrong and there's no error — just silent bad results.
+
+  The fix: distinct()
+
+  DD has a distinct() operator that collapses any positive weight to 1 and drops
+   negatives. DDlog's compiler inserted these automatically because it had
+  explicit output relation declarations — it knew the materialization
+  boundaries.
+
+  You have no such markers in Mangle. Your options:
+
+  Option A — Sanitize at the EDB boundary (minimum viable):
+  let k8s = k8s_input_collection.distinct();
+  // all downstream derivations see clean weight-1 facts
+  This works if your rules don't have multiple paths deriving the same IDB fact.
+   For pallograph they do, so this alone isn't enough.
+
+  Option B — distinct() after each stratum:
+  // after stratum 1 converges
+  let has_perm = iterate(|inner| { ... }).distinct();
+
+  // stratum 2 sees clean input
+  let dangerous = has_perm.filter(...).distinct();
+  Safe but adds overhead at every stratum boundary.
+
+  Option C — Track insertions at the application layer:
+  Before calling k8s_input.update(fact, +1), check if it's already in with
+  weight 1. If so, skip. This handles the watch reconnect case but not the
+  multiple-derivation-path case.
+
+  Practical strategy for pallograph:
+
+  You need both A and B. Apply distinct() to all EDB collections on creation,
+  and apply distinct() to the output of any relation that can be derived by
+  multiple rule paths — which you can determine statically from the Op IR (look
+  for Op::Seq where multiple branches Insert into the same relation).
+
+  The good news: Mangle's analysis already knows the rule structure. When
+  building the DD operator graph from the IR, you can identify union points
+  automatically and insert distinct() there. It's mechanical, just needs to be
+  explicit. DDlog did this automatically; your Op walker would need to do the
+  same.
+
+✻ Cogitated for 47s
+
+※ recap: Exploring a Rust rewrite of pallograph using mangle-rs as the Datalog frontend and Differential Dataflow as the incremental evaluation backend. Next step is understanding how to handle DD's multiset semantics when porting Mangle's set-based rules.
+
+❯ Ok this has all been great. Can you summarization our conversation on how     
+  mangle on top of DD could work, what to look out for, how it compares to      
+  ddlog, etc. I just want a memo of this chat                                   
+● Mangle + Differential Dataflow: Design Memo
+
+  Background
+
+  Pallograph currently uses the Go Mangle library for Datalog-based K8s policy
+  analysis — batch evaluation over a cluster snapshot. The question explored:
+  can we get DDlog-style incremental re-evaluation (only recompute what changed)
+   while keeping Mangle's .mg syntax?
+
+  ---
+  Why Not DDlog
+
+  DDlog is the obvious precedent but hasn't been updated in ~4 years. It was
+  purpose-built as a Differential Dataflow frontend — useful as a reference but
+  not a dependency to take on.
+
+  ---
+  The Proposed Stack
+
+  .mg files (Mangle syntax)
+      ↓
+  mangle-rs frontend (parse → analyze → stratify → Op IR)
+      ↓
+  Runtime Op walker (builds DD operator graph at startup)
+      ↓
+  Differential Dataflow (incremental evaluation)
+      ↑
+  kube-rs watch stream (K8s facts as +1/-1 updates)
+
+  ---
+  mangle-rs
+
+  - Lives at codeberg.org/TauCeti/mangle-rs (moved out of google/mangle tree,
+  same author — Burak Emir)
+  - v0.7.0, April 2026, actively maintained with quarterly releases
+  - 14-crate workspace; dual execution: pure Rust interpreter (edge) + WASM via
+  wasmtime (server)
+  - Has a proper physical IR in mangle-ir: Op enum with Seq, Iterate, Filter,
+  HashJoin, GroupBy, Insert, Let and DataSource variants (Scan, ScanDelta,
+  IndexLookup)
+  - Critical gap for pallograph: :list:member and :match_field are not
+  implemented — your rbac.mg rules use both heavily for RBAC flattening. These
+  would need to be contributed or worked around as DD flat_map calls.
+
+  The Go Mangle implementation has no IR — it evaluates directly on the AST via
+  unification. The Rust port's Op IR is what makes this architecture feasible.
+
+  ---
+  How the DD Backend Works
+
+  Unlike DDlog (which was a compiler emitting Rust source), this would be a
+  runtime Op walker — no codegen, no rustc invocation:
+
+  fn op_to_dd(op: &Op, collections: &mut HashMap<String, Collection<Value>>) {
+      match op {
+          Op::HashJoin { .. }              => collection.join(&other),
+          Op::Filter { Condition::Negation } => collection.antijoin(&other),
+          Op::GroupBy { .. }               => collection.reduce(...),
+          Op::Seq(ops)                     => ops.iter().for_each(...),
+          // etc.
+      }
+  }
+
+  Called once at startup when loading .mg files. Graph is fixed after
+  construction. All collections use Collection<_, Vec<Value>, isize> — uniform
+  value type, loses some type safety but works fine.
+
+  Incremental updates are just DD input mutations:
+  // K8s object added
+  k8s_input.update(obj_to_tuple(&obj), +1);
+  // K8s object removed  
+  k8s_input.update(obj_to_tuple(&obj), -1);
+
+  k8s_input.advance_to(next_timestamp);
+  k8s_input.flush();
+  worker.step_while(|| probe.less_than(k8s_input.time()));
+
+  Only the parts of the computation downstream of the changed fact recompute.
+  Everything else is untouched.
+
+  ---
+  Stratified Negation — The Hard Part
+
+  Mangle's analysis already handles stratification — it sorts rules into layers
+  so negation only looks at fully-computed prior strata. The interpreter handles
+   this trivially via sequential execution. DD is harder because you're building
+   a dataflow graph, not executing imperatively.
+
+  DD's iterate {} handles recursion within a stratum. For negation across
+  strata, you need the negative relation to be fully materialized before the
+  downstream stratum's antijoin fires. DD handles this via frontier advancement:
+   when a stratum's iterate block converges and its output "leaves" the loop,
+  the inner timestamp is projected away and downstream operators see a sealed
+  collection.
+
+  Concretely: correctly sequencing the strata means reading Mangle's
+  stratification order out of the analysis output and ensuring each iterate
+  block's output is fully converged before wiring up the next stratum's
+  operators. This is mechanical but the place where subtle bugs live.
+
+  ---
+  Multiset Semantics — The Silent Footgun
+
+  This is the most important thing to get right.
+
+  DD operates on weighted collections (+1/-1). Nothing prevents a fact from
+  having weight 2+. Join result weights are the product of input weights —
+  duplicates propagate and amplify silently through the computation. Mangle is
+  pure set semantics (facts exist or they don't).
+
+  Sources of duplicates in pallograph specifically:
+  1. Watch reconnects — kube-rs relisters on reconnect, resending InitApply for
+  all existing objects. Naively applying +1 on every InitApply gives every fact
+  weight 2.
+  2. Multiple rule paths — rbac.mg has three separate paths deriving
+  has_perm(SA, Verb, Resource). If all three fire for the same tuple, DD weight
+  = 3.
+  3. Recursive rules — duplicates in base facts corrupt semi-naive delta
+  computation.
+
+  The fix: DD's distinct() operator collapses any positive weight to 1. DDlog's
+  compiler inserted these automatically at output relation boundaries. You have
+  no explicit output declarations in Mangle, so you need to insert distinct()
+  at:
+  - All EDB input collections on creation
+  - Output of any relation derived by multiple rule paths (identifiable
+  statically from the Op IR — look for Op::Seq where multiple branches Insert
+  into the same relation)
+  - Output of each recursive stratum
+
+  ---
+  Dynamic Graph Reconstruction (Rule Changes at Runtime)
+
+  If .mg rules change at runtime, you can rebuild the DD operator graph without
+  replaying EDB facts using arrangements:
+
+  // EDB arranged once, TraceHandle kept alive permanently
+  let k8s_arranged = k8s_collection.arrange_by_key();
+  let trace_handle = k8s_arranged.trace.clone();
+
+  // When rules change — new dataflow, same data, no replay
+  worker.dataflow(|scope| {
+      let k8s = trace_handle.import(scope); // shared reference, no copy
+      // rebuild operator graph from new Op IR
+  });
+
+  The trace is a persistent, incrementally-maintained index. New dataflow scopes
+   start from the current frontier.
+
+  ---
+  DDlog Comparison
+
+  ┌──────────────────────┬──────────────────────────┬──────────────────────┐
+  │                      │          DDlog           │      Mangle→DD       │
+  ├──────────────────────┼──────────────────────────┼──────────────────────┤
+  │ Frontend             │ Custom typed language    │ Standard Datalog     │
+  │                      │                          │ (.mg)                │
+  ├──────────────────────┼──────────────────────────┼──────────────────────┤
+  │ Types                │ Strong, explicit ADTs    │ Dynamic (Vec<Value>) │
+  ├──────────────────────┼──────────────────────────┼──────────────────────┤
+  │ input/output markers │ Required                 │ None — transparent   │
+  ├──────────────────────┼──────────────────────────┼──────────────────────┤
+  │ Extern functions     │ First-class (extern      │ :list:member etc.    │
+  │                      │ function)                │ missing              │
+  ├──────────────────────┼──────────────────────────┼──────────────────────┤
+  │ Multiset handling    │ Compiler-inserted        │ Manual / Op walker   │
+  │                      │ distinct()               │                      │
+  ├──────────────────────┼──────────────────────────┼──────────────────────┤
+  │ Strata wiring        │ Compiler automated       │ Manual in Op walker  │
+  ├──────────────────────┼──────────────────────────┼──────────────────────┤
+  │ Compilation model    │ Emits Rust source        │ Runtime graph        │
+  │                      │                          │ construction         │
+  ├──────────────────────┼──────────────────────────┼──────────────────────┤
+  │ Multiset semantics   │ Yes (caused real bugs)   │ Hidden from .mg      │
+  │ exposed              │                          │ author               │
+  └──────────────────────┴──────────────────────────┴──────────────────────┘
+
+  DDlog's syntax was heavily influenced by Rust — strong typing, ADTs, pattern
+  matching, extern function for Rust callouts. These were all driven by DD's
+  requirements. Mangle is much closer to standard Prolog-style Datalog; users
+  write normal rules and the DD substrate is invisible.
+
+  ---
+  K8s Integration
+
+  kube-rs (v3.1.0, CNCF Sandbox) has a solid dynamic client story:
+  - DynamicObject + GroupVersionKind + API discovery handles arbitrary resource
+  types without codegen
+  - watcher() gives Applied/Deleted/InitApply/InitDone events — maps directly to
+   +1/-1 DD updates
+  - InitDone is the signal to advance the frontier and trigger first evaluation
+  - CBOR (KEP-4222): open tracking issue, not yet implemented. Alpha in 1.32,
+  beta in 1.33. Not blocking.
+  - WatchList: implemented.
+
+  If kube-rs ever meaningfully lags on API machinery, the escape hatch is a thin
+   Go sidecar only for the watch layer, piping JSON facts to the Rust engine —
+  clean architectural seam, doesn't require abandoning Rust for the computation
+  layer.
+
+  ---
+  Key Risks / Open Questions
+
+  1. :list:member and :match_field — must be implemented before pallograph's
+  existing rules work. These are the first thing to tackle.
+  2. mangle-ir API stability — one-author project, Op IR not a guaranteed stable
+   API. Pin a version.
+  3. distinct() placement — getting this wrong produces silent wrong answers,
+  not errors. Needs tests with known-duplicate inputs.
+  4. Stratification wiring — the place most likely to produce subtle correctness
+   bugs. Needs explicit tests for rules with negation across strata.
+  5. Vec<Value> join performance — DD's efficiency relies on good hash/ord
+  implementations. Vec<Value> comparison is linear in tuple length. Worth
+  benchmarking early.
+
+✻ Brewed for 52s
