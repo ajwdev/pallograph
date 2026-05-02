@@ -229,12 +229,6 @@ impl CompiledProgram {
 
     pub fn dump_plan(&mut self) -> Result<()> {
         for (i, pred_names) in self.strata.iter().enumerate() {
-            // Step A: predicate names for this stratum
-            // let pred_names: std::collections::HashSet<&str> = stratum
-            //     .iter()
-            //     .filter_map(|pred| self.arena.predicate_name(pred))
-            //     .collect();
-
             println!(
                 "● Stratum {i} ({})",
                 pred_names
