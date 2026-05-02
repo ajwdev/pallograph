@@ -3,6 +3,11 @@ name = "pallograph"
 version = "0.1.0"
 edition = "2024"
 
+[build-dependencies]
+mangle-ast    = { path = "/home/andrew/src/codeberg.org/ajwdev/mangle-rs/crates/mangle-ast" }
+mangle-driver = { path = "/home/andrew/src/codeberg.org/ajwdev/mangle-rs/crates/mangle-driver" }
+glob          = "0.3"
+
 [dependencies]
 mangle-ast         = { path = "/home/andrew/src/codeberg.org/ajwdev/mangle-rs/crates/mangle-ast" }
 mangle-parse       = { path = "/home/andrew/src/codeberg.org/ajwdev/mangle-rs/crates/mangle-parse" }
