@@ -3,15 +3,18 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
 use crate::engine::{Engine, EvalStore};
+use crate::query;
 
 pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     println!("\n=== Interactive Query Mode ===");
     println!("Commands:");
-    println!("  <predicate>          — show all tuples for a predicate");
-    println!("  ::show all           — list all known predicates");
-    println!("  ::define <rule>.     — add a rule and re-evaluate");
-    println!("  ::pretty              — toggle compact/pretty tuple display");
-    println!("  ::quit               — exit");
+    println!("  <predicate>                        — show all tuples");
+    println!("  <predicate>(arg, _, ...)           — filter by constants (_ or uppercase vars match any)");
+    println!("  orphaned_sa(\"kube-system\", _)      — example: filter by namespace");
+    println!("  ::show all                         — list all known predicates");
+    println!("  ::define <rule>.                   — add a rule and re-evaluate");
+    println!("  ::pretty                           — toggle compact/pretty tuple display");
+    println!("  ::quit                             — exit");
     println!();
 
     let history_path = dirs_home().join(".pallograph_history");
@@ -59,20 +62,43 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                     continue;
                 }
 
-                // Treat input as a predicate name (with optional arity like pred/3 stripped)
-                let pred = line.split('/').next().unwrap_or(&line).trim();
-                let tuples = current_store.scan(pred);
-                if tuples.is_empty() {
-                    println!("No entries for '{pred}'.");
-                } else {
-                    println!("Found {} entries:", tuples.len());
-                    for tuple in tuples {
-                        let args: Vec<String> = tuple.iter().map(|v| {
-                            if pretty { format_pretty(v) } else { v.to_string() }
-                        }).collect();
-                        println!("  {pred}({})", args.join(", "));
+                if line.contains('(') {
+                    match query::parse_query(&line) {
+                        Ok(q) => {
+                            let rows = current_store.scan(&q.predicate);
+                            let matched = query::filter_tuples(rows, &q);
+                            let pred = &q.predicate;
+                            if matched.is_empty() {
+                                println!("No entries for '{pred}'.");
+                            } else {
+                                println!("Found {} entries:", matched.len());
+                                for tuple in matched {
+                                    let args: Vec<String> = tuple.iter().map(|v| {
+                                        if pretty { format_pretty(v) } else { v.to_string() }
+                                    }).collect();
+                                    println!("  {pred}({})", args.join(", "));
+                                }
+                                println!();
+                            }
+                        }
+                        Err(e) => eprintln!("Parse error: {e}"),
                     }
-                    println!();
+                } else {
+                    // Bare predicate name (with optional arity like pred/3 stripped)
+                    let pred = line.split('/').next().unwrap_or(&line).trim();
+                    let tuples = current_store.scan(pred);
+                    if tuples.is_empty() {
+                        println!("No entries for '{pred}'.");
+                    } else {
+                        println!("Found {} entries:", tuples.len());
+                        for tuple in tuples {
+                            let args: Vec<String> = tuple.iter().map(|v| {
+                                if pretty { format_pretty(v) } else { v.to_string() }
+                            }).collect();
+                            println!("  {pred}({})", args.join(", "));
+                        }
+                        println!();
+                    }
                 }
             }
             Err(ReadlineError::Interrupted) => continue,

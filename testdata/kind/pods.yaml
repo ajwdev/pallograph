@@ -1,0 +1,38 @@
+# Normal pod — uses used-sa, no policy violations.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: normal-pod
+  namespace: pallograph-test
+spec:
+  serviceAccountName: used-sa
+  containers:
+  - name: pause
+    image: registry.k8s.io/pause:3.9
+---
+# Should appear in privileged_pod results.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: privileged-pod
+  namespace: pallograph-test
+spec:
+  serviceAccountName: used-sa
+  containers:
+  - name: pause
+    image: registry.k8s.io/pause:3.9
+    securityContext:
+      privileged: true
+---
+# Should appear in host_network_pod results.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: host-network-pod
+  namespace: pallograph-test
+spec:
+  serviceAccountName: used-sa
+  hostNetwork: true
+  containers:
+  - name: pause
+    image: registry.k8s.io/pause:3.9

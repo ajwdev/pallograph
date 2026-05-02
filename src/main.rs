@@ -1,6 +1,7 @@
 mod edb;
 mod engine;
 mod handlers;
+mod query;
 mod repl;
 mod value;
 
@@ -26,14 +27,24 @@ struct Cli {
     /// Directory containing fixture JSON files. Defaults to ./testdata.
     #[arg(long, default_value = "testdata")]
     fixtures: PathBuf,
+
+    /// Load facts from the live Kubernetes cluster (uses KUBECONFIG / in-cluster auth).
+    #[arg(long)]
+    live: bool,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Load EDB facts into a staging MemStore.
     let mut edb = MemStore::new();
-    edb::load_all(&mut edb, &cli.fixtures)?;
+    if cli.live {
+        let client = kube::Client::try_default().await?;
+        edb::load_from_cluster(&mut edb, client).await?;
+    } else {
+        edb::load_all(&mut edb, &cli.fixtures)?;
+    }
 
     // Build the policy engine.
     let mut engine = Engine::new(edb, &cli.rules)?;

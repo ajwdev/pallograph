@@ -23,6 +23,9 @@
         ])
         rust-analyzer
         pkg-config
+        kind
+        kubectl
+        kwok
       ];
 
       RUST_BACKTRACE = 1;
