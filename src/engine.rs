@@ -22,19 +22,7 @@ impl EvalStore {
     }
 }
 
-/// EDB declarations prepended to the rule sources so the analyzer knows
-/// which predicates are extensional (pre-loaded into the store).
-const EDB_DECLS: &str = r#"
-Decl k8s(ApiVersion, Kind, Namespace, Name, Data).
-Decl user_groups(Username, Group).
-Decl api_resource(ApiGroup, Resource).
-Decl object_label(ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue).
-Decl selector_match_label(ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue).
-Decl selector_expr_in(ApiVersion, Kind, Namespace, Name, LabelKey, AllowedValue).
-Decl selector_expr_notin(ApiVersion, Kind, Namespace, Name, LabelKey, ExcludedValue).
-Decl selector_expr_exists(ApiVersion, Kind, Namespace, Name, LabelKey).
-Decl selector_expr_notexists(ApiVersion, Kind, Namespace, Name, LabelKey).
-"#;
+const EDB_DECLS: &str = include_str!("../rules/00_edb_prelude.mg");
 
 pub struct Engine {
     /// EDB facts collected at load time; replayed on each evaluate.
