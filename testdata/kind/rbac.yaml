@@ -1,0 +1,38 @@
+# Binds admin-sa to cluster-admin — should appear in sa_is_cluster_admin results.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pallograph-test-admin-sa
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-sa
+  namespace: pallograph-test
+---
+# A Role with wildcard verb — should appear in role_has_wildcard_verb results.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: wildcard-role
+  namespace: pallograph-test
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wildcard-role-binding
+  namespace: pallograph-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: wildcard-role
+subjects:
+- kind: ServiceAccount
+  name: used-sa
+  namespace: pallograph-test
