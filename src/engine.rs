@@ -487,6 +487,7 @@ fn execute_with_provenance<'a>(
     Ok(interpreter)
 }
 
+
 pub struct Engine {
     /// EDB facts collected at load time; replayed on each evaluate.
     edb: Vec<(String, Vec<Value>)>,
