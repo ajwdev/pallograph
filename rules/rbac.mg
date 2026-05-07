@@ -17,13 +17,9 @@
 #     → group_{role,rb_clusterrole,crb}_perm                       (effective group perms)
 #   user_groups/2
 #     → all_{sa,user,group}_perm/N  (union of all binding paths, with Namespace)
-#     → all_{sa,user,group}_ns_perm (namespace-scoped paths only)
-#     → all_user_cluster_perm       (cluster-wide paths only, for users+groups)
 #   api_resource/2 + role/clusterrole perms
 #     → resource_type/1, verb_type/1  (bounding sets for can)
-#     → can_ns/4   (namespace-scoped access from RoleBindings)
-#     → can_cluster/3 (cluster-wide access from ClusterRoleBindings, no namespace)
-#     → can/4  (aggregates both; Namespace="" for cluster-wide, non-empty for scoped)
+#     → can/4  (SubjectAccessReview equivalent — Namespace="" for cluster-wide grants)
 
 # ---- Type filter predicates ----
 
@@ -216,11 +212,10 @@ group_crb_perm(GroupName, ApiGroup, Resource, Verb) :-
     clusterrolebinding_roleref(BindingName, ClusterRoleName),
     clusterrole_perm(ClusterRoleName, ApiGroup, Resource, Verb).
 
-# ---- all_sa_perm / all_user_perm / all_group_perm ----
+# ---- all_sa_perm ----
 #
-# Full union of all binding paths, namespace preserved (CRB emits "").
-# Kept for enumeration use cases (e.g. listing all known users/groups in
-# escalation rules) and direct policy queries. Not used by can/4 below.
+# Union of all effective SA permissions with Namespace preserved.
+# CRB path emits Namespace="" (cluster-wide).
 
 all_sa_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb) :-
     sa_role_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb).
@@ -231,6 +226,11 @@ all_sa_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb) :-
 all_sa_perm(SANs, SAName, "", ApiGroup, Resource, Verb) :-
     sa_crb_perm(SANs, SAName, ApiGroup, Resource, Verb).
 
+# ---- all_group_perm ----
+#
+# Union of all effective group permissions with Namespace preserved.
+# CRB path emits Namespace="".
+
 all_group_perm(GroupName, Namespace, ApiGroup, Resource, Verb) :-
     group_role_perm(GroupName, Namespace, ApiGroup, Resource, Verb).
 
@@ -240,11 +240,18 @@ all_group_perm(GroupName, Namespace, ApiGroup, Resource, Verb) :-
 all_group_perm(GroupName, "", ApiGroup, Resource, Verb) :-
     group_crb_perm(GroupName, ApiGroup, Resource, Verb).
 
+# ---- all_user_perm ----
+#
+# Union of all effective user permissions with Namespace preserved.
+# user_groups(Username, Group) is populated at query time from a UserInfo struct.
+# CRB paths emit Namespace="".
+
 all_user_perm(Username, Namespace, ApiGroup, Resource, Verb) :-
     user_role_perm(Username, Namespace, ApiGroup, Resource, Verb).
 
 all_user_perm(Username, Namespace, ApiGroup, Resource, Verb) :-
     user_rb_clusterrole_perm(Username, Namespace, ApiGroup, Resource, Verb).
+
 
 all_user_perm(Username, "", ApiGroup, Resource, Verb) :-
     user_crb_perm(Username, ApiGroup, Resource, Verb).
@@ -266,6 +273,12 @@ all_user_perm(Username, "", ApiGroup, Resource, Verb) :-
 # ClusterRoles can declare an aggregationRule whose clusterRoleSelectors list
 # pulls in permissions from any ClusterRole whose labels match. This is how the
 # built-in cluster-admin/admin/edit/view roles work.
+#
+# clusterrole_aggregates(AggCR, SourceCR) is true when AggCR's selector matches
+# at least one label on SourceCR. For the typical single-label selector pattern
+# (e.g. rbac.authorization.k8s.io/aggregate-to-admin: "true") this is exact;
+# multi-condition selectors are treated as OR rather than AND — a known
+# simplification.
 
 clusterrole_aggregates(AggCR, SourceCR) :-
     clusterrole_agg_selector(AggCR, LabelKey, LabelValue),
@@ -275,5 +288,84 @@ clusterrole_perm(AggCR, ApiGroup, Resource, Verb) :-
     clusterrole_aggregates(AggCR, SourceCR),
     clusterrole_perm(SourceCR, ApiGroup, Resource, Verb).
 
-# can(P, Ns, R, V) is computed as EDB facts by edb.rs (see emit_can_facts).
-# Wildcard expansion and CRB→namespace expansion are done in Rust.
+# ---- resource_type / verb_type ----
+#
+# Bounding sets used by can to keep derived facts finite.
+#
+# resource_type is derived from api_resource (EDB loaded from
+# `kubectl api-resources -o name`) and also from permissions already declared
+# in roles, so subresources like pods/exec that aren't in api-resources are
+# included automatically.
+#
+# verb_type is derived from permissions already present in roles and
+# clusterroles, so it automatically covers every verb in use.
+
+resource_type(Resource) :- api_resource(_, Resource).
+resource_type(Resource) :- role_perm(_, _, _, Resource, _).
+resource_type(Resource) :- clusterrole_perm(_, _, Resource, _).
+
+
+# ---- can ----
+#
+# SubjectAccessReview equivalent. Namespace="" means a cluster-wide grant
+# (ClusterRoleBinding path); a non-empty Namespace means the grant is scoped
+# to that namespace via a RoleBinding.
+#
+# resource_type and verb_type bind Resource and Verb so the derived fact set
+# stays finite — one row per (principal, namespace, resource, verb) where access
+# is granted.
+
+# Users
+can(Username, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_user_perm(Username, Namespace, _, Resource, Verb).
+
+can(Username, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_user_perm(Username, Namespace, _, "*", Verb).
+
+can(Username, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_user_perm(Username, Namespace, _, Resource, "*").
+
+can(Username, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_user_perm(Username, Namespace, _, "*", "*").
+
+# Service accounts — principal formatted as system:serviceaccount:<ns>:<name>
+can(Principal, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_sa_perm(SANs, SAName, Namespace, _, Resource, Verb)
+    |> let Principal = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+can(Principal, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_sa_perm(SANs, SAName, Namespace, _, "*", Verb)
+    |> let Principal = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+can(Principal, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_sa_perm(SANs, SAName, Namespace, _, Resource, "*")
+    |> let Principal = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+can(Principal, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_sa_perm(SANs, SAName, Namespace, _, "*", "*")
+    |> let Principal = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+# Groups
+can(GroupName, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_group_perm(GroupName, Namespace, _, Resource, Verb).
+
+can(GroupName, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_group_perm(GroupName, Namespace, _, "*", Verb).
+
+can(GroupName, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_group_perm(GroupName, Namespace, _, Resource, "*").
+
+can(GroupName, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_group_perm(GroupName, Namespace, _, "*", "*").
