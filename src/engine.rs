@@ -564,6 +564,7 @@ impl Engine {
         Ok(())
     }
 
+
     /// Reset all REPL session state: drop added rules and EDB temporaries, restore
     /// to the state at initial load.
     pub fn reset_session(&mut self) {
@@ -578,6 +579,7 @@ impl Engine {
     pub fn truncate_rules(&mut self, len: usize) {
         self.rule_sources.truncate(len);
     }
+
 
     /// Remove all rules whose head matches `predicate`.
     pub fn remove_rules_for(&mut self, predicate: &str) {

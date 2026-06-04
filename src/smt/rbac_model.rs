@@ -38,23 +38,35 @@ impl<'ctx> SmtEncoder<'ctx> {
     /// Load Mangle RBAC primitives and define `can` and `effective_can` as
     /// closed Z3 functions via RecFuncDecl.
     pub fn assert_rbac_axioms(&mut self, store: &EvalStore) {
-        self.assert_rbac_axioms_impl(|rel| store.scan(rel).to_vec());
+        self.assert_rbac_axioms_named(|rel| store.scan(rel).to_vec(), "");
     }
 
     /// Same as `assert_rbac_axioms` but reads from a saved `Snapshot` instead
     /// of a live eval store. Useful for differential access analysis.
     pub fn assert_rbac_axioms_from_snapshot(&mut self, snap: &crate::snapshot::Snapshot) {
-        self.assert_rbac_axioms_impl(|rel| snap.scan_rel(rel));
+        self.assert_rbac_axioms_named(|rel| snap.scan_rel(rel), "");
     }
 
-    fn assert_rbac_axioms_impl<F: Fn(&str) -> Vec<Vec<Value>>>(&mut self, scan: F) {
+    /// Like `assert_rbac_axioms` but registers all predicates under a name suffix.
+    /// Defines `can_<suffix>` and `effective_can_<suffix>` instead of bare names.
+    /// Enables two snapshots to coexist in one solver for differential queries.
+    pub fn assert_rbac_axioms_as(&mut self, store: &EvalStore, suffix: &str) {
+        self.assert_rbac_axioms_named(|rel| store.scan(rel).to_vec(), suffix);
+    }
+
+    /// Like `assert_rbac_axioms_from_snapshot` but registers predicates under a suffix.
+    pub fn assert_rbac_axioms_from_snapshot_as(&mut self, snap: &crate::snapshot::Snapshot, suffix: &str) {
+        self.assert_rbac_axioms_named(|rel| snap.scan_rel(rel), suffix);
+    }
+
+    fn assert_rbac_axioms_named<F: Fn(&str) -> Vec<Vec<Value>>>(&mut self, scan: F, suffix: &str) {
         let subject_in_rb = compute_subject_in_rb(&scan);
         let subject_in_crb = compute_subject_in_crb(&scan);
         let can_entries = compute_can_entries(&scan, &subject_in_rb, &subject_in_crb);
         let eff_entries = compute_effective_can_entries(&scan, &can_entries);
 
-        // Load the Mangle primitives as ground facts so they're available for
-        // `::smtlib` dumps and future extension.
+        // Load the Mangle primitives as ground facts under namespaced names to avoid
+        // collisions when multiple snapshots are loaded into the same encoder.
         for rel in &[
             "role_perm",
             "clusterrole_perm",
@@ -63,17 +75,27 @@ impl<'ctx> SmtEncoder<'ctx> {
             "user_groups",
             "controls_identity",
         ] {
-            self.load_relation(rel, &scan(rel));
+            self.load_relation(&fn_name(rel, suffix), &scan(rel));
         }
-        self.load_relation("subject_in_rb", &subject_in_rb);
-        self.load_relation("subject_in_crb", &subject_in_crb);
+        self.load_relation(&fn_name("subject_in_rb", suffix), &subject_in_rb);
+        self.load_relation(&fn_name("subject_in_crb", suffix), &subject_in_crb);
 
-        // Build and register the RecFuncDecl definitions.
-        let can_fn = build_can_rec_func(self.ctx, &can_entries);
-        let eff_fn = build_effective_can_rec_func(self.ctx, &eff_entries);
-        self.rec_decls.insert("can".to_string(), can_fn);
-        self.rec_decls.insert("effective_can".to_string(), eff_fn);
-        self.can_entries = can_entries;
+        // Build and register the RecFuncDecl definitions under suffixed names.
+        let can_fn = build_can_rec_func(self.ctx, &fn_name("can", suffix), &can_entries);
+        let eff_fn = build_effective_can_rec_func(self.ctx, &fn_name("effective_can", suffix), &eff_entries);
+        self.rec_decls.insert(fn_name("can", suffix), can_fn);
+        self.rec_decls.insert(fn_name("effective_can", suffix), eff_fn);
+        self.can_entries.insert(suffix.to_string(), can_entries);
+        self.eff_entries.insert(suffix.to_string(), eff_entries);
+    }
+}
+
+/// Returns `base` when suffix is empty, `base_suffix` otherwise.
+pub(crate) fn fn_name(base: &str, suffix: &str) -> String {
+    if suffix.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}_{suffix}")
     }
 }
 
@@ -84,17 +106,27 @@ impl<'ctx> SmtEncoder<'ctx> {
 /// for each entry derived from the Mangle binding/role join.
 fn build_can_rec_func<'ctx>(
     ctx: &'ctx z3::Context,
+    name: &str,
     entries: &[(String, String, String, String, String)],
 ) -> RecFuncDecl<'ctx> {
     let str_sort = Sort::string(ctx);
     let domain = [&str_sort, &str_sort, &str_sort, &str_sort, &str_sort];
-    let can_fn = RecFuncDecl::new(ctx, "can", &domain, &Sort::bool(ctx));
+    let can_fn = RecFuncDecl::new(ctx, name, &domain, &Sort::bool(ctx));
 
-    let p_var = Z3String::new_const(ctx, "_can_p");
-    let ns_var = Z3String::new_const(ctx, "_can_ns");
-    let ag_var = Z3String::new_const(ctx, "_can_ag");
-    let r_var = Z3String::new_const(ctx, "_can_r");
-    let v_var = Z3String::new_const(ctx, "_can_v");
+    // Use name-prefixed formal parameter names to avoid Z3 constant aliasing
+    // when two RecFuncDecls with different names are built in the same context.
+    let (pn, nsn, agn, rn, vn) = (
+        format!("_{name}_p"),
+        format!("_{name}_ns"),
+        format!("_{name}_ag"),
+        format!("_{name}_r"),
+        format!("_{name}_v"),
+    );
+    let p_var = Z3String::new_const(ctx, pn.as_str());
+    let ns_var = Z3String::new_const(ctx, nsn.as_str());
+    let ag_var = Z3String::new_const(ctx, agn.as_str());
+    let r_var = Z3String::new_const(ctx, rn.as_str());
+    let v_var = Z3String::new_const(ctx, vn.as_str());
 
     let wildcard = Z3String::from_str(ctx, "*").unwrap();
     let matches = |needle: &Z3String<'ctx>, pat_str: &str| -> Bool<'ctx> {
@@ -137,16 +169,23 @@ fn build_can_rec_func<'ctx>(
 /// Body: big OR of `(p == P ∧ ns == NS ∧ matches(r, R) ∧ matches(v, V))`.
 fn build_effective_can_rec_func<'ctx>(
     ctx: &'ctx z3::Context,
+    name: &str,
     entries: &[(String, String, String, String)],
 ) -> RecFuncDecl<'ctx> {
     let str_sort = Sort::string(ctx);
     let domain = [&str_sort, &str_sort, &str_sort, &str_sort];
-    let eff_fn = RecFuncDecl::new(ctx, "effective_can", &domain, &Sort::bool(ctx));
+    let eff_fn = RecFuncDecl::new(ctx, name, &domain, &Sort::bool(ctx));
 
-    let p_var = Z3String::new_const(ctx, "_ec_p");
-    let ns_var = Z3String::new_const(ctx, "_ec_ns");
-    let r_var = Z3String::new_const(ctx, "_ec_r");
-    let v_var = Z3String::new_const(ctx, "_ec_v");
+    let (pn, nsn, rn, vn) = (
+        format!("_{name}_p"),
+        format!("_{name}_ns"),
+        format!("_{name}_r"),
+        format!("_{name}_v"),
+    );
+    let p_var = Z3String::new_const(ctx, pn.as_str());
+    let ns_var = Z3String::new_const(ctx, nsn.as_str());
+    let r_var = Z3String::new_const(ctx, rn.as_str());
+    let v_var = Z3String::new_const(ctx, vn.as_str());
 
     let wildcard = Z3String::from_str(ctx, "*").unwrap();
     let matches = |needle: &Z3String<'ctx>, pat_str: &str| -> Bool<'ctx> {
