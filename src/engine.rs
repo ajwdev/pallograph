@@ -535,6 +535,40 @@ impl Engine {
         self.rule_sources.push(rule);
     }
 
+    /// Return the arity of an existing EDB relation, or None if no facts exist yet.
+    pub fn relation_arity(&self, relation: &str) -> Option<usize> {
+        self.edb.iter().find(|(r, _)| r == relation).map(|(_, t)| t.len())
+    }
+
+    /// Insert a ground fact into the EDB. Returns true if inserted, false if already present.
+    pub fn add_fact(&mut self, relation: String, tuple: Vec<Value>) -> bool {
+        let entry = (relation, tuple);
+        if !self.edb.contains(&entry) {
+            self.edb.push(entry);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove a ground fact from the EDB. Returns true if a matching fact was found and removed.
+    pub fn retract_fact(&mut self, relation: &str, tuple: &[Value]) -> bool {
+        if let Some(pos) = self.edb.iter().position(|(r, t)| r == relation && t.as_slice() == tuple) {
+            self.edb.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Load facts from a FactSource through the k8s projection pipeline, appending to the EDB.
+    pub fn populate_from(&mut self, source: &mut dyn crate::edb::FactSource) -> Result<()> {
+        let mut tmp = mangle_interpreter::MemStore::new();
+        crate::edb::populate(&mut tmp, source)?;
+        self.edb.extend(drain_store(tmp));
+        Ok(())
+    }
+
     /// Reset all REPL session state: drop added rules and EDB temporaries, restore
     /// to the state at initial load.
     pub fn reset_session(&mut self) {
