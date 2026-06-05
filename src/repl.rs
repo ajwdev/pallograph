@@ -32,6 +32,7 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     println!("  +pred(arg1, arg2, ...).             — insert a ground fact into the EDB and re-evaluate");
     println!("  -pred(arg1, arg2, ...).             — retract a ground fact from the EDB and re-evaluate");
     println!("  ~pred(old...). pred(new...).        — atomic replace: retract old, insert new, single re-evaluate");
+    println!("  ::source <src>                     — load raw Mangle rules from a file or ! <cmd> and re-evaluate");
     println!("  ::load <rel> <src>                 — load flat JSON tuples into <rel>; src is a file path or ! <cmd>");
     println!("  ::load-k8s <src>                   — load k8s objects through the projection pipeline; src is a dir, .json file, or ! <kubectl args>");
     println!("  ::reset                            — clear session state (_N results, ::define rules, + facts), re-evaluate");
@@ -188,13 +189,42 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                 }
 
                 if let Some(rule) = line.strip_prefix("::define ") {
+                    let checkpoint = engine.rules_len();
                     engine.add_rule(rule.trim_end_matches('.').trim().to_string());
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
                             println!("Rule added and evaluated.");
                         }
-                        Err(e) => eprintln!("Error: {e:#}"),
+                        Err(e) => {
+                            engine.truncate_rules(checkpoint);
+                            eprintln!("Error: {e:#}");
+                        }
+                    }
+                    continue;
+                }
+
+                if let Some(rest) = line.strip_prefix("::source ") {
+                    let src = rest.trim();
+                    match load::read_source(src) {
+                        Ok(bytes) => match std::str::from_utf8(&bytes) {
+                            Ok(text) => {
+                                let checkpoint = engine.rules_len();
+                                engine.add_rule(text.to_string());
+                                match engine.evaluate() {
+                                    Ok(new_store) => {
+                                        current_store = new_store;
+                                        println!("Sourced and evaluated.");
+                                    }
+                                    Err(e) => {
+                                        engine.truncate_rules(checkpoint);
+                                        eprintln!("Error: {e:#}");
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("Source error: not valid UTF-8: {e}"),
+                        },
+                        Err(e) => eprintln!("Source error: {e:#}"),
                     }
                     continue;
                 }

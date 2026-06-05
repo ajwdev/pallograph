@@ -576,6 +576,14 @@ impl Engine {
         self.rule_sources.truncate(self.rules_base_len);
     }
 
+    pub fn rules_len(&self) -> usize {
+        self.rule_sources.len()
+    }
+
+    pub fn truncate_rules(&mut self, len: usize) {
+        self.rule_sources.truncate(len);
+    }
+
     /// Remove all rules whose head matches `predicate`.
     pub fn remove_rules_for(&mut self, predicate: &str) {
         let prefix = format!("{predicate}(");
