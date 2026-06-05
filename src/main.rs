@@ -3,6 +3,7 @@
 mod edb;
 mod engine;
 mod handlers;
+mod load;
 // mod op_printer;
 mod query;
 mod repl;
