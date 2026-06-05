@@ -129,6 +129,16 @@ pub struct ClusterSource {
     objects: Vec<(DynamicObject, Option<(String, String)>)>,
 }
 
+/// Shells out to `kubectl <args> -o json` and parses the resulting k8s objects.
+pub struct KubectlSource {
+    pub args: Vec<String>,
+}
+
+/// Reads a single JSON file containing k8s objects (DynamicObject, multi-doc, or a List).
+pub struct JsonFileSource {
+    pub path: PathBuf,
+}
+
 impl ClusterSource {
     pub async fn fetch(client: Client) -> Result<Self> {
         let mut objects = Vec::new();
@@ -165,6 +175,62 @@ impl FactSource for ClusterSource {
     fn api_resource_lines(&mut self) -> Result<Vec<String>> {
         Ok(vec![])
     }
+}
+
+impl FactSource for KubectlSource {
+    fn k8s_objects(&mut self) -> Result<Vec<(DynamicObject, Option<(String, String)>)>> {
+        let mut cmd = std::process::Command::new("kubectl");
+        cmd.args(&self.args);
+        // Append -o json if the user didn't include it.
+        if !self.args.iter().any(|a| a == "-o" || a == "--output") {
+            cmd.args(["-o", "json"]);
+        }
+        let output = cmd.output().context("running kubectl")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("kubectl exited non-zero: {}", stderr.trim());
+        }
+        parse_k8s_json(&output.stdout)
+    }
+
+    fn api_resource_lines(&mut self) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+}
+
+impl FactSource for JsonFileSource {
+    fn k8s_objects(&mut self) -> Result<Vec<(DynamicObject, Option<(String, String)>)>> {
+        let bytes = std::fs::read(&self.path)
+            .with_context(|| format!("reading {}", self.path.display()))?;
+        parse_k8s_json(&bytes)
+    }
+
+    fn api_resource_lines(&mut self) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+}
+
+/// Parse raw JSON bytes into DynamicObjects. Handles:
+/// - A top-level `{"kind": "List", "items": [...]}` wrapper (kubectl default)
+/// - A single object
+/// - Concatenated / multi-doc (streaming deserialization)
+fn parse_k8s_json(bytes: &[u8]) -> Result<Vec<(DynamicObject, Option<(String, String)>)>> {
+    let mut objects = Vec::new();
+    // Try top-level array/List parse first, then fall back to streaming.
+    let v: serde_json::Value = serde_json::from_slice(bytes).context("parsing JSON")?;
+    if let Some(items) = v.get("items").and_then(|i| i.as_array()) {
+        for item in items {
+            let obj: DynamicObject =
+                serde_json::from_value(item.clone()).context("parsing DynamicObject")?;
+            objects.push((obj, None));
+        }
+    } else {
+        // Single object or fall through to streaming.
+        for result in serde_json::Deserializer::from_slice(bytes).into_iter::<DynamicObject>() {
+            objects.push((result.context("parsing DynamicObject")?, None));
+        }
+    }
+    Ok(objects)
 }
 
 pub fn populate(store: &mut MemStore, source: &mut dyn FactSource) -> Result<()> {
