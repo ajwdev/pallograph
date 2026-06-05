@@ -6,7 +6,9 @@ use mangle_interpreter::ProvenanceEntry;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
+use crate::edb::{FixtureSource, JsonFileSource, KubectlSource};
 use crate::engine::{Engine, EvalStore};
+use crate::load;
 use crate::query;
 use crate::smt;
 
@@ -27,7 +29,12 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     println!("  can(P, Namespace, ApiGroup, R, V)  — ApiGroup=\"\" for core, \"*\" for wildcard; Namespace scoped to binding");
     println!("  ::smtlib <rel> [rel...]            — dump SMT-LIB 2 encoding of relations");
     println!("  ::why <pred>(<args>...)             — show derivation tree for a fact");
-    println!("  ::reset                            — clear session state (_N results, ::define rules), re-evaluate");
+    println!("  +pred(arg1, arg2, ...).             — insert a ground fact into the EDB and re-evaluate");
+    println!("  -pred(arg1, arg2, ...).             — retract a ground fact from the EDB and re-evaluate");
+    println!("  ~pred(old...). pred(new...).        — atomic replace: retract old, insert new, single re-evaluate");
+    println!("  ::load <rel> <src>                 — load flat JSON tuples into <rel>; src is a file path or ! <cmd>");
+    println!("  ::load-k8s <src>                   — load k8s objects through the projection pipeline; src is a dir, .json file, or ! <kubectl args>");
+    println!("  ::reset                            — clear session state (_N results, ::define rules, + facts), re-evaluate");
     println!("  ::quit                             — exit");
     println!();
 
@@ -188,6 +195,143 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                             println!("Rule added and evaluated.");
                         }
                         Err(e) => eprintln!("Error: {e:#}"),
+                    }
+                    continue;
+                }
+
+                if let Some(rest) = line.strip_prefix("::load-k8s ") {
+                    let rest = rest.trim();
+                    let source_result: anyhow::Result<Box<dyn crate::edb::FactSource>> =
+                        if rest.starts_with('!') {
+                            let args: Vec<String> = rest[1..].split_whitespace().map(String::from).collect();
+                            Ok(Box::new(KubectlSource { args }))
+                        } else if std::path::Path::new(rest).is_dir() {
+                            Ok(Box::new(FixtureSource { dir: rest.into() }))
+                        } else {
+                            Ok(Box::new(JsonFileSource { path: rest.into() }))
+                        };
+                    match source_result.and_then(|mut src| engine.populate_from(src.as_mut())) {
+                        Ok(()) => match engine.evaluate() {
+                            Ok(new_store) => {
+                                current_store = new_store;
+                                println!("Loaded and evaluated.");
+                            }
+                            Err(e) => eprintln!("Error: {e:#}"),
+                        },
+                        Err(e) => eprintln!("Load error: {e:#}"),
+                    }
+                    continue;
+                }
+
+                if let Some(rest) = line.strip_prefix("::load ") {
+                    let rest = rest.trim();
+                    // Split on first whitespace: <relation> <source>
+                    let (relation, source) = match rest.find(|c: char| c.is_whitespace()) {
+                        Some(idx) => (&rest[..idx], rest[idx + 1..].trim()),
+                        None => {
+                            eprintln!("Usage: ::load <relation> <source>  (source is a file path or ! <cmd>)");
+                            continue;
+                        }
+                    };
+                    match load::load_tuples(engine, relation, source) {
+                        Ok(n) => match engine.evaluate() {
+                            Ok(new_store) => {
+                                current_store = new_store;
+                                println!("Inserted {n} fact(s) into {relation} and evaluated.");
+                            }
+                            Err(e) => eprintln!("Error: {e:#}"),
+                        },
+                        Err(e) => eprintln!("Load error: {e:#}"),
+                    }
+                    continue;
+                }
+
+                // ~pred(old...). pred(new...).  — atomic replace (retract + insert, one eval)
+                if line.starts_with('~') {
+                    let rest = line[1..].trim();
+                    // Split into two atoms at the boundary between "). " and the next predicate.
+                    match split_two_atoms(rest) {
+                        Some((old_atom, new_atom)) => {
+                            let result = parse_ground_tuple(old_atom)
+                                .and_then(|(rel, tuple)| {
+                                    parse_ground_tuple(new_atom).map(|n| ((rel, tuple), n))
+                                });
+                            match result {
+                                Ok(((old_rel, old_tuple), (new_rel, new_tuple))) => {
+                                    if let Some(arity) = engine.relation_arity(&new_rel) {
+                                        if new_tuple.len() != arity {
+                                            eprintln!("arity mismatch: {new_rel}/{arity} expects {arity} arg(s), got {}", new_tuple.len());
+                                            continue;
+                                        }
+                                    }
+                                    let removed = engine.retract_fact(&old_rel, &old_tuple);
+                                    engine.add_fact(new_rel, new_tuple);
+                                    match engine.evaluate() {
+                                        Ok(new_store) => {
+                                            current_store = new_store;
+                                            if removed {
+                                                println!("Replaced.");
+                                            } else {
+                                                println!("Warning: old fact not found; new fact inserted.");
+                                            }
+                                        }
+                                        Err(e) => eprintln!("Error: {e:#}"),
+                                    }
+                                }
+                                Err(e) => eprintln!("Parse error: {e}"),
+                            }
+                        }
+                        None => eprintln!("Usage: ~pred(old_args). pred(new_args)."),
+                    }
+                    continue;
+                }
+
+                // +pred(args).  — insert ground fact
+                if line.starts_with('+') {
+                    let inner = line[1..].trim_end_matches('.').trim();
+                    match parse_ground_tuple(inner) {
+                        Ok((rel, tuple)) => {
+                            if let Some(arity) = engine.relation_arity(&rel) {
+                                if tuple.len() != arity {
+                                    eprintln!("arity mismatch: {rel}/{arity} expects {arity} arg(s), got {}", tuple.len());
+                                    continue;
+                                }
+                            }
+                            if engine.add_fact(rel, tuple) {
+                                match engine.evaluate() {
+                                    Ok(new_store) => {
+                                        current_store = new_store;
+                                        println!("Asserted.");
+                                    }
+                                    Err(e) => eprintln!("Error: {e:#}"),
+                                }
+                            } else {
+                                eprintln!("Fact already exists.");
+                            }
+                        }
+                        Err(e) => eprintln!("Parse error: {e}"),
+                    }
+                    continue;
+                }
+
+                // -pred(args).  — retract ground fact
+                if line.starts_with('-') {
+                    let inner = line[1..].trim_end_matches('.').trim();
+                    match parse_ground_tuple(inner) {
+                        Ok((rel, tuple)) => {
+                            if engine.retract_fact(&rel, &tuple) {
+                                match engine.evaluate() {
+                                    Ok(new_store) => {
+                                        current_store = new_store;
+                                        println!("Retracted.");
+                                    }
+                                    Err(e) => eprintln!("Error: {e:#}"),
+                                }
+                            } else {
+                                println!("No matching fact found.");
+                            }
+                        }
+                        Err(e) => eprintln!("Parse error: {e}"),
                     }
                     continue;
                 }
@@ -550,6 +694,52 @@ fn print_why(
             }
         }
     }
+}
+
+/// Split `pred(a, b). pred(c, d).` into `("pred(a, b)", "pred(c, d)")`.
+/// Finds the split point at the first `)` followed by `.` at paren-depth 0.
+fn split_two_atoms(s: &str) -> Option<(&str, &str)> {
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let chars: Vec<char> = s.chars().collect();
+    for i in 0..chars.len() {
+        match chars[i] {
+            '"' => in_string = !in_string,
+            '(' if !in_string => depth += 1,
+            ')' if !in_string => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    // Consume optional '.' and whitespace after the closing paren.
+                    let after = s[i + 1..].trim_start_matches('.').trim();
+                    if !after.is_empty() {
+                        let old = s[..=i].trim_end_matches('.').trim();
+                        let new = after.trim_end_matches('.');
+                        return Some((old, new));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Parse a ground atom like `pred("a", "b", 42)` into `(relation, Vec<Value>)`.
+/// Rejects any variable (`_` or uppercase-initial) — only ground terms allowed.
+fn parse_ground_tuple(input: &str) -> anyhow::Result<(String, Vec<mangle_common::Value>)> {
+    let q = query::parse_query(input)?;
+    let mut tuple = Vec::with_capacity(q.args.len());
+    for arg in &q.args {
+        match arg {
+            query::QueryArg::Variable => {
+                anyhow::bail!("all arguments must be ground constants (no variables or `_`)");
+            }
+            query::QueryArg::StringConst(s) => tuple.push(mangle_common::Value::String(s.clone())),
+            query::QueryArg::NameConst(s) => tuple.push(mangle_common::Value::Name(s.clone())),
+            query::QueryArg::NumberConst(n) => tuple.push(mangle_common::Value::Number(*n)),
+        }
+    }
+    Ok((q.predicate, tuple))
 }
 
 fn count_top_level_args(s: &str) -> usize {
