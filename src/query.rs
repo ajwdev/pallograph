@@ -3,11 +3,13 @@ use mangle_ast::{Arena, BaseTerm, Const};
 use mangle_common::Value;
 use mangle_parse::Parser;
 
+#[derive(Clone)]
 pub struct ParsedQuery {
     pub predicate: String,
     pub args: Vec<QueryArg>,
 }
 
+#[derive(Clone)]
 pub enum QueryArg {
     Variable,
     StringConst(String),

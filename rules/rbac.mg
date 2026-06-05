@@ -16,10 +16,14 @@
 #     → user_{role,rb_clusterrole,crb}_perm                        (effective user perms)
 #     → group_{role,rb_clusterrole,crb}_perm                       (effective group perms)
 #   user_groups/2
-#     → all_user_perm/4   (union of user-direct + group-inherited perms)
-#   api_resource/2 + all_user_perm/4
-#     → resource_type/1, verb_type/1  (bounding sets for can_i)
-#     → can_i/3                       (SubjectAccessReview equivalent, with wildcard expansion)
+#     → all_{sa,user,group}_perm/N  (union of all binding paths, with Namespace)
+#     → all_{sa,user,group}_ns_perm (namespace-scoped paths only)
+#     → all_user_cluster_perm       (cluster-wide paths only, for users+groups)
+#   api_resource/2 + role/clusterrole perms
+#     → resource_type/1, verb_type/1  (bounding sets for can)
+#     → can_ns/4   (namespace-scoped access from RoleBindings)
+#     → can_cluster/3 (cluster-wide access from ClusterRoleBindings, no namespace)
+#     → can/4  (aggregates both; Namespace="" for cluster-wide, non-empty for scoped)
 
 # ---- Type filter predicates ----
 
@@ -140,19 +144,16 @@ clusterrolebinding_roleref(BindingName, RefName) :-
 
 # ---- Effective permissions ----
 #
-# Three join paths, each producing (SANs, SAName, ApiGroup, Resource, Verb):
-#   1. SA → RoleBinding → Role                (namespace-scoped)
-#   2. SA → RoleBinding → ClusterRole         (scoped to binding namespace)
-#   3. SA → ClusterRoleBinding → ClusterRole  (cluster-wide)
-#
-# Path 2 includes BindingNs in the output because the ClusterRole's permissions
-# are restricted to that namespace when applied via a RoleBinding.
+# Three join paths for each subject type. Namespace is always preserved:
+#   1. Subject → RoleBinding → Role              (Namespace = binding namespace)
+#   2. Subject → RoleBinding → ClusterRole       (Namespace = binding namespace)
+#   3. Subject → ClusterRoleBinding → ClusterRole (Namespace = "")
 
 # Path 1: RoleBinding → Role
-sa_role_perm(SANs, SAName, ApiGroup, Resource, Verb) :-
-    rolebinding_subject_sa(BindingNs, BindingName, SANs, SAName),
-    rolebinding_roleref(BindingNs, BindingName, "Role", RoleName),
-    role_perm(BindingNs, RoleName, ApiGroup, Resource, Verb).
+sa_role_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb) :-
+    rolebinding_subject_sa(Namespace, BindingName, SANs, SAName),
+    rolebinding_roleref(Namespace, BindingName, "Role", RoleName),
+    role_perm(Namespace, RoleName, ApiGroup, Resource, Verb).
 
 # Path 2: RoleBinding → ClusterRole (namespace-scoped effect)
 sa_rb_clusterrole_perm(SANs, SAName, BindingNs, ApiGroup, Resource, Verb) :-
@@ -215,73 +216,64 @@ group_crb_perm(GroupName, ApiGroup, Resource, Verb) :-
     clusterrolebinding_roleref(BindingName, ClusterRoleName),
     clusterrole_perm(ClusterRoleName, ApiGroup, Resource, Verb).
 
-# ---- all_user_perm ----
+# ---- all_sa_perm / all_user_perm / all_group_perm ----
 #
-# Union of all effective permissions for a user: direct bindings plus
-# permissions inherited through any group membership recorded in user_groups/2.
-# user_groups(Username, Group) is populated at query time from a UserInfo struct.
+# Full union of all binding paths, namespace preserved (CRB emits "").
+# Kept for enumeration use cases (e.g. listing all known users/groups in
+# escalation rules) and direct policy queries. Not used by can/4 below.
 
-all_user_perm(Username, ApiGroup, Resource, Verb) :-
-    user_role_perm(Username, _, ApiGroup, Resource, Verb).
+all_sa_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb) :-
+    sa_role_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb).
 
-all_user_perm(Username, ApiGroup, Resource, Verb) :-
-    user_rb_clusterrole_perm(Username, _, ApiGroup, Resource, Verb).
+all_sa_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb) :-
+    sa_rb_clusterrole_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb).
 
-all_user_perm(Username, ApiGroup, Resource, Verb) :-
+all_sa_perm(SANs, SAName, "", ApiGroup, Resource, Verb) :-
+    sa_crb_perm(SANs, SAName, ApiGroup, Resource, Verb).
+
+all_group_perm(GroupName, Namespace, ApiGroup, Resource, Verb) :-
+    group_role_perm(GroupName, Namespace, ApiGroup, Resource, Verb).
+
+all_group_perm(GroupName, Namespace, ApiGroup, Resource, Verb) :-
+    group_rb_clusterrole_perm(GroupName, Namespace, ApiGroup, Resource, Verb).
+
+all_group_perm(GroupName, "", ApiGroup, Resource, Verb) :-
+    group_crb_perm(GroupName, ApiGroup, Resource, Verb).
+
+all_user_perm(Username, Namespace, ApiGroup, Resource, Verb) :-
+    user_role_perm(Username, Namespace, ApiGroup, Resource, Verb).
+
+all_user_perm(Username, Namespace, ApiGroup, Resource, Verb) :-
+    user_rb_clusterrole_perm(Username, Namespace, ApiGroup, Resource, Verb).
+
+all_user_perm(Username, "", ApiGroup, Resource, Verb) :-
     user_crb_perm(Username, ApiGroup, Resource, Verb).
 
-all_user_perm(Username, ApiGroup, Resource, Verb) :-
+all_user_perm(Username, Namespace, ApiGroup, Resource, Verb) :-
     user_groups(Username, Group),
-    group_role_perm(Group, _, ApiGroup, Resource, Verb).
+    group_role_perm(Group, Namespace, ApiGroup, Resource, Verb).
 
-all_user_perm(Username, ApiGroup, Resource, Verb) :-
+all_user_perm(Username, Namespace, ApiGroup, Resource, Verb) :-
     user_groups(Username, Group),
-    group_rb_clusterrole_perm(Group, _, ApiGroup, Resource, Verb).
+    group_rb_clusterrole_perm(Group, Namespace, ApiGroup, Resource, Verb).
 
-all_user_perm(Username, ApiGroup, Resource, Verb) :-
+all_user_perm(Username, "", ApiGroup, Resource, Verb) :-
     user_groups(Username, Group),
     group_crb_perm(Group, ApiGroup, Resource, Verb).
 
-# ---- resource_type / verb_type ----
+# ---- Aggregated ClusterRoles ----
 #
-# Bounding sets used by can to keep derived facts finite.
-#
-# resource_type is derived from api_resource (EDB loaded from
-# `kubectl api-resources -o name`), giving the canonical set of resource names
-# known to the cluster. Additional resource_type facts can be injected directly
-# into the store for resources not yet returned by api-resources (e.g. CRDs
-# installed after the last load).
-#
-# verb_type is derived from permissions already present in roles and
-# clusterroles, so it automatically covers every verb in use.
+# ClusterRoles can declare an aggregationRule whose clusterRoleSelectors list
+# pulls in permissions from any ClusterRole whose labels match. This is how the
+# built-in cluster-admin/admin/edit/view roles work.
 
-resource_type(Resource) :- api_resource(_, Resource).
+clusterrole_aggregates(AggCR, SourceCR) :-
+    clusterrole_agg_selector(AggCR, LabelKey, LabelValue),
+    object_label("rbac.authorization.k8s.io/v1", "ClusterRole", "", SourceCR, LabelKey, LabelValue).
 
-verb_type(Verb) :- role_perm(_, _, _, _, Verb).
-verb_type(Verb) :- clusterrole_perm(_, _, _, Verb).
+clusterrole_perm(AggCR, ApiGroup, Resource, Verb) :-
+    clusterrole_aggregates(AggCR, SourceCR),
+    clusterrole_perm(SourceCR, ApiGroup, Resource, Verb).
 
-# ---- can ----
-#
-# SubjectAccessReview equivalent. Returns true if Username has permission
-# to perform Verb on Resource, accounting for Kubernetes wildcard semantics:
-# a stored "*" in either the resource or verb position grants all values.
-#
-# resource_type and verb_type bind Resource and Verb so the derived fact set
-# stays finite — one row per (username, resource, verb) triple where the user
-# has access.
-
-can(Username, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_user_perm(Username, _, Resource, Verb).
-
-can(Username, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_user_perm(Username, _, "*", Verb).
-
-can(Username, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_user_perm(Username, _, Resource, "*").
-
-can(Username, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_user_perm(Username, _, "*", "*").
+# can(P, Ns, R, V) is computed as EDB facts by edb.rs (see emit_can_facts).
+# Wildcard expansion and CRB→namespace expansion are done in Rust.
