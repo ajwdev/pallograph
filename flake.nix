@@ -14,19 +14,25 @@
   in {
     devShell = pkgs.mkShell {
       buildInputs = with pkgs; [
-        (rust.complete.withComponents [
+        (rust.latest.withComponents [
           "cargo"
           "clippy"
           "rust-src"
           "rustc"
           "rustfmt"
         ])
-        rust-analyzer
+        rust.latest.rust-analyzer
         pkg-config
         kind
         kubectl
         kwok
+        z3
+        llvmPackages.libclang
       ];
+
+      Z3_SYS_Z3_HEADER = "${pkgs.z3.dev}/include/z3.h";
+      LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+      LD_LIBRARY_PATH = "${pkgs.z3.lib}/lib";
 
       RUST_BACKTRACE = 1;
     };

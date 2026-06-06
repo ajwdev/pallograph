@@ -22,12 +22,30 @@ pod_sa(Namespace, PodName, SAName) :-
     :match_field(Data, /spec, Spec),
     :match_field(Spec, /serviceAccountName, SAName).
 
+# Pods without an explicit serviceAccountName implicitly use "default".
+# This is an overapproximation: static control-plane pods also get this
+# fact, but they don't actually mount SA tokens.
+pod_sa(Namespace, PodName, "default") :-
+    pod(Namespace, PodName, _).
+
 pod_image(Namespace, PodName, Image) :-
     pod(Namespace, PodName, Data),
     :match_field(Data, /spec, Spec),
     :match_field(Spec, /containers, Containers),
     :list:member(Container, Containers),
     :match_field(Container, /image, Image).
+
+node(Name, Data) :-
+    k8s("v1", "Node", "", Name, Data).
+
+node_taint(Name, Key, Value, Effect) :-
+    node(Name, Data),
+    :match_field(Data, /spec, Spec),
+    :match_field(Spec, /taints, Taints),
+    :list:member(Taint, Taints),
+    :match_field(Taint, /key, Key),
+    :match_field(Taint, /value, Value),
+    :match_field(Taint, /effect, Effect).
 
 # Helper for namespace queries
 objects_in_ns(Namespace, Kind, Name) :-
