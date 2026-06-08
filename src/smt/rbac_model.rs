@@ -38,22 +38,33 @@ impl<'ctx> SmtEncoder<'ctx> {
     /// Load Mangle RBAC primitives and define `can` and `effective_can` as
     /// closed Z3 functions via RecFuncDecl.
     pub fn assert_rbac_axioms(&mut self, store: &EvalStore) {
-        // Pre-compute the binding-join in Rust to produce ground (can) entries.
-        let subject_in_rb = super::rbac_model::compute_subject_in_rb(store);
-        let subject_in_crb = super::rbac_model::compute_subject_in_crb(store);
-        let can_entries = compute_can_entries(store, &subject_in_rb, &subject_in_crb);
-        let eff_entries = compute_effective_can_entries(store, &can_entries);
+        self.assert_rbac_axioms_impl(|rel| store.scan(rel).to_vec());
+    }
+
+    /// Same as `assert_rbac_axioms` but reads from a saved `Snapshot` instead
+    /// of a live eval store. Useful for differential access analysis.
+    pub fn assert_rbac_axioms_from_snapshot(&mut self, snap: &crate::snapshot::Snapshot) {
+        self.assert_rbac_axioms_impl(|rel| snap.scan_rel(rel));
+    }
+
+    fn assert_rbac_axioms_impl<F: Fn(&str) -> Vec<Vec<Value>>>(&mut self, scan: F) {
+        let subject_in_rb = compute_subject_in_rb(&scan);
+        let subject_in_crb = compute_subject_in_crb(&scan);
+        let can_entries = compute_can_entries(&scan, &subject_in_rb, &subject_in_crb);
+        let eff_entries = compute_effective_can_entries(&scan, &can_entries);
 
         // Load the Mangle primitives as ground facts so they're available for
         // `::smtlib` dumps and future extension.
-        self.load(store, &[
+        for rel in &[
             "role_perm",
             "clusterrole_perm",
             "rolebinding_roleref",
             "clusterrolebinding_roleref",
             "user_groups",
             "controls_identity",
-        ]);
+        ] {
+            self.load_relation(rel, &scan(rel));
+        }
         self.load_relation("subject_in_rb", &subject_in_rb);
         self.load_relation("subject_in_crb", &subject_in_crb);
 
@@ -62,6 +73,7 @@ impl<'ctx> SmtEncoder<'ctx> {
         let eff_fn = build_effective_can_rec_func(self.ctx, &eff_entries);
         self.rec_decls.insert("can".to_string(), can_fn);
         self.rec_decls.insert("effective_can".to_string(), eff_fn);
+        self.can_entries = can_entries;
     }
 }
 
@@ -181,13 +193,13 @@ fn build_effective_can_rec_func<'ctx>(
 ///   3. subject_in_crb × clusterrolebinding_roleref × clusterrole_perm
 ///      expanded over all known namespaces (CRBs grant access in every ns)
 fn compute_can_entries(
-    store: &EvalStore,
+    scan: &dyn Fn(&str) -> Vec<Vec<Value>>,
     subject_in_rb: &[Vec<Value>],
     subject_in_crb: &[Vec<Value>],
 ) -> Vec<(String, String, String, String, String)> {
     // Index role_perm by (ns, role_name).
     let mut role_perms: HashMap<(String, String), Vec<(String, String, String)>> = HashMap::new();
-    for t in store.scan("role_perm") {
+    for t in scan("role_perm") {
         if let [Value::String(ns), Value::String(role), Value::String(ag), Value::String(r), Value::String(v)] =
             t.as_slice()
         {
@@ -200,7 +212,7 @@ fn compute_can_entries(
 
     // Index clusterrole_perm by role_name.
     let mut cr_perms: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
-    for t in store.scan("clusterrole_perm") {
+    for t in scan("clusterrole_perm") {
         if let [Value::String(role), Value::String(ag), Value::String(r), Value::String(v)] = t.as_slice() {
             cr_perms
                 .entry(role.clone())
@@ -211,7 +223,7 @@ fn compute_can_entries(
 
     // Index rolebinding_roleref by (binding_ns, binding_name).
     let mut rb_roleref: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
-    for t in store.scan("rolebinding_roleref") {
+    for t in scan("rolebinding_roleref") {
         if let [Value::String(b_ns), Value::String(b_name), Value::String(kind), Value::String(role)] =
             t.as_slice()
         {
@@ -224,7 +236,7 @@ fn compute_can_entries(
 
     // Index clusterrolebinding_roleref by binding_name.
     let mut crb_roleref: HashMap<String, String> = HashMap::new();
-    for t in store.scan("clusterrolebinding_roleref") {
+    for t in scan("clusterrolebinding_roleref") {
         if let [Value::String(b_name), Value::String(role)] = t.as_slice() {
             crb_roleref.insert(b_name.clone(), role.clone());
         }
@@ -234,12 +246,12 @@ fn compute_can_entries(
     // plus "" for cluster-wide checks.
     let mut namespaces: HashSet<String> = HashSet::new();
     namespaces.insert(String::new());
-    for t in store.scan("role_perm") {
+    for t in scan("role_perm") {
         if let [Value::String(ns), ..] = t.as_slice() {
             namespaces.insert(ns.clone());
         }
     }
-    for t in store.scan("rolebinding_roleref") {
+    for t in scan("rolebinding_roleref") {
         if let [Value::String(b_ns), ..] = t.as_slice() {
             namespaces.insert(b_ns.clone());
         }
@@ -293,7 +305,7 @@ fn compute_can_entries(
 /// Compute `(principal, namespace, resource, verb)` entries for `effective_can`:
 /// direct `can` entries (apiGroup stripped) plus escalation via `controls_identity`.
 fn compute_effective_can_entries(
-    store: &EvalStore,
+    scan: &dyn Fn(&str) -> Vec<Vec<Value>>,
     can_entries: &[(String, String, String, String, String)],
 ) -> Vec<(String, String, String, String)> {
     // Project can_entries to (p, ns, r, v), dropping apiGroup.
@@ -313,7 +325,7 @@ fn compute_effective_can_entries(
 
     // controls_identity(P, Target): P inherits everything Target can do.
     // The closure is already transitively computed by Mangle (escalation.mg).
-    for t in store.scan("controls_identity") {
+    for t in scan("controls_identity") {
         if let [Value::String(p), Value::String(target)] = t.as_slice() {
             if let Some(target_can) = can_by_principal.get(target.as_str()) {
                 for (ns, r, v) in target_can {
@@ -326,13 +338,13 @@ fn compute_effective_can_entries(
     result.into_iter().collect()
 }
 
-// ---- Subject-table helpers (used by both compute_can_entries and check_access_invariant) ----
+// ---- Subject-table helpers (used by assert_rbac_axioms_impl) ----
 
 /// Build `subject_in_rb(principal, binding_ns, binding_name)` tuples.
-pub(crate) fn compute_subject_in_rb(store: &EvalStore) -> Vec<Vec<Value>> {
+pub(crate) fn compute_subject_in_rb(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Vec<Vec<Value>> {
     let mut result: HashSet<(String, String, String)> = HashSet::new();
 
-    for t in store.scan("rolebinding_subject_sa") {
+    for t in scan("rolebinding_subject_sa") {
         if let [Value::String(b_ns), Value::String(b_name), Value::String(sa_ns), Value::String(sa_name)] =
             t.as_slice()
         {
@@ -341,15 +353,14 @@ pub(crate) fn compute_subject_in_rb(store: &EvalStore) -> Vec<Vec<Value>> {
         }
     }
 
-    for t in store.scan("rolebinding_subject_user") {
+    for t in scan("rolebinding_subject_user") {
         if let [Value::String(b_ns), Value::String(b_name), Value::String(user)] = t.as_slice() {
             result.insert((user.clone(), b_ns.clone(), b_name.clone()));
         }
     }
 
-    let group_bindings: Vec<(String, String, String)> = store
-        .scan("rolebinding_subject_group")
-        .iter()
+    let group_bindings: Vec<(String, String, String)> = scan("rolebinding_subject_group")
+        .into_iter()
         .filter_map(|t| {
             if let [Value::String(b_ns), Value::String(b_name), Value::String(group)] = t.as_slice() {
                 Some((b_ns.clone(), b_name.clone(), group.clone()))
@@ -359,9 +370,8 @@ pub(crate) fn compute_subject_in_rb(store: &EvalStore) -> Vec<Vec<Value>> {
         })
         .collect();
 
-    let user_groups: Vec<(String, String)> = store
-        .scan("user_groups")
-        .iter()
+    let user_groups: Vec<(String, String)> = scan("user_groups")
+        .into_iter()
         .filter_map(|t| {
             if let [Value::String(user), Value::String(group)] = t.as_slice() {
                 Some((user.clone(), group.clone()))
@@ -387,25 +397,24 @@ pub(crate) fn compute_subject_in_rb(store: &EvalStore) -> Vec<Vec<Value>> {
 }
 
 /// Build `subject_in_crb(principal, binding_name)` tuples.
-pub(crate) fn compute_subject_in_crb(store: &EvalStore) -> Vec<Vec<Value>> {
+pub(crate) fn compute_subject_in_crb(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Vec<Vec<Value>> {
     let mut result: HashSet<(String, String)> = HashSet::new();
 
-    for t in store.scan("clusterrolebinding_subject_sa") {
+    for t in scan("clusterrolebinding_subject_sa") {
         if let [Value::String(b_name), Value::String(sa_ns), Value::String(sa_name)] = t.as_slice() {
             let p = format!("system:serviceaccount:{sa_ns}:{sa_name}");
             result.insert((p, b_name.clone()));
         }
     }
 
-    for t in store.scan("clusterrolebinding_subject_user") {
+    for t in scan("clusterrolebinding_subject_user") {
         if let [Value::String(b_name), Value::String(user)] = t.as_slice() {
             result.insert((user.clone(), b_name.clone()));
         }
     }
 
-    let group_crbs: Vec<(String, String)> = store
-        .scan("clusterrolebinding_subject_group")
-        .iter()
+    let group_crbs: Vec<(String, String)> = scan("clusterrolebinding_subject_group")
+        .into_iter()
         .filter_map(|t| {
             if let [Value::String(b_name), Value::String(group)] = t.as_slice() {
                 Some((b_name.clone(), group.clone()))
@@ -415,9 +424,8 @@ pub(crate) fn compute_subject_in_crb(store: &EvalStore) -> Vec<Vec<Value>> {
         })
         .collect();
 
-    let user_groups: Vec<(String, String)> = store
-        .scan("user_groups")
-        .iter()
+    let user_groups: Vec<(String, String)> = scan("user_groups")
+        .into_iter()
         .filter_map(|t| {
             if let [Value::String(user), Value::String(group)] = t.as_slice() {
                 Some((user.clone(), group.clone()))

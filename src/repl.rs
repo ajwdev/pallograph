@@ -7,6 +7,7 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
 use crate::edb::{FixtureSource, JsonFileSource, KubectlSource};
+use crate::snapshot::{Diff, Scope, Snapshot};
 use crate::engine::{Engine, EvalStore};
 use crate::load;
 use crate::query;
@@ -35,6 +36,10 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     println!("  ::source <src>                     — load raw Mangle rules from a file or ! <cmd> and re-evaluate");
     println!("  ::load <rel> <src>                 — load flat JSON tuples into <rel>; src is a file path or ! <cmd>");
     println!("  ::load-k8s <src>                   — load k8s objects through the projection pipeline; src is a dir, .json file, or ! <kubectl args>");
+    println!("  ::snapshot <name>                  — save current eval state as a named snapshot");
+    println!("  ::diff <name>                      — diff current state against named snapshot");
+    println!("  ::diff <name1> <name2>             — diff two named snapshots");
+    println!("  ::access-diff <name>               — diff RBAC can/5 permission closure vs named snapshot");
     println!("  ::reset                            — clear session state (_N results, ::define rules, + facts), re-evaluate");
     println!("  ::quit                             — exit");
     println!();
@@ -46,6 +51,9 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     let mut current_store = store;
     let mut pretty = false;
     let mut query_counter: u32 = 0;
+    let mut snapshot_counter: u64 = 0;
+    let mut snapshot_names: HashMap<String, u64> = HashMap::new();
+    let mut snapshot_data: HashMap<u64, Snapshot> = HashMap::new();
 
     loop {
         let readline = rl.readline("pallograph> ");
@@ -56,6 +64,8 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                     continue;
                 }
                 rl.add_history_entry(&line)?;
+                // Rewrite snapshot->relation references to snapshot__relation before parsing.
+                let line = rewrite_snapshot_refs(&line);
 
                 if line == "::quit" || line == "::exit" || line == "::q" {
                     break;
@@ -137,6 +147,17 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
 
                 if line == "::reset" {
                     engine.reset_session();
+                    // Re-materialize named snapshots — they survive ::reset.
+                    for (snap_name, version) in &snapshot_names {
+                        if let Some(snap) = snapshot_data.get(version) {
+                            for (rel, tuples) in snap.iter() {
+                                let namespaced = format!("{snap_name}__{rel}");
+                                for tuple in tuples {
+                                    engine.add_fact(namespaced.clone(), tuple.clone());
+                                }
+                            }
+                        }
+                    }
                     query_counter = 0;
                     match engine.evaluate() {
                         Ok(new_store) => {
@@ -185,6 +206,106 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
 
                 if let Some(rest) = line.strip_prefix("::smt ") {
                     smt_command(rest.trim(), &current_store);
+                    continue;
+                }
+
+                if let Some(name) = line.strip_prefix("::snapshot ") {
+                    let name = name.trim().to_string();
+                    let snap = Snapshot::from_eval(&current_store, Scope::All);
+                    let rc = snap.relation_count();
+                    let fc = snap.fact_count();
+                    for (rel, tuples) in snap.iter() {
+                        let namespaced = format!("{name}__{rel}");
+                        for tuple in tuples {
+                            engine.add_fact(namespaced.clone(), tuple.clone());
+                        }
+                    }
+                    snapshot_counter += 1;
+                    let version = snapshot_counter;
+                    snapshot_names.insert(name.clone(), version);
+                    snapshot_data.insert(version, snap);
+                    match engine.evaluate() {
+                        Ok(new_store) => {
+                            current_store = new_store;
+                            println!("Saved snapshot '{name}' v{version} ({rc} relations, {fc} facts).");
+                        }
+                        Err(e) => eprintln!("Error: {e:#}"),
+                    }
+                    continue;
+                }
+
+                if let Some(rest) = line.strip_prefix("::diff ") {
+                    let parts: Vec<&str> = rest.trim().splitn(2, ' ').collect();
+                    let lookup = |n: &str| -> Option<&Snapshot> {
+                        snapshot_names.get(n).and_then(|v| snapshot_data.get(v))
+                    };
+                    let (before, after_snap) = match parts.as_slice() {
+                        [name] => {
+                            match lookup(name) {
+                                Some(s) => (s, None),
+                                None => { eprintln!("No snapshot named '{}'.", name); continue; }
+                            }
+                        }
+                        [name1, name2] => {
+                            let s1 = match lookup(name1) {
+                                Some(s) => s,
+                                None => { eprintln!("No snapshot named '{}'.", name1); continue; }
+                            };
+                            let s2 = match lookup(name2) {
+                                Some(s) => s,
+                                None => { eprintln!("No snapshot named '{}'.", name2); continue; }
+                            };
+                            (s1, Some(s2))
+                        }
+                        _ => { eprintln!("Usage: ::diff <name>  or  ::diff <name1> <name2>"); continue; }
+                    };
+                    let current_snap;
+                    let after: &Snapshot = match after_snap {
+                        Some(s) => s,
+                        None => {
+                            current_snap = Snapshot::from_eval(&current_store, Scope::All);
+                            &current_snap
+                        }
+                    };
+                    let diff = Diff::between(before, after);
+                    print!("{diff}");
+                    continue;
+                }
+
+                if let Some(name) = line.strip_prefix("::access-diff ") {
+                    let name = name.trim();
+                    let Some(snap) = snapshot_names.get(name).and_then(|v| snapshot_data.get(v)) else {
+                        eprintln!("No snapshot named '{name}'.");
+                        continue;
+                    };
+                    let cfg = z3::Config::new();
+                    let ctx = z3::Context::new(&cfg);
+                    let mut enc_before = smt::SmtEncoder::new(&ctx);
+                    let mut enc_after = smt::SmtEncoder::new(&ctx);
+                    enc_before.assert_rbac_axioms_from_snapshot(snap);
+                    enc_after.assert_rbac_axioms(&current_store);
+
+                    use std::collections::HashSet;
+                    let before_set: HashSet<_> = enc_before.can_entries.iter().collect();
+                    let after_set: HashSet<_> = enc_after.can_entries.iter().collect();
+                    let gained: Vec<_> = after_set.difference(&before_set).collect();
+                    let lost: Vec<_> = before_set.difference(&after_set).collect();
+
+                    if gained.is_empty() && lost.is_empty() {
+                        println!("(no permission changes)");
+                    } else {
+                        println!("=== Access diff: '{name}' → current ===");
+                        let mut gained_sorted = gained;
+                        gained_sorted.sort();
+                        for (p, ns, ag, r, v) in gained_sorted {
+                            println!("  GAINED  {p}  ns={ns:?}  apigroup={ag:?}  resource={r:?}  verb={v:?}");
+                        }
+                        let mut lost_sorted = lost;
+                        lost_sorted.sort();
+                        for (p, ns, ag, r, v) in lost_sorted {
+                            println!("  LOST    {p}  ns={ns:?}  apigroup={ag:?}  resource={r:?}  verb={v:?}");
+                        }
+                    }
                     continue;
                 }
 
@@ -770,6 +891,37 @@ fn parse_ground_tuple(input: &str) -> anyhow::Result<(String, Vec<mangle_common:
         }
     }
     Ok((q.predicate, tuple))
+}
+
+/// Rewrite `snapshot->relation` to the internal `snapshot__relation` form,
+/// skipping inside string literals. Applied before any Mangle parsing so that
+/// `before->can(P, NS, AG, R, V)` and rule bodies work transparently.
+fn rewrite_snapshot_refs(s: &str) -> String {
+    if !s.contains("->") {
+        return s.to_string();
+    }
+    let mut result = String::with_capacity(s.len());
+    let mut in_string = false;
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '"' => {
+                in_string = !in_string;
+                result.push('"');
+                i += 1;
+            }
+            '-' if !in_string && i + 1 < chars.len() && chars[i + 1] == '>' => {
+                result.push_str("__");
+                i += 2;
+            }
+            c => {
+                result.push(c);
+                i += 1;
+            }
+        }
+    }
+    result
 }
 
 fn count_top_level_args(s: &str) -> usize {

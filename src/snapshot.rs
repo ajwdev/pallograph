@@ -31,6 +31,26 @@ impl Snapshot {
         Self { relations }
     }
 
+    /// Iterate over (relation_name, tuples) pairs in this snapshot.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &BTreeSet<Vec<Value>>)> {
+        self.relations.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    pub fn relation_count(&self) -> usize {
+        self.relations.len()
+    }
+
+    pub fn fact_count(&self) -> usize {
+        self.relations.values().map(|s| s.len()).sum()
+    }
+
+    pub fn scan_rel(&self, rel: &str) -> Vec<Vec<Value>> {
+        self.relations
+            .get(rel)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub fn from_store(store: &MemStore, scope: Scope) -> Self {
         let mut relations = BTreeMap::new();
         let names: Vec<String> = match scope {
