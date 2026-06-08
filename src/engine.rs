@@ -229,12 +229,6 @@ impl CompiledProgram {
 
     pub fn dump_plan(&mut self) -> Result<()> {
         for (i, pred_names) in self.strata.iter().enumerate() {
-            // Step A: predicate names for this stratum
-            // let pred_names: std::collections::HashSet<&str> = stratum
-            //     .iter()
-            //     .filter_map(|pred| self.arena.predicate_name(pred))
-            //     .collect();
-
             println!(
                 "● Stratum {i} ({})",
                 pred_names
@@ -493,6 +487,7 @@ fn execute_with_provenance<'a>(
     Ok(interpreter)
 }
 
+
 pub struct Engine {
     /// EDB facts collected at load time; replayed on each evaluate.
     edb: Vec<(String, Vec<Value>)>,
@@ -569,6 +564,7 @@ impl Engine {
         Ok(())
     }
 
+
     /// Reset all REPL session state: drop added rules and EDB temporaries, restore
     /// to the state at initial load.
     pub fn reset_session(&mut self) {
@@ -583,6 +579,7 @@ impl Engine {
     pub fn truncate_rules(&mut self, len: usize) {
         self.rule_sources.truncate(len);
     }
+
 
     /// Remove all rules whose head matches `predicate`.
     pub fn remove_rules_for(&mut self, predicate: &str) {
