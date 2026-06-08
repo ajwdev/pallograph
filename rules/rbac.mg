@@ -246,6 +246,7 @@ all_user_perm(Username, Namespace, ApiGroup, Resource, Verb) :-
 all_user_perm(Username, Namespace, ApiGroup, Resource, Verb) :-
     user_rb_clusterrole_perm(Username, Namespace, ApiGroup, Resource, Verb).
 
+
 all_user_perm(Username, "", ApiGroup, Resource, Verb) :-
     user_crb_perm(Username, ApiGroup, Resource, Verb).
 
@@ -275,5 +276,84 @@ clusterrole_perm(AggCR, ApiGroup, Resource, Verb) :-
     clusterrole_aggregates(AggCR, SourceCR),
     clusterrole_perm(SourceCR, ApiGroup, Resource, Verb).
 
-# can(P, Ns, R, V) is computed as EDB facts by edb.rs (see emit_can_facts).
-# Wildcard expansion and CRB→namespace expansion are done in Rust.
+# ---- resource_type / verb_type ----
+#
+# Bounding sets used by can to keep derived facts finite.
+#
+# resource_type is derived from api_resource (EDB loaded from
+# `kubectl api-resources -o name`) and also from permissions already declared
+# in roles, so subresources like pods/exec that aren't in api-resources are
+# included automatically.
+#
+# verb_type is derived from permissions already present in roles and
+# clusterroles, so it automatically covers every verb in use.
+
+resource_type(Resource) :- api_resource(_, Resource).
+resource_type(Resource) :- role_perm(_, _, _, Resource, _).
+resource_type(Resource) :- clusterrole_perm(_, _, Resource, _).
+
+
+# ---- can ----
+#
+# SubjectAccessReview equivalent. Namespace="" means a cluster-wide grant
+# (ClusterRoleBinding path); a non-empty Namespace means the grant is scoped
+# to that namespace via a RoleBinding.
+#
+# resource_type and verb_type bind Resource and Verb so the derived fact set
+# stays finite — one row per (principal, namespace, resource, verb) where access
+# is granted.
+
+# Users
+can(Username, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_user_perm(Username, Namespace, _, Resource, Verb).
+
+can(Username, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_user_perm(Username, Namespace, _, "*", Verb).
+
+can(Username, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_user_perm(Username, Namespace, _, Resource, "*").
+
+can(Username, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_user_perm(Username, Namespace, _, "*", "*").
+
+# Service accounts — principal formatted as system:serviceaccount:<ns>:<name>
+can(Principal, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_sa_perm(SANs, SAName, Namespace, _, Resource, Verb)
+    |> let Principal = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+can(Principal, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_sa_perm(SANs, SAName, Namespace, _, "*", Verb)
+    |> let Principal = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+can(Principal, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_sa_perm(SANs, SAName, Namespace, _, Resource, "*")
+    |> let Principal = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+can(Principal, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_sa_perm(SANs, SAName, Namespace, _, "*", "*")
+    |> let Principal = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+# Groups
+can(GroupName, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_group_perm(GroupName, Namespace, _, Resource, Verb).
+
+can(GroupName, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_group_perm(GroupName, Namespace, _, "*", Verb).
+
+can(GroupName, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_group_perm(GroupName, Namespace, _, Resource, "*").
+
+can(GroupName, Namespace, Resource, Verb) :-
+    resource_type(Resource), verb_type(Verb),
+    all_group_perm(GroupName, Namespace, _, "*", "*").
