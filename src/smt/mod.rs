@@ -28,6 +28,9 @@ pub struct SmtEncoder<'ctx> {
     /// RecFuncDecl derefs to FuncDecl; use `get_decl` for a unified lookup.
     pub(crate) rec_decls: HashMap<String, RecFuncDecl<'ctx>>,
     pub(crate) facts: HashMap<String, Vec<Vec<Value>>>,
+    /// Pre-computed (principal, namespace, apigroup, resource, verb) entries
+    /// from the last call to assert_rbac_axioms or assert_rbac_axioms_from_snapshot.
+    pub(crate) can_entries: Vec<(String, String, String, String, String)>,
 }
 
 impl<'ctx> SmtEncoder<'ctx> {
@@ -38,6 +41,7 @@ impl<'ctx> SmtEncoder<'ctx> {
             decls: HashMap::new(),
             rec_decls: HashMap::new(),
             facts: HashMap::new(),
+            can_entries: Vec::new(),
         }
     }
 
