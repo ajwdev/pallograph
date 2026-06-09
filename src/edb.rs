@@ -254,6 +254,9 @@ pub fn populate(store: &mut MemStore, source: &mut dyn FactSource) -> Result<()>
         );
     }
     emit_can_facts(store, &rbac);
+    for ns in &rbac.namespaces {
+        store.add_fact("namespace", vec![Value::String(ns.clone())]);
+    }
     Ok(())
 }
 

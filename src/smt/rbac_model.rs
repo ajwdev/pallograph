@@ -281,18 +281,28 @@ fn compute_can_entries(
         }
     }
 
-    // Namespace set for CRB expansion: all namespaces with role or binding objects,
-    // plus "" for cluster-wide checks.
+    // Namespace set for CRB expansion: prefer explicit namespace EDB facts emitted
+    // by the EDB loader, which reflect the full cluster namespace list. Fall back
+    // to deriving from role/binding entries so interactive ::define sessions still
+    // work. Always include "" for cluster-wide checks.
     let mut namespaces: HashSet<String> = HashSet::new();
     namespaces.insert(String::new());
-    for t in scan("role_perm") {
-        if let [Value::String(ns), ..] = t.as_slice() {
+    for t in scan("namespace") {
+        if let [Value::String(ns)] = t.as_slice() {
             namespaces.insert(ns.clone());
         }
     }
-    for t in scan("rolebinding_roleref") {
-        if let [Value::String(b_ns), ..] = t.as_slice() {
-            namespaces.insert(b_ns.clone());
+    if namespaces.len() == 1 {
+        // No namespace EDB facts — fall back to deriving from RBAC data.
+        for t in scan("role_perm") {
+            if let [Value::String(ns), ..] = t.as_slice() {
+                namespaces.insert(ns.clone());
+            }
+        }
+        for t in scan("rolebinding_roleref") {
+            if let [Value::String(b_ns), ..] = t.as_slice() {
+                namespaces.insert(b_ns.clone());
+            }
         }
     }
 
