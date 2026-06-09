@@ -55,13 +55,23 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     let mut snapshot_counter: u64 = 0;
     let mut snapshot_names: HashMap<String, u64> = HashMap::new();
     let mut snapshot_data: HashMap<u64, Snapshot> = HashMap::new();
+    let mut pending: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     loop {
-        let readline = rl.readline("pallograph> ");
-        match readline {
+        let raw = if let Some(queued) = pending.pop_front() {
+            Ok(queued)
+        } else {
+            rl.readline("pallograph> ")
+        };
+        match raw {
             Ok(line) => {
                 let line = line.trim().to_string();
                 if line.is_empty() {
+                    continue;
+                }
+                // Split pasted multi-line input into individual commands.
+                if line.contains('\n') {
+                    pending.extend(line.split('\n').map(|s| s.to_string()));
                     continue;
                 }
                 rl.add_history_entry(&line)?;
@@ -315,7 +325,7 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
 
                 if let Some(rule) = line.strip_prefix("::define ") {
                     let checkpoint = engine.rules_len();
-                    engine.add_rule(rule.trim_end_matches('.').trim().to_string());
+                    engine.add_rule(format!("{}.", rule.trim_end_matches('.').trim()));
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
