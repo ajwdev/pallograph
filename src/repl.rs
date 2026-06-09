@@ -25,6 +25,8 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     println!("  ::pretty                           — toggle compact/pretty tuple display");
     println!("  ::query <body>  / ?- <body>         — evaluate a one-shot conjunctive query");
     println!("  ::smt check_access <ns> <r> <v> [p...] — Z3: find principals in can(_,ns,r,v) outside expected set (ns=\"\" for cluster-wide)");
+    println!("  ::smt reaches <ns> <ag> <r> <v> [p...] — Z3: find principals that effective_can reach (ag,r,v), escalation-aware");
+    println!("  ::smt cluster-admin [p...]          — Z3: shorthand for reaches \"\" \"*\" \"*\" \"*\"");
     println!("  ::smt node_selector                — Z3: find pods whose nodeSelector no node satisfies");
     println!("  ::smt anti_affinity                — Z3: find a valid pod placement or prove none exists");
     println!("  can(P, Namespace, ApiGroup, R, V)  — ApiGroup=\"\" for core, \"*\" for wildcard; Namespace scoped to binding");
@@ -625,14 +627,48 @@ fn extract_vars(body: &str) -> Vec<String> {
     vars
 }
 
+fn print_violation_paths(paths: &[smt::AccessPath]) {
+    for p in paths {
+        let binding = format!(
+            "{} {}/{} → {} {}",
+            p.binding_kind, p.binding_namespace, p.binding_name, p.role_kind, p.role_name
+        );
+        if p.hops.is_empty() {
+            println!("          {binding}");
+        } else {
+            // First hop printed as "via <identity> [mechanism]"
+            let (id, mech) = &p.hops[0];
+            let mech_s = if mech.is_empty() { String::new() } else { format!(" [{mech}]") };
+            println!("          via {id}{mech_s}");
+            // Subsequent hops each get a "  → via" prefix
+            for (id, mech) in &p.hops[1..] {
+                let mech_s = if mech.is_empty() { String::new() } else { format!(" [{mech}]") };
+                println!("            → via {id}{mech_s}");
+            }
+            println!("            → {binding}");
+        }
+    }
+}
+
 fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label: &str) {
     let can_gained = enc.check_permission_expansion(before_label, after_label);
     let can_lost = enc.check_permission_contraction(before_label, after_label);
     let eff_gained = enc.check_effective_can_expansion(before_label, after_label);
     let eff_lost = enc.check_effective_can_contraction(before_label, after_label);
 
-    if can_gained.is_empty() && can_lost.is_empty() && eff_gained.is_empty() && eff_lost.is_empty() {
-        println!("(no permission changes)");
+    let total_gained = can_gained.len() + eff_gained.len();
+    let total_lost = can_lost.len() + eff_lost.len();
+
+    if total_gained > 0 {
+        if total_lost > 0 {
+            println!("FAIL  {} new permission(s) granted ({} removed)", total_gained, total_lost);
+        } else {
+            println!("FAIL  {} new permission(s) granted", total_gained);
+        }
+    } else if total_lost > 0 {
+        println!("PASS  {} permission(s) removed, none added", total_lost);
+    } else {
+        println!("PASS  no permission changes");
         return;
     }
 
@@ -778,6 +814,60 @@ fn smt_command(input: &str, store: &EvalStore) {
                         "        UNEXPECTED can({:?}, {:?}, {:?}, {:?})",
                         v.principal, v.namespace, v.resource, v.verb
                     );
+                    print_violation_paths(&v.paths);
+                }
+            }
+        }
+        "reaches" | "cluster-admin" => {
+            // Parse --direct flag out of the token stream before positional args.
+            let tokens: Vec<&str> = rest.split_whitespace().collect();
+            let include_direct = tokens.iter().any(|t| *t == "--direct");
+            let mut token_iter = tokens.iter().filter(|t| **t != "--direct").copied();
+
+            let (namespace, apigroup, resource, verb, expected) = if subcommand == "cluster-admin" {
+                let expected_owned: Vec<String> = token_iter
+                    .filter(|s| !matches!(*s, "[]" | "[" | "]"))
+                    .map(|s| s.trim_matches('"').to_string())
+                    .collect();
+                ("", "*", "*", "*", expected_owned)
+            } else {
+                let (Some(ns_raw), Some(ag_raw), Some(res_raw), Some(verb_raw)) =
+                    (token_iter.next(), token_iter.next(), token_iter.next(), token_iter.next())
+                else {
+                    eprintln!("Usage: ::smt reaches <namespace> <apigroup> <resource> <verb> [--direct] [expected ...]");
+                    eprintln!("       Use ::smt cluster-admin [--direct] to check for cluster-admin level access.");
+                    return;
+                };
+                let expected_owned: Vec<String> = token_iter
+                    .filter(|s| !matches!(*s, "[]" | "[" | "]"))
+                    .map(|s| s.trim_matches('"').to_string())
+                    .collect();
+                (
+                    ns_raw.trim_matches('"'),
+                    ag_raw.trim_matches('"'),
+                    res_raw.trim_matches('"'),
+                    verb_raw.trim_matches('"'),
+                    expected_owned,
+                )
+            };
+            let expected: Vec<&str> = expected.iter().map(String::as_str).collect();
+
+            let cfg = z3::Config::new();
+            let ctx = z3::Context::new(&cfg);
+            let mut enc = smt::SmtEncoder::new(&ctx);
+            enc.assert_rbac_axioms(store);
+
+            let violations = enc.check_reaches(namespace, apigroup, resource, verb, &expected, include_direct);
+            if violations.is_empty() {
+                println!("PASS  effective_can(_, {namespace:?}, {apigroup:?}, {resource:?}, {verb:?})");
+            } else {
+                println!(
+                    "FAIL  {} principal(s) can reach ({namespace:?}, {apigroup:?}, {resource:?}, {verb:?}):",
+                    violations.len()
+                );
+                for v in &violations {
+                    println!("        {}", v.principal);
+                    print_violation_paths(&v.paths);
                 }
             }
         }
@@ -847,7 +937,7 @@ fn smt_command(input: &str, store: &EvalStore) {
         }
         _ => {
             eprintln!("Unknown SMT subcommand: {subcommand:?}");
-            eprintln!("Available: check_access, check_isolation, node_selector, anti_affinity");
+            eprintln!("Available: check_access, check_isolation, reaches, cluster-admin, node_selector, anti_affinity");
         }
     }
 }
