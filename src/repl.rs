@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
 use mangle_common::Value;
@@ -70,8 +70,11 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                     continue;
                 }
                 // Split pasted multi-line input into individual commands.
+                // Only split at newlines where parentheses are balanced and we're
+                // not inside a string, so that multi-line expressions (e.g. a fact
+                // argument that wraps across lines) are kept together.
                 if line.contains('\n') {
-                    pending.extend(line.split('\n').map(|s| s.to_string()));
+                    pending.extend(split_commands(&line));
                     continue;
                 }
                 rl.add_history_entry(&line)?;
@@ -552,6 +555,38 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     Ok(())
 }
 
+/// Split a multi-line pasted string into individual commands, keeping lines
+/// together when a newline falls inside an unbalanced parenthesis or string.
+fn split_commands(input: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut current = String::new();
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+
+    for ch in input.chars() {
+        match ch {
+            '"' => in_string = !in_string,
+            '(' if !in_string => depth += 1,
+            ')' if !in_string => depth -= 1,
+            '\n' if !in_string && depth <= 0 => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    commands.push(trimmed);
+                }
+                current = String::new();
+                continue;
+            }
+            _ => {}
+        }
+        current.push(ch);
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        commands.push(trimmed);
+    }
+    commands
+}
+
 /// Extract uppercase variable names from a Mangle rule body, in order of first
 /// appearance. Skips string literals and single underscores.
 fn extract_vars(body: &str) -> Vec<String> {
@@ -623,22 +658,81 @@ fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label:
     }
     if !eff_gained.is_empty() {
         println!("  EFFECTIVE GAINED ({}) [escalation-aware]:", eff_gained.len());
-        let mut sorted = eff_gained;
-        sorted.sort_by(|a, b| a.principal.cmp(&b.principal));
-        for d in &sorted {
-            println!("    {}  ns={:?}  resource={:?}  verb={:?}",
-                d.principal, d.namespace, d.resource, d.verb);
-        }
+        let via_rel = smt::rbac_model::fn_name("indirect_perm", after_label);
+        print_eff_diffs_grouped(&eff_gained, &via_rel, &enc.facts);
     }
     if !eff_lost.is_empty() {
         println!("  EFFECTIVE LOST ({}) [escalation-aware]:", eff_lost.len());
-        let mut sorted = eff_lost;
-        sorted.sort_by(|a, b| a.principal.cmp(&b.principal));
-        for d in &sorted {
-            println!("    {}  ns={:?}  resource={:?}  verb={:?}",
-                d.principal, d.namespace, d.resource, d.verb);
+        let via_rel = smt::rbac_model::fn_name("indirect_perm", before_label);
+        print_eff_diffs_grouped(&eff_lost, &via_rel, &enc.facts);
+    }
+}
+
+/// Group effective-can diffs by (principal, escalation-target) and print.
+/// Looks up `indirect_perm` facts to find which SA each permission came
+/// through. Permissions not found there were gained directly.
+fn print_eff_diffs_grouped(
+    diffs: &[smt::diff::EffDiff],
+    via_rel: &str,
+    facts: &HashMap<String, Vec<Vec<mangle_common::Value>>>,
+) {
+    // (principal, target) → indices into diffs. Empty target = direct grant.
+    let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+
+    for (i, d) in diffs.iter().enumerate() {
+        let targets = find_via_targets(facts, via_rel, &d.principal, &d.namespace, &d.apigroup, &d.resource, &d.verb);
+        if targets.is_empty() {
+            groups.entry((d.principal.clone(), String::new())).or_default().push(i);
+        } else {
+            for target in targets {
+                groups.entry((d.principal.clone(), target)).or_default().push(i);
+            }
         }
     }
+
+    for ((principal, target), indices) in &groups {
+        if target.is_empty() {
+            println!("    {}  [direct]:", principal);
+        } else {
+            println!("    {}  via {}:", principal, target);
+        }
+        for &i in indices {
+            let d = &diffs[i];
+            println!("      ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
+                d.namespace, d.apigroup, d.resource, d.verb);
+        }
+    }
+}
+
+/// Return all Target values from `indirect_perm` matching the given 5-tuple.
+fn find_via_targets(
+    facts: &HashMap<String, Vec<Vec<mangle_common::Value>>>,
+    rel_name: &str,
+    principal: &str,
+    namespace: &str,
+    apigroup: &str,
+    resource: &str,
+    verb: &str,
+) -> Vec<String> {
+    use mangle_common::Value;
+    facts
+        .get(rel_name)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            if let [Value::String(p), Value::String(ns), Value::String(ag), Value::String(r), Value::String(v), Value::String(target)] =
+                row.as_slice()
+            {
+                if p == principal && ns == namespace && ag == apigroup && r == resource && v == verb {
+                    Some(target.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn smt_command(input: &str, store: &EvalStore) {
