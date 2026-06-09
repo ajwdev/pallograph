@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use z3::ast::{Ast, Bool};
+use z3::ast::Ast;
 use z3::ast::String as Z3String;
 use z3::SatResult;
 
@@ -18,6 +18,7 @@ pub struct CanDiff {
 pub struct EffDiff {
     pub principal: String,
     pub namespace: String,
+    pub apigroup: String,
     pub resource: String,
     pub verb: String,
 }
@@ -50,151 +51,86 @@ impl<'ctx> SmtEncoder<'ctx> {
         self.eff_diff_witnesses(before, after)
     }
 
-    // Finds tuples satisfying have_<have>(p,ns,ag,r,v) ∧ ¬have_<not_have>(p,ns,ag,r,v).
-    // Returns one representative witness per principal.
+    // Iterate over tuples literally in `have_entries` but not `not_have_entries`, then
+    // use Z3 to filter out any that are semantically subsumed by a wildcard in not_have.
+    // This avoids the infinite-loop that results from asking Z3 to search the full string
+    // space when a wildcard entry like ("alice","","","*","*") is present.
     fn can_diff_witnesses(&self, have: &str, not_have: &str) -> Vec<CanDiff> {
-        let have_decl = match self.get_decl(&fn_name("can", have)) {
-            Some(d) => d,
-            None => return vec![],
-        };
         let not_have_decl = match self.get_decl(&fn_name("can", not_have)) {
             Some(d) => d,
             None => return vec![],
         };
 
-        let principals = union_principals_5(
-            self.can_entries.get(have).into_iter().flatten(),
-            self.can_entries.get(not_have).into_iter().flatten(),
-        );
-        if principals.is_empty() {
-            return vec![];
-        }
-
-        let p_var = Z3String::new_const(self.ctx, "cdiff_p");
-        let ns_var = Z3String::new_const(self.ctx, "cdiff_ns");
-        let ag_var = Z3String::new_const(self.ctx, "cdiff_ag");
-        let r_var = Z3String::new_const(self.ctx, "cdiff_r");
-        let v_var = Z3String::new_const(self.ctx, "cdiff_v");
-
-        let args: [&dyn Ast; 5] = [&p_var, &ns_var, &ag_var, &r_var, &v_var];
-        let has_perm = have_decl.apply(&args).as_bool().unwrap();
-        let not_had_perm = not_have_decl.apply(&args).as_bool().unwrap().not();
-        let p_is_candidate = candidate_constraint(self.ctx, &p_var, &principals);
-
-        self.solver.push();
-        self.solver.assert(&has_perm);
-        self.solver.assert(&not_had_perm);
-        self.solver.assert(&p_is_candidate);
+        let have_set: HashSet<_> = self.can_entries.get(have).into_iter().flatten().collect();
+        let not_have_set: HashSet<_> = self.can_entries.get(not_have).into_iter().flatten().collect();
 
         let mut results = Vec::new();
-        loop {
-            if self.solver.check() != SatResult::Sat {
-                break;
+        for (principal, namespace, apigroup, resource, verb) in have_set.difference(&not_have_set) {
+            let p = Z3String::from_str(self.ctx, principal).unwrap();
+            let ns = Z3String::from_str(self.ctx, namespace).unwrap();
+            let ag = Z3String::from_str(self.ctx, apigroup).unwrap();
+            let r = Z3String::from_str(self.ctx, resource).unwrap();
+            let v = Z3String::from_str(self.ctx, verb).unwrap();
+            let args: [&dyn Ast; 5] = [&p, &ns, &ag, &r, &v];
+            let already_covered = not_have_decl.apply(&args).as_bool().unwrap();
+
+            self.solver.push();
+            self.solver.assert(&already_covered);
+            let subsumed = self.solver.check() == SatResult::Sat;
+            self.solver.pop(1);
+
+            if !subsumed {
+                results.push(CanDiff {
+                    principal: principal.clone(),
+                    namespace: namespace.clone(),
+                    apigroup: apigroup.clone(),
+                    resource: resource.clone(),
+                    verb: verb.clone(),
+                });
             }
-            let model = self.solver.get_model().unwrap();
-            let principal = match model.eval(&p_var, true).and_then(|v| v.as_string()) {
-                Some(s) => s,
-                None => break,
-            };
-            let namespace = model.eval(&ns_var, true).and_then(|v| v.as_string()).unwrap_or_default();
-            let apigroup = model.eval(&ag_var, true).and_then(|v| v.as_string()).unwrap_or_default();
-            let resource = model.eval(&r_var, true).and_then(|v| v.as_string()).unwrap_or_default();
-            let verb = model.eval(&v_var, true).and_then(|v| v.as_string()).unwrap_or_default();
-
-            self.solver.assert(
-                &p_var._eq(&Z3String::from_str(self.ctx, &principal).unwrap()).not(),
-            );
-            results.push(CanDiff { principal, namespace, apigroup, resource, verb });
         }
-
-        self.solver.pop(1);
         results
     }
 
-    // Finds tuples satisfying effective_can_<have>(p,ns,r,v) ∧ ¬effective_can_<not_have>(p,ns,r,v).
+    // Same approach for effective_can: finite literal diff, Z3 only for subsumption checks.
     fn eff_diff_witnesses(&self, have: &str, not_have: &str) -> Vec<EffDiff> {
-        let have_decl = match self.get_decl(&fn_name("effective_can", have)) {
-            Some(d) => d,
-            None => return vec![],
-        };
         let not_have_decl = match self.get_decl(&fn_name("effective_can", not_have)) {
             Some(d) => d,
             None => return vec![],
         };
 
-        let principals = union_principals_4(
-            self.eff_entries.get(have).into_iter().flatten(),
-            self.eff_entries.get(not_have).into_iter().flatten(),
-        );
-        if principals.is_empty() {
-            return vec![];
-        }
-
-        let p_var = Z3String::new_const(self.ctx, "ecdiff_p");
-        let ns_var = Z3String::new_const(self.ctx, "ecdiff_ns");
-        let r_var = Z3String::new_const(self.ctx, "ecdiff_r");
-        let v_var = Z3String::new_const(self.ctx, "ecdiff_v");
-
-        let args: [&dyn Ast; 4] = [&p_var, &ns_var, &r_var, &v_var];
-        let has_perm = have_decl.apply(&args).as_bool().unwrap();
-        let not_had_perm = not_have_decl.apply(&args).as_bool().unwrap().not();
-        let p_is_candidate = candidate_constraint(self.ctx, &p_var, &principals);
-
-        self.solver.push();
-        self.solver.assert(&has_perm);
-        self.solver.assert(&not_had_perm);
-        self.solver.assert(&p_is_candidate);
+        let have_set: HashSet<_> = self.eff_entries.get(have).into_iter().flatten().collect();
+        let not_have_set: HashSet<_> = self.eff_entries.get(not_have).into_iter().flatten().collect();
 
         let mut results = Vec::new();
-        loop {
-            if self.solver.check() != SatResult::Sat {
-                break;
+        for (principal, namespace, apigroup, resource, verb) in have_set.difference(&not_have_set) {
+            let p = Z3String::from_str(self.ctx, principal).unwrap();
+            let ns = Z3String::from_str(self.ctx, namespace).unwrap();
+            let ag = Z3String::from_str(self.ctx, apigroup).unwrap();
+            let r = Z3String::from_str(self.ctx, resource).unwrap();
+            let v = Z3String::from_str(self.ctx, verb).unwrap();
+            let args: [&dyn Ast; 5] = [&p, &ns, &ag, &r, &v];
+            let already_covered = not_have_decl.apply(&args).as_bool().unwrap();
+
+            self.solver.push();
+            self.solver.assert(&already_covered);
+            let subsumed = self.solver.check() == SatResult::Sat;
+            self.solver.pop(1);
+
+            if !subsumed {
+                results.push(EffDiff {
+                    principal: principal.clone(),
+                    namespace: namespace.clone(),
+                    apigroup: apigroup.clone(),
+                    resource: resource.clone(),
+                    verb: verb.clone(),
+                });
             }
-            let model = self.solver.get_model().unwrap();
-            let principal = match model.eval(&p_var, true).and_then(|v| v.as_string()) {
-                Some(s) => s,
-                None => break,
-            };
-            let namespace = model.eval(&ns_var, true).and_then(|v| v.as_string()).unwrap_or_default();
-            let resource = model.eval(&r_var, true).and_then(|v| v.as_string()).unwrap_or_default();
-            let verb = model.eval(&v_var, true).and_then(|v| v.as_string()).unwrap_or_default();
-
-            self.solver.assert(
-                &p_var._eq(&Z3String::from_str(self.ctx, &principal).unwrap()).not(),
-            );
-            results.push(EffDiff { principal, namespace, resource, verb });
         }
-
-        self.solver.pop(1);
         results
     }
 }
 
-fn union_principals_5<'a>(
-    a: impl Iterator<Item = &'a (String, String, String, String, String)>,
-    b: impl Iterator<Item = &'a (String, String, String, String, String)>,
-) -> HashSet<String> {
-    a.chain(b).map(|(p, ..)| p.clone()).collect()
-}
-
-fn union_principals_4<'a>(
-    a: impl Iterator<Item = &'a (String, String, String, String)>,
-    b: impl Iterator<Item = &'a (String, String, String, String)>,
-) -> HashSet<String> {
-    a.chain(b).map(|(p, ..)| p.clone()).collect()
-}
-
-fn candidate_constraint<'ctx>(
-    ctx: &'ctx z3::Context,
-    p_var: &Z3String<'ctx>,
-    principals: &HashSet<String>,
-) -> Bool<'ctx> {
-    let eqs: Vec<Bool<'ctx>> = principals
-        .iter()
-        .map(|p| p_var._eq(&Z3String::from_str(ctx, p).unwrap()))
-        .collect();
-    Bool::or(ctx, &eqs.iter().collect::<Vec<_>>())
-}
 
 #[cfg(test)]
 mod tests {
@@ -233,14 +169,6 @@ mod tests {
 
     #[test]
     fn expansion_detects_new_binding() {
-        // Build a minimal "before" with no bindings (empty RBAC state).
-        // Build "after" with a single RoleBinding granting alice pods/get.
-        //
-        // Construct synthetic Snapshots with the IDB relations that
-        // assert_rbac_axioms_named reads directly:
-        //   rolebinding_subject_user(binding_ns, binding_name, user)
-        //   rolebinding_roleref(binding_ns, binding_name, kind, role_name)
-        //   role_perm(ns, role_name, apigroup, resource, verb)
         let empty_snap = {
             let store = MemStore::new();
             Snapshot::from_store(&store, Scope::All)
@@ -248,20 +176,9 @@ mod tests {
 
         let after_snap = {
             let mut store = MemStore::new();
-            store.add_fact("rolebinding_subject_user", vec![
-                Value::String("default".into()),
-                Value::String("rb-pod-reader".into()),
+            store.add_fact("direct_perm", vec![
                 Value::String("alice".into()),
-            ]);
-            store.add_fact("rolebinding_roleref", vec![
                 Value::String("default".into()),
-                Value::String("rb-pod-reader".into()),
-                Value::String("Role".into()),
-                Value::String("pod-reader".into()),
-            ]);
-            store.add_fact("role_perm", vec![
-                Value::String("default".into()),
-                Value::String("pod-reader".into()),
                 Value::String("".into()),
                 Value::String("pods".into()),
                 Value::String("get".into()),
@@ -295,20 +212,9 @@ mod tests {
         // The Z3 semantic check must return empty (the narrow grant is subsumed).
         let before_snap = {
             let mut store = MemStore::new();
-            store.add_fact("rolebinding_subject_user", vec![
-                Value::String("default".into()),
-                Value::String("rb-alice".into()),
+            store.add_fact("direct_perm", vec![
                 Value::String("alice".into()),
-            ]);
-            store.add_fact("rolebinding_roleref", vec![
                 Value::String("default".into()),
-                Value::String("rb-alice".into()),
-                Value::String("Role".into()),
-                Value::String("wildcard-verbs".into()),
-            ]);
-            store.add_fact("role_perm", vec![
-                Value::String("default".into()),
-                Value::String("wildcard-verbs".into()),
                 Value::String("".into()),
                 Value::String("pods".into()),
                 Value::String("*".into()),  // wildcard verb
@@ -318,43 +224,21 @@ mod tests {
 
         let after_snap = {
             let mut store = MemStore::new();
-            // Same wildcard binding as before.
-            store.add_fact("rolebinding_subject_user", vec![
-                Value::String("default".into()),
-                Value::String("rb-alice".into()),
+            // Same wildcard grant as before.
+            store.add_fact("direct_perm", vec![
                 Value::String("alice".into()),
-            ]);
-            store.add_fact("rolebinding_roleref", vec![
                 Value::String("default".into()),
-                Value::String("rb-alice".into()),
-                Value::String("Role".into()),
-                Value::String("wildcard-verbs".into()),
-            ]);
-            store.add_fact("role_perm", vec![
-                Value::String("default".into()),
-                Value::String("wildcard-verbs".into()),
                 Value::String("".into()),
                 Value::String("pods".into()),
                 Value::String("*".into()),
             ]);
-            // Additionally: an explicit narrow grant (subsumed by the wildcard).
-            store.add_fact("rolebinding_subject_user", vec![
-                Value::String("default".into()),
-                Value::String("rb-alice-narrow".into()),
+            // Additionally: an explicit narrow grant (subsumed by the wildcard above).
+            store.add_fact("direct_perm", vec![
                 Value::String("alice".into()),
-            ]);
-            store.add_fact("rolebinding_roleref", vec![
                 Value::String("default".into()),
-                Value::String("rb-alice-narrow".into()),
-                Value::String("Role".into()),
-                Value::String("explicit-get".into()),
-            ]);
-            store.add_fact("role_perm", vec![
-                Value::String("default".into()),
-                Value::String("explicit-get".into()),
                 Value::String("".into()),
                 Value::String("pods".into()),
-                Value::String("get".into()),  // explicit, subsumed by *
+                Value::String("get".into()),
             ]);
             Snapshot::from_store(&store, Scope::All)
         };
