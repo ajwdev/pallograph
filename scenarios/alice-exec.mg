@@ -11,10 +11,10 @@
 #         --[cluster-admin]----> all permissions
 #
 # Demo flow:
-#   ::snapshot baseline
-#   ::source scenarios/alice-exec.mg
-#   ::access-diff baseline
-#   ::smt cluster-admin
+#   \snapshot baseline
+#   \source scenarios/alice-exec.mg
+#   \access-diff baseline
+#   \smt cluster-admin
 
 rolebinding_subject_user("kube-system", "rb-alice-exec", "alice").
 rolebinding_roleref("kube-system", "rb-alice-exec", "Role", "alice-exec").

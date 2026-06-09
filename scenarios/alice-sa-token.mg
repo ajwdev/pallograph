@@ -12,10 +12,10 @@
 # works even if no pods are scheduled. A quieter path.
 #
 # Demo flow:
-#   ::snapshot baseline
-#   ::source scenarios/alice-sa-token.mg
-#   ::access-diff baseline
-#   ::smt cluster-admin
+#   \snapshot baseline
+#   \source scenarios/alice-sa-token.mg
+#   \access-diff baseline
+#   \smt cluster-admin
 
 rolebinding_subject_user("kube-system", "rb-alice-token", "alice").
 rolebinding_roleref("kube-system", "rb-alice-token", "Role", "alice-token-creator").

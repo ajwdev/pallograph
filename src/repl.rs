@@ -16,35 +16,36 @@ use crate::smt;
 pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     println!("\n=== Interactive Query Mode ===");
     println!("Commands:");
-    println!("  <predicate>                        — show all tuples");
-    println!("  <predicate>(arg, _, ...)           — filter by constants (_ or uppercase vars match any)");
-    println!("  orphaned_sa(\"kube-system\", _)      — example: filter by namespace");
-    println!("  ::show all                         — list all known predicates with arity");
-    println!("  ::arity <rel>                      — show arity of a single relation");
-    println!("  ::define <rule>.                   — add a rule and re-evaluate");
-    println!("  ::pretty                           — toggle compact/pretty tuple display");
-    println!("  ::query <body>  / ?- <body>         — evaluate a one-shot conjunctive query");
-    println!("  ::smt check_access <ns> <r> <v> [p...] — Z3: find principals in can(_,ns,r,v) outside expected set (ns=\"\" for cluster-wide)");
-    println!("  ::smt reaches <ns> <ag> <r> <v> [p...] — Z3: find principals that effective_can reach (ag,r,v), escalation-aware");
-    println!("  ::smt cluster-admin [p...]          — Z3: shorthand for reaches \"\" \"*\" \"*\" \"*\"");
-    println!("  ::smt node_selector                — Z3: find pods whose nodeSelector no node satisfies");
-    println!("  ::smt anti_affinity                — Z3: find a valid pod placement or prove none exists");
-    println!("  can(P, Namespace, ApiGroup, R, V)  — ApiGroup=\"\" for core, \"*\" for wildcard; Namespace scoped to binding");
-    println!("  ::smtlib <rel> [rel...]            — dump SMT-LIB 2 encoding of relations");
-    println!("  ::why <pred>(<args>...)             — show derivation tree for a fact");
-    println!("  +pred(arg1, arg2, ...).             — insert a ground fact into the EDB and re-evaluate");
-    println!("  -pred(arg1, arg2, ...).             — retract a ground fact from the EDB and re-evaluate");
-    println!("  ~pred(old...). pred(new...).        — atomic replace: retract old, insert new, single re-evaluate");
-    println!("  ::source <src>                     — load raw Mangle rules from a file or ! <cmd> and re-evaluate");
-    println!("  ::load <rel> <src>                 — load flat JSON tuples into <rel>; src is a file path or ! <cmd>");
-    println!("  ::load-k8s <src>                   — load k8s objects through the projection pipeline; src is a dir, .json file, or ! <kubectl args>");
-    println!("  ::snapshot <name>                  — save current eval state as a named snapshot");
-    println!("  ::diff <name>                      — diff current state against named snapshot");
-    println!("  ::diff <name1> <name2>             — diff two named snapshots");
-    println!("  ::access-diff <name>               — diff RBAC can/5 permission closure vs named snapshot");
-    println!("  ::access-diff <name1> <name2>      — diff RBAC can/5 between two named snapshots");
-    println!("  ::reset                            — clear session state (_N results, ::define rules, + facts), re-evaluate");
-    println!("  ::quit                             — exit");
+    println!("  <predicate>                       — show all tuples");
+    println!("  <predicate>(arg, _, ...)          — filter by constants (_ or uppercase vars match any)");
+    println!("  orphaned_sa(\"kube-system\", _)     — example: filter by namespace");
+    println!("  \\show all                         — list all known predicates with arity");
+    println!("  \\arity <rel>                      — show arity of a single relation");
+    println!("  \\define <rule>.                   — add a rule and re-evaluate");
+    println!("  \\pretty                           — toggle compact/pretty tuple display");
+    println!("  \\query <body>  / ?- <body>        — evaluate a one-shot conjunctive query");
+    println!("  \\smt check_access <ns> <r> <v> [p...] — Z3: find principals in can(_,ns,r,v) outside expected set (ns=\"\" for cluster-wide)");
+    println!("  \\smt reaches <ns> <ag> <r> <v> [p...] — Z3: find principals that effective_can reach (ag,r,v), escalation-aware");
+    println!("  \\smt cluster-admin [p...]         — Z3: shorthand for reaches \"\" \"*\" \"*\" \"*\"");
+    println!("  \\smt node_selector                — Z3: find pods whose nodeSelector no node satisfies");
+    println!("  \\smt anti_affinity                — Z3: find a valid pod placement or prove none exists");
+    println!("  can(P, Namespace, ApiGroup, R, V) — ApiGroup=\"\" for core, \"*\" for wildcard; Namespace scoped to binding");
+    println!("  \\smtlib <rel> [rel...]            — dump SMT-LIB 2 encoding of relations");
+    println!("  \\why <pred>(<args>...)            — show derivation tree for a fact");
+    println!("  +pred(arg1, arg2, ...).            — insert a ground fact into the EDB and re-evaluate");
+    println!("  -pred(arg1, arg2, ...).            — retract a ground fact from the EDB and re-evaluate");
+    println!("  ~pred(old...). pred(new...).       — atomic replace: retract old, insert new, single re-evaluate");
+    println!("  \\source <src>                     — load raw Mangle rules from a file or ! <cmd> and re-evaluate");
+    println!("  \\load <rel> <src>                 — load flat JSON tuples into <rel>; src is a file path or ! <cmd>");
+    println!("  \\load-k8s <src>                   — load k8s objects through the projection pipeline; src is a dir, .json file, or ! <kubectl args>");
+    println!("  \\snapshot <name>                  — save current eval state as a named snapshot");
+    println!("  \\diff <name>                      — diff current state against named snapshot");
+    println!("  \\diff <name1> <name2>             — diff two named snapshots");
+    println!("  \\access-diff <name>               — diff RBAC can/5 permission closure vs named snapshot");
+    println!("  \\access-diff <name1> <name2>      — diff RBAC can/5 between two named snapshots");
+    println!("  \\reset                            — clear session state (_N results, \\define rules, + facts), re-evaluate");
+    println!("  \\quit                             — exit");
+    println!("  (legacy: ::cmd also accepted as alias for \\cmd)");
     println!();
 
     let history_path = dirs_home().join(".pallograph_history");
@@ -71,6 +72,12 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                 if line.is_empty() {
                     continue;
                 }
+                // Normalize \ meta-prefix to :: so all existing dispatch keeps working.
+                let line = if line.starts_with('\\') {
+                    format!("::{}", &line[1..])
+                } else {
+                    line
+                };
                 // Split pasted multi-line input into individual commands.
                 // Only split at newlines where parentheses are balanced and we're
                 // not inside a string, so that multi-line expressions (e.g. a fact

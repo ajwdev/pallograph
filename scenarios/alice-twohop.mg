@@ -18,10 +18,10 @@
 # transitive closure and shows the full chain.
 #
 # Demo flow:
-#   ::snapshot baseline
-#   ::source scenarios/alice-twohop.mg
-#   ::access-diff baseline
-#   ::smt cluster-admin
+#   \snapshot baseline
+#   \source scenarios/alice-twohop.mg
+#   \access-diff baseline
+#   \smt cluster-admin
 
 # alice gets pods/exec in the app namespace
 rolebinding_subject_user("app", "rb-alice-app-exec", "alice").

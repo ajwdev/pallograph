@@ -10,10 +10,10 @@
 # cluster-admin level access in the test data. We bind alice directly to it.
 #
 # Demo flow:
-#   ::snapshot baseline
-#   ::source scenarios/hidden-clusterrole.mg
-#   ::access-diff baseline
-#   ::smt cluster-admin
+#   \snapshot baseline
+#   \source scenarios/hidden-clusterrole.mg
+#   \access-diff baseline
+#   \smt cluster-admin
 
 clusterrolebinding_subject_user("crb-alice-view", "alice").
 clusterrolebinding_roleref("crb-alice-view", "cluster-admin").
