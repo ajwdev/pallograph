@@ -32,8 +32,8 @@ pub struct SmtEncoder<'ctx> {
     /// (principal, namespace, apigroup, resource, verb) entries per named suffix.
     /// Key is the suffix passed to assert_rbac_axioms_as (empty string = bare "can").
     pub(crate) can_entries: HashMap<String, Vec<(String, String, String, String, String)>>,
-    /// (principal, namespace, resource, verb) entries for effective_can, same keying.
-    pub(crate) eff_entries: HashMap<String, Vec<(String, String, String, String)>>,
+    /// (principal, namespace, apigroup, resource, verb) entries for effective_can, same keying.
+    pub(crate) eff_entries: HashMap<String, Vec<(String, String, String, String, String)>>,
 }
 
 impl<'ctx> SmtEncoder<'ctx> {
