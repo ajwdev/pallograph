@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
 use mangle_common::Value;
@@ -40,6 +40,7 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     println!("  ::diff <name>                      — diff current state against named snapshot");
     println!("  ::diff <name1> <name2>             — diff two named snapshots");
     println!("  ::access-diff <name>               — diff RBAC can/5 permission closure vs named snapshot");
+    println!("  ::access-diff <name1> <name2>      — diff RBAC can/5 between two named snapshots");
     println!("  ::reset                            — clear session state (_N results, ::define rules, + facts), re-evaluate");
     println!("  ::quit                             — exit");
     println!();
@@ -54,13 +55,26 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     let mut snapshot_counter: u64 = 0;
     let mut snapshot_names: HashMap<String, u64> = HashMap::new();
     let mut snapshot_data: HashMap<u64, Snapshot> = HashMap::new();
+    let mut pending: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     loop {
-        let readline = rl.readline("pallograph> ");
-        match readline {
+        let raw = if let Some(queued) = pending.pop_front() {
+            Ok(queued)
+        } else {
+            rl.readline("pallograph> ")
+        };
+        match raw {
             Ok(line) => {
                 let line = line.trim().to_string();
                 if line.is_empty() {
+                    continue;
+                }
+                // Split pasted multi-line input into individual commands.
+                // Only split at newlines where parentheses are balanced and we're
+                // not inside a string, so that multi-line expressions (e.g. a fact
+                // argument that wraps across lines) are kept together.
+                if line.contains('\n') {
+                    pending.extend(split_commands(&line));
                     continue;
                 }
                 rl.add_history_entry(&line)?;
@@ -272,46 +286,49 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                     continue;
                 }
 
-                if let Some(name) = line.strip_prefix("::access-diff ") {
-                    let name = name.trim();
-                    let Some(snap) = snapshot_names.get(name).and_then(|v| snapshot_data.get(v)) else {
-                        eprintln!("No snapshot named '{name}'.");
-                        continue;
+                if let Some(rest) = line.strip_prefix("::access-diff ") {
+                    let parts: Vec<&str> = rest.trim().splitn(2, ' ').collect();
+                    let lookup = |n: &str| -> Option<&Snapshot> {
+                        snapshot_names.get(n).and_then(|v| snapshot_data.get(v))
                     };
-                    let cfg = z3::Config::new();
-                    let ctx = z3::Context::new(&cfg);
-                    let mut enc_before = smt::SmtEncoder::new(&ctx);
-                    let mut enc_after = smt::SmtEncoder::new(&ctx);
-                    enc_before.assert_rbac_axioms_from_snapshot(snap);
-                    enc_after.assert_rbac_axioms(&current_store);
 
-                    use std::collections::HashSet;
-                    let before_set: HashSet<_> = enc_before.can_entries.iter().collect();
-                    let after_set: HashSet<_> = enc_after.can_entries.iter().collect();
-                    let gained: Vec<_> = after_set.difference(&before_set).collect();
-                    let lost: Vec<_> = before_set.difference(&after_set).collect();
-
-                    if gained.is_empty() && lost.is_empty() {
-                        println!("(no permission changes)");
-                    } else {
-                        println!("=== Access diff: '{name}' → current ===");
-                        let mut gained_sorted = gained;
-                        gained_sorted.sort();
-                        for (p, ns, ag, r, v) in gained_sorted {
-                            println!("  GAINED  {p}  ns={ns:?}  apigroup={ag:?}  resource={r:?}  verb={v:?}");
+                    match parts.as_slice() {
+                        [name] => {
+                            let Some(before_snap) = lookup(name) else {
+                                eprintln!("No snapshot named '{}'.", name);
+                                continue;
+                            };
+                            let cfg = z3::Config::new();
+                            let ctx = z3::Context::new(&cfg);
+                            let mut enc = smt::SmtEncoder::new(&ctx);
+                            enc.assert_rbac_axioms_from_snapshot_as(before_snap, name);
+                            enc.assert_rbac_axioms_as(&current_store, "current");
+                            print_access_diff(&enc, name, "current");
                         }
-                        let mut lost_sorted = lost;
-                        lost_sorted.sort();
-                        for (p, ns, ag, r, v) in lost_sorted {
-                            println!("  LOST    {p}  ns={ns:?}  apigroup={ag:?}  resource={r:?}  verb={v:?}");
+                        [name1, name2] => {
+                            let Some(s1) = lookup(name1) else {
+                                eprintln!("No snapshot named '{}'.", name1);
+                                continue;
+                            };
+                            let Some(s2) = lookup(name2) else {
+                                eprintln!("No snapshot named '{}'.", name2);
+                                continue;
+                            };
+                            let cfg = z3::Config::new();
+                            let ctx = z3::Context::new(&cfg);
+                            let mut enc = smt::SmtEncoder::new(&ctx);
+                            enc.assert_rbac_axioms_from_snapshot_as(s1, name1);
+                            enc.assert_rbac_axioms_from_snapshot_as(s2, name2);
+                            print_access_diff(&enc, name1, name2);
                         }
+                        _ => eprintln!("Usage: ::access-diff <snap>  or  ::access-diff <snap1> <snap2>"),
                     }
                     continue;
                 }
 
                 if let Some(rule) = line.strip_prefix("::define ") {
                     let checkpoint = engine.rules_len();
-                    engine.add_rule(rule.trim_end_matches('.').trim().to_string());
+                    engine.add_rule(format!("{}.", rule.trim_end_matches('.').trim()));
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
@@ -538,6 +555,38 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     Ok(())
 }
 
+/// Split a multi-line pasted string into individual commands, keeping lines
+/// together when a newline falls inside an unbalanced parenthesis or string.
+fn split_commands(input: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut current = String::new();
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+
+    for ch in input.chars() {
+        match ch {
+            '"' => in_string = !in_string,
+            '(' if !in_string => depth += 1,
+            ')' if !in_string => depth -= 1,
+            '\n' if !in_string && depth <= 0 => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    commands.push(trimmed);
+                }
+                current = String::new();
+                continue;
+            }
+            _ => {}
+        }
+        current.push(ch);
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        commands.push(trimmed);
+    }
+    commands
+}
+
 /// Extract uppercase variable names from a Mangle rule body, in order of first
 /// appearance. Skips string literals and single underscores.
 fn extract_vars(body: &str) -> Vec<String> {
@@ -574,6 +623,116 @@ fn extract_vars(body: &str) -> Vec<String> {
     }
 
     vars
+}
+
+fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label: &str) {
+    let can_gained = enc.check_permission_expansion(before_label, after_label);
+    let can_lost = enc.check_permission_contraction(before_label, after_label);
+    let eff_gained = enc.check_effective_can_expansion(before_label, after_label);
+    let eff_lost = enc.check_effective_can_contraction(before_label, after_label);
+
+    if can_gained.is_empty() && can_lost.is_empty() && eff_gained.is_empty() && eff_lost.is_empty() {
+        println!("(no permission changes)");
+        return;
+    }
+
+    println!("=== Access diff: '{}' → '{}' ===", before_label, after_label);
+
+    if !can_gained.is_empty() {
+        println!("  CAN GAINED ({}):", can_gained.len());
+        let mut sorted = can_gained;
+        sorted.sort_by(|a, b| a.principal.cmp(&b.principal));
+        for d in &sorted {
+            println!("    {}  ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
+                d.principal, d.namespace, d.apigroup, d.resource, d.verb);
+        }
+    }
+    if !can_lost.is_empty() {
+        println!("  CAN LOST ({}):", can_lost.len());
+        let mut sorted = can_lost;
+        sorted.sort_by(|a, b| a.principal.cmp(&b.principal));
+        for d in &sorted {
+            println!("    {}  ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
+                d.principal, d.namespace, d.apigroup, d.resource, d.verb);
+        }
+    }
+    if !eff_gained.is_empty() {
+        println!("  EFFECTIVE GAINED ({}) [escalation-aware]:", eff_gained.len());
+        let via_rel = smt::rbac_model::fn_name("indirect_perm", after_label);
+        print_eff_diffs_grouped(&eff_gained, &via_rel, &enc.facts);
+    }
+    if !eff_lost.is_empty() {
+        println!("  EFFECTIVE LOST ({}) [escalation-aware]:", eff_lost.len());
+        let via_rel = smt::rbac_model::fn_name("indirect_perm", before_label);
+        print_eff_diffs_grouped(&eff_lost, &via_rel, &enc.facts);
+    }
+}
+
+/// Group effective-can diffs by (principal, escalation-target) and print.
+/// Looks up `indirect_perm` facts to find which SA each permission came
+/// through. Permissions not found there were gained directly.
+fn print_eff_diffs_grouped(
+    diffs: &[smt::diff::EffDiff],
+    via_rel: &str,
+    facts: &HashMap<String, Vec<Vec<mangle_common::Value>>>,
+) {
+    // (principal, target) → indices into diffs. Empty target = direct grant.
+    let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+
+    for (i, d) in diffs.iter().enumerate() {
+        let targets = find_via_targets(facts, via_rel, &d.principal, &d.namespace, &d.apigroup, &d.resource, &d.verb);
+        if targets.is_empty() {
+            groups.entry((d.principal.clone(), String::new())).or_default().push(i);
+        } else {
+            for target in targets {
+                groups.entry((d.principal.clone(), target)).or_default().push(i);
+            }
+        }
+    }
+
+    for ((principal, target), indices) in &groups {
+        if target.is_empty() {
+            println!("    {}  [direct]:", principal);
+        } else {
+            println!("    {}  via {}:", principal, target);
+        }
+        for &i in indices {
+            let d = &diffs[i];
+            println!("      ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
+                d.namespace, d.apigroup, d.resource, d.verb);
+        }
+    }
+}
+
+/// Return all Target values from `indirect_perm` matching the given 5-tuple.
+fn find_via_targets(
+    facts: &HashMap<String, Vec<Vec<mangle_common::Value>>>,
+    rel_name: &str,
+    principal: &str,
+    namespace: &str,
+    apigroup: &str,
+    resource: &str,
+    verb: &str,
+) -> Vec<String> {
+    use mangle_common::Value;
+    facts
+        .get(rel_name)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            if let [Value::String(p), Value::String(ns), Value::String(ag), Value::String(r), Value::String(v), Value::String(target)] =
+                row.as_slice()
+            {
+                if p == principal && ns == namespace && ag == apigroup && r == resource && v == verb {
+                    Some(target.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn smt_command(input: &str, store: &EvalStore) {

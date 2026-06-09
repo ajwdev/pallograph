@@ -19,11 +19,8 @@
 #     → all_{sa,user,group}_perm/N  (union of all binding paths, with Namespace)
 #     → all_{sa,user,group}_ns_perm (namespace-scoped paths only)
 #     → all_user_cluster_perm       (cluster-wide paths only, for users+groups)
-#   api_resource/2 + role/clusterrole perms
-#     → resource_type/1, verb_type/1  (bounding sets for can)
-#     → can_ns/4   (namespace-scoped access from RoleBindings)
-#     → can_cluster/3 (cluster-wide access from ClusterRoleBindings, no namespace)
-#     → can/4  (aggregates both; Namespace="" for cluster-wide, non-empty for scoped)
+#   all_{sa,user,group}_perm/N
+#     → direct_perm/5  (principal, namespace, apigroup, resource, verb; wildcards preserved as-is)
 
 # ---- Type filter predicates ----
 
@@ -276,84 +273,18 @@ clusterrole_perm(AggCR, ApiGroup, Resource, Verb) :-
     clusterrole_aggregates(AggCR, SourceCR),
     clusterrole_perm(SourceCR, ApiGroup, Resource, Verb).
 
-# ---- resource_type / verb_type ----
+# ---- direct_perm ----
 #
-# Bounding sets used by can to keep derived facts finite.
-#
-# resource_type is derived from api_resource (EDB loaded from
-# `kubectl api-resources -o name`) and also from permissions already declared
-# in roles, so subresources like pods/exec that aren't in api-resources are
-# included automatically.
-#
-# verb_type is derived from permissions already present in roles and
-# clusterroles, so it automatically covers every verb in use.
+# Flat union of all binding paths for every subject type. Wildcards ("*") are
+# preserved as-is — no expansion. Namespace="" for cluster-wide grants (CRB path).
+# SA principals are formatted as system:serviceaccount:<ns>:<name>.
 
-resource_type(Resource) :- api_resource(_, Resource).
-resource_type(Resource) :- role_perm(_, _, _, Resource, _).
-resource_type(Resource) :- clusterrole_perm(_, _, Resource, _).
+direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
+    all_user_perm(Principal, Namespace, ApiGroup, Resource, Verb).
 
-
-# ---- can ----
-#
-# SubjectAccessReview equivalent. Namespace="" means a cluster-wide grant
-# (ClusterRoleBinding path); a non-empty Namespace means the grant is scoped
-# to that namespace via a RoleBinding.
-#
-# resource_type and verb_type bind Resource and Verb so the derived fact set
-# stays finite — one row per (principal, namespace, resource, verb) where access
-# is granted.
-
-# Users
-can(Username, Namespace, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_user_perm(Username, Namespace, _, Resource, Verb).
-
-can(Username, Namespace, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_user_perm(Username, Namespace, _, "*", Verb).
-
-can(Username, Namespace, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_user_perm(Username, Namespace, _, Resource, "*").
-
-can(Username, Namespace, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_user_perm(Username, Namespace, _, "*", "*").
-
-# Service accounts — principal formatted as system:serviceaccount:<ns>:<name>
-can(Principal, Namespace, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_sa_perm(SANs, SAName, Namespace, _, Resource, Verb)
+direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
+    all_sa_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb)
     |> let Principal = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
 
-can(Principal, Namespace, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_sa_perm(SANs, SAName, Namespace, _, "*", Verb)
-    |> let Principal = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
-
-can(Principal, Namespace, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_sa_perm(SANs, SAName, Namespace, _, Resource, "*")
-    |> let Principal = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
-
-can(Principal, Namespace, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_sa_perm(SANs, SAName, Namespace, _, "*", "*")
-    |> let Principal = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
-
-# Groups
-can(GroupName, Namespace, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_group_perm(GroupName, Namespace, _, Resource, Verb).
-
-can(GroupName, Namespace, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_group_perm(GroupName, Namespace, _, "*", Verb).
-
-can(GroupName, Namespace, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_group_perm(GroupName, Namespace, _, Resource, "*").
-
-can(GroupName, Namespace, Resource, Verb) :-
-    resource_type(Resource), verb_type(Verb),
-    all_group_perm(GroupName, Namespace, _, "*", "*").
+direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
+    all_group_perm(Principal, Namespace, ApiGroup, Resource, Verb).
