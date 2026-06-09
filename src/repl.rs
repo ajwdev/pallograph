@@ -39,6 +39,8 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     println!("  ::snapshot <name>                  — save current eval state as a named snapshot");
     println!("  ::diff <name>                      — diff current state against named snapshot");
     println!("  ::diff <name1> <name2>             — diff two named snapshots");
+    println!("  ::access-diff <name>               — diff RBAC can/5 permission closure vs named snapshot");
+    println!("  ::access-diff <name1> <name2>      — diff RBAC can/5 between two named snapshots");
     println!("  ::reset                            — clear session state (_N results, ::define rules, + facts), re-evaluate");
     println!("  ::quit                             — exit");
     println!();
@@ -268,6 +270,46 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                     };
                     let diff = Diff::between(before, after);
                     print!("{diff}");
+                    continue;
+                }
+
+                if let Some(rest) = line.strip_prefix("::access-diff ") {
+                    let parts: Vec<&str> = rest.trim().splitn(2, ' ').collect();
+                    let lookup = |n: &str| -> Option<&Snapshot> {
+                        snapshot_names.get(n).and_then(|v| snapshot_data.get(v))
+                    };
+
+                    match parts.as_slice() {
+                        [name] => {
+                            let Some(before_snap) = lookup(name) else {
+                                eprintln!("No snapshot named '{}'.", name);
+                                continue;
+                            };
+                            let cfg = z3::Config::new();
+                            let ctx = z3::Context::new(&cfg);
+                            let mut enc = smt::SmtEncoder::new(&ctx);
+                            enc.assert_rbac_axioms_from_snapshot_as(before_snap, name);
+                            enc.assert_rbac_axioms_as(&current_store, "current");
+                            print_access_diff(&enc, name, "current");
+                        }
+                        [name1, name2] => {
+                            let Some(s1) = lookup(name1) else {
+                                eprintln!("No snapshot named '{}'.", name1);
+                                continue;
+                            };
+                            let Some(s2) = lookup(name2) else {
+                                eprintln!("No snapshot named '{}'.", name2);
+                                continue;
+                            };
+                            let cfg = z3::Config::new();
+                            let ctx = z3::Context::new(&cfg);
+                            let mut enc = smt::SmtEncoder::new(&ctx);
+                            enc.assert_rbac_axioms_from_snapshot_as(s1, name1);
+                            enc.assert_rbac_axioms_from_snapshot_as(s2, name2);
+                            print_access_diff(&enc, name1, name2);
+                        }
+                        _ => eprintln!("Usage: ::access-diff <snap>  or  ::access-diff <snap1> <snap2>"),
+                    }
                     continue;
                 }
 
@@ -536,6 +578,57 @@ fn extract_vars(body: &str) -> Vec<String> {
     }
 
     vars
+}
+
+fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label: &str) {
+    let can_gained = enc.check_permission_expansion(before_label, after_label);
+    let can_lost = enc.check_permission_contraction(before_label, after_label);
+    let eff_gained = enc.check_effective_can_expansion(before_label, after_label);
+    let eff_lost = enc.check_effective_can_contraction(before_label, after_label);
+
+    if can_gained.is_empty() && can_lost.is_empty() && eff_gained.is_empty() && eff_lost.is_empty() {
+        println!("(no permission changes)");
+        return;
+    }
+
+    println!("=== Access diff: '{}' → '{}' ===", before_label, after_label);
+
+    if !can_gained.is_empty() {
+        println!("  CAN GAINED ({}):", can_gained.len());
+        let mut sorted = can_gained;
+        sorted.sort_by(|a, b| a.principal.cmp(&b.principal));
+        for d in &sorted {
+            println!("    {}  ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
+                d.principal, d.namespace, d.apigroup, d.resource, d.verb);
+        }
+    }
+    if !can_lost.is_empty() {
+        println!("  CAN LOST ({}):", can_lost.len());
+        let mut sorted = can_lost;
+        sorted.sort_by(|a, b| a.principal.cmp(&b.principal));
+        for d in &sorted {
+            println!("    {}  ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
+                d.principal, d.namespace, d.apigroup, d.resource, d.verb);
+        }
+    }
+    if !eff_gained.is_empty() {
+        println!("  EFFECTIVE GAINED ({}) [escalation-aware]:", eff_gained.len());
+        let mut sorted = eff_gained;
+        sorted.sort_by(|a, b| a.principal.cmp(&b.principal));
+        for d in &sorted {
+            println!("    {}  ns={:?}  resource={:?}  verb={:?}",
+                d.principal, d.namespace, d.resource, d.verb);
+        }
+    }
+    if !eff_lost.is_empty() {
+        println!("  EFFECTIVE LOST ({}) [escalation-aware]:", eff_lost.len());
+        let mut sorted = eff_lost;
+        sorted.sort_by(|a, b| a.principal.cmp(&b.principal));
+        for d in &sorted {
+            println!("    {}  ns={:?}  resource={:?}  verb={:?}",
+                d.principal, d.namespace, d.resource, d.verb);
+        }
+    }
 }
 
 fn smt_command(input: &str, store: &EvalStore) {
