@@ -146,7 +146,7 @@ escalation_hop(P, Target) :-
 # Transitive closure over escalation_hop. The recursive rule extends by exactly
 # one escalation_hop (not controls_identity on both sides), preserving BFS order.
 
-controls_identity(P, Target) :- escalation_hop(P, Target).
+controls_identity(P, Target) :- escalation_hop(P, Target), P != Target.
 
 controls_identity(P, Target) :-
     controls_identity(P, Mid),
