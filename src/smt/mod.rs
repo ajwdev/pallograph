@@ -8,6 +8,7 @@ use z3::{FuncDecl, RecFuncDecl, Solver, Sort};
 use crate::engine::EvalStore;
 
 pub mod access;
+pub mod diff;
 pub mod rbac_model;
 pub mod scheduling;
 
