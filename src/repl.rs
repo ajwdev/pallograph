@@ -39,7 +39,6 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     println!("  ::snapshot <name>                  — save current eval state as a named snapshot");
     println!("  ::diff <name>                      — diff current state against named snapshot");
     println!("  ::diff <name1> <name2>             — diff two named snapshots");
-    println!("  ::access-diff <name>               — diff RBAC can/5 permission closure vs named snapshot");
     println!("  ::reset                            — clear session state (_N results, ::define rules, + facts), re-evaluate");
     println!("  ::quit                             — exit");
     println!();
@@ -269,43 +268,6 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                     };
                     let diff = Diff::between(before, after);
                     print!("{diff}");
-                    continue;
-                }
-
-                if let Some(name) = line.strip_prefix("::access-diff ") {
-                    let name = name.trim();
-                    let Some(snap) = snapshot_names.get(name).and_then(|v| snapshot_data.get(v)) else {
-                        eprintln!("No snapshot named '{name}'.");
-                        continue;
-                    };
-                    let cfg = z3::Config::new();
-                    let ctx = z3::Context::new(&cfg);
-                    let mut enc_before = smt::SmtEncoder::new(&ctx);
-                    let mut enc_after = smt::SmtEncoder::new(&ctx);
-                    enc_before.assert_rbac_axioms_from_snapshot(snap);
-                    enc_after.assert_rbac_axioms(&current_store);
-
-                    use std::collections::HashSet;
-                    let before_set: HashSet<_> = enc_before.can_entries.iter().collect();
-                    let after_set: HashSet<_> = enc_after.can_entries.iter().collect();
-                    let gained: Vec<_> = after_set.difference(&before_set).collect();
-                    let lost: Vec<_> = before_set.difference(&after_set).collect();
-
-                    if gained.is_empty() && lost.is_empty() {
-                        println!("(no permission changes)");
-                    } else {
-                        println!("=== Access diff: '{name}' → current ===");
-                        let mut gained_sorted = gained;
-                        gained_sorted.sort();
-                        for (p, ns, ag, r, v) in gained_sorted {
-                            println!("  GAINED  {p}  ns={ns:?}  apigroup={ag:?}  resource={r:?}  verb={v:?}");
-                        }
-                        let mut lost_sorted = lost;
-                        lost_sorted.sort();
-                        for (p, ns, ag, r, v) in lost_sorted {
-                            println!("  LOST    {p}  ns={ns:?}  apigroup={ag:?}  resource={r:?}  verb={v:?}");
-                        }
-                    }
                     continue;
                 }
 
