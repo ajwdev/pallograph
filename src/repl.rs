@@ -660,11 +660,7 @@ fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label:
     let total_lost = can_lost.len() + eff_lost.len();
 
     if total_gained > 0 {
-        if total_lost > 0 {
-            println!("FAIL  {} new permission(s) granted ({} removed)", total_gained, total_lost);
-        } else {
-            println!("FAIL  {} new permission(s) granted", total_gained);
-        }
+        println!("FAIL  {} new permission(s) granted", total_gained);
     } else if total_lost > 0 {
         println!("PASS  {} permission(s) removed, none added", total_lost);
     } else {
@@ -672,7 +668,19 @@ fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label:
         return;
     }
 
+    let verdicts = per_principal_verdicts(&can_gained, &can_lost, &eff_gained, &eff_lost);
+
     println!("=== Access diff: '{}' → '{}' ===", before_label, after_label);
+    if !verdicts.is_empty() {
+        println!();
+        println!("  Per-principal:");
+        let col_w = verdicts.iter().map(|(p, _, _)| p.len()).max().unwrap_or(8).min(32);
+        for (principal, gained, lost) in &verdicts {
+            let label = if *gained > 0 { "FAIL" } else { "PASS" };
+            println!("    {label}  {principal:<col_w$}  +{gained} gained / -{lost} lost");
+        }
+        println!();
+    }
 
     if !can_gained.is_empty() {
         println!("  CAN GAINED ({}):", can_gained.len());
@@ -702,6 +710,30 @@ fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label:
         let via_rel = smt::rbac_model::fn_name("indirect_perm", before_label);
         print_eff_diffs_grouped(&eff_lost, &via_rel, &enc.facts);
     }
+}
+
+fn per_principal_verdicts(
+    can_gained: &[smt::diff::CanDiff],
+    can_lost: &[smt::diff::CanDiff],
+    eff_gained: &[smt::diff::EffDiff],
+    eff_lost: &[smt::diff::EffDiff],
+) -> Vec<(String, usize, usize)> {
+    let mut map: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for d in can_gained { map.entry(d.principal.clone()).or_default().0 += 1; }
+    for d in eff_gained { map.entry(d.principal.clone()).or_default().0 += 1; }
+    for d in can_lost   { map.entry(d.principal.clone()).or_default().1 += 1; }
+    for d in eff_lost   { map.entry(d.principal.clone()).or_default().1 += 1; }
+
+    let mut result: Vec<(String, usize, usize)> = map
+        .into_iter()
+        .map(|(p, (gained, lost))| (p, gained, lost))
+        .collect();
+    result.sort_by(|a, b| {
+        let a_fails = a.1 > 0;
+        let b_fails = b.1 > 0;
+        b_fails.cmp(&a_fails).then(a.0.cmp(&b.0))
+    });
+    result
 }
 
 /// Group effective-can diffs by (principal, escalation-target) and print.
