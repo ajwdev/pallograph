@@ -78,6 +78,14 @@ impl<'ctx> SmtEncoder<'ctx> {
         self.load_relation(&fn_name("indirect_perm", suffix), &scan("indirect_perm"));
         self.load_relation(&fn_name("subject_in_rb", suffix), &subject_in_rb);
         self.load_relation(&fn_name("subject_in_crb", suffix), &subject_in_crb);
+        // Load roleref and escalation-mechanism tables for path reconstruction
+        // (display only, not queried by Z3). Stored without suffix so
+        // paths_for_principal always finds them regardless of which snapshot is current.
+        self.facts.insert("rolebinding_roleref".to_string(), scan("rolebinding_roleref"));
+        self.facts.insert("clusterrolebinding_roleref".to_string(), scan("clusterrolebinding_roleref"));
+        for rel in &["exec_reachable_sa", "token_accessible_sa", "pod_creatable_sa", "impersonatable_sa", "escalation_hop"] {
+            self.facts.insert(rel.to_string(), scan(rel));
+        }
 
         let can_fn = build_can_rec_func(self.ctx, &fn_name("can", suffix), &can_entries);
         let eff_fn = build_effective_can_rec_func(self.ctx, &fn_name("effective_can", suffix), &eff_entries);

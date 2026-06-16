@@ -16,33 +16,36 @@ use crate::smt;
 pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     println!("\n=== Interactive Query Mode ===");
     println!("Commands:");
-    println!("  <predicate>                        — show all tuples");
-    println!("  <predicate>(arg, _, ...)           — filter by constants (_ or uppercase vars match any)");
-    println!("  orphaned_sa(\"kube-system\", _)      — example: filter by namespace");
-    println!("  ::show all                         — list all known predicates with arity");
-    println!("  ::arity <rel>                      — show arity of a single relation");
-    println!("  ::define <rule>.                   — add a rule and re-evaluate");
-    println!("  ::pretty                           — toggle compact/pretty tuple display");
-    println!("  ::query <body>  / ?- <body>         — evaluate a one-shot conjunctive query");
-    println!("  ::smt check_access <ns> <r> <v> [p...] — Z3: find principals in can(_,ns,r,v) outside expected set (ns=\"\" for cluster-wide)");
-    println!("  ::smt node_selector                — Z3: find pods whose nodeSelector no node satisfies");
-    println!("  ::smt anti_affinity                — Z3: find a valid pod placement or prove none exists");
-    println!("  can(P, Namespace, ApiGroup, R, V)  — ApiGroup=\"\" for core, \"*\" for wildcard; Namespace scoped to binding");
-    println!("  ::smtlib <rel> [rel...]            — dump SMT-LIB 2 encoding of relations");
-    println!("  ::why <pred>(<args>...)             — show derivation tree for a fact");
-    println!("  +pred(arg1, arg2, ...).             — insert a ground fact into the EDB and re-evaluate");
-    println!("  -pred(arg1, arg2, ...).             — retract a ground fact from the EDB and re-evaluate");
-    println!("  ~pred(old...). pred(new...).        — atomic replace: retract old, insert new, single re-evaluate");
-    println!("  ::source <src>                     — load raw Mangle rules from a file or ! <cmd> and re-evaluate");
-    println!("  ::load <rel> <src>                 — load flat JSON tuples into <rel>; src is a file path or ! <cmd>");
-    println!("  ::load-k8s <src>                   — load k8s objects through the projection pipeline; src is a dir, .json file, or ! <kubectl args>");
-    println!("  ::snapshot <name>                  — save current eval state as a named snapshot");
-    println!("  ::diff <name>                      — diff current state against named snapshot");
-    println!("  ::diff <name1> <name2>             — diff two named snapshots");
-    println!("  ::access-diff <name>               — diff RBAC can/5 permission closure vs named snapshot");
-    println!("  ::access-diff <name1> <name2>      — diff RBAC can/5 between two named snapshots");
-    println!("  ::reset                            — clear session state (_N results, ::define rules, + facts), re-evaluate");
-    println!("  ::quit                             — exit");
+    println!("  <predicate>                       — show all tuples");
+    println!("  <predicate>(arg, _, ...)          — filter by constants (_ or uppercase vars match any)");
+    println!("  orphaned_sa(\"kube-system\", _)     — example: filter by namespace");
+    println!("  \\show all                         — list all known predicates with arity");
+    println!("  \\arity <rel>                      — show arity of a single relation");
+    println!("  \\define <rule>.                   — add a rule and re-evaluate");
+    println!("  \\pretty                           — toggle compact/pretty tuple display");
+    println!("  \\query <body>  / ?- <body>        — evaluate a one-shot conjunctive query");
+    println!("  \\smt check_access <ns> <r> <v> [p...] — Z3: find principals in can(_,ns,r,v) outside expected set (ns=\"\" for cluster-wide)");
+    println!("  \\smt reaches <ns> <ag> <r> <v> [p...] — Z3: find principals that effective_can reach (ag,r,v), escalation-aware");
+    println!("  \\smt cluster-admin [p...]         — Z3: shorthand for reaches \"\" \"*\" \"*\" \"*\"");
+    println!("  \\smt node_selector                — Z3: find pods whose nodeSelector no node satisfies");
+    println!("  \\smt anti_affinity                — Z3: find a valid pod placement or prove none exists");
+    println!("  can(P, Namespace, ApiGroup, R, V) — ApiGroup=\"\" for core, \"*\" for wildcard; Namespace scoped to binding");
+    println!("  \\smtlib <rel> [rel...]            — dump SMT-LIB 2 encoding of relations");
+    println!("  \\why <pred>(<args>...)            — show derivation tree for a fact");
+    println!("  +pred(arg1, arg2, ...).            — insert a ground fact into the EDB and re-evaluate");
+    println!("  -pred(arg1, arg2, ...).            — retract a ground fact from the EDB and re-evaluate");
+    println!("  ~pred(old...). pred(new...).       — atomic replace: retract old, insert new, single re-evaluate");
+    println!("  \\source <src>                     — load raw Mangle rules from a file or ! <cmd> and re-evaluate");
+    println!("  \\load <rel> <src>                 — load flat JSON tuples into <rel>; src is a file path or ! <cmd>");
+    println!("  \\load-k8s <src>                   — load k8s objects through the projection pipeline; src is a dir, .json file, or ! <kubectl args>");
+    println!("  \\snapshot <name>                  — save current eval state as a named snapshot");
+    println!("  \\diff <name>                      — diff current state against named snapshot");
+    println!("  \\diff <name1> <name2>             — diff two named snapshots");
+    println!("  \\access-diff <name>               — diff RBAC can/5 permission closure vs named snapshot");
+    println!("  \\access-diff <name1> <name2>      — diff RBAC can/5 between two named snapshots");
+    println!("  \\reset                            — clear session state (_N results, \\define rules, + facts), re-evaluate");
+    println!("  \\quit                             — exit");
+    println!("  (legacy: ::cmd also accepted as alias for \\cmd)");
     println!();
 
     let history_path = dirs_home().join(".pallograph_history");
@@ -69,6 +72,12 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                 if line.is_empty() {
                     continue;
                 }
+                // Normalize \ meta-prefix to :: so all existing dispatch keeps working.
+                let line = if line.starts_with('\\') {
+                    format!("::{}", &line[1..])
+                } else {
+                    line
+                };
                 // Split pasted multi-line input into individual commands.
                 // Only split at newlines where parentheses are balanced and we're
                 // not inside a string, so that multi-line expressions (e.g. a fact
@@ -625,18 +634,60 @@ fn extract_vars(body: &str) -> Vec<String> {
     vars
 }
 
+fn print_violation_paths(paths: &[smt::AccessPath]) {
+    for p in paths {
+        let binding = format!(
+            "{} {}/{} → {} {}",
+            p.binding_kind, p.binding_namespace, p.binding_name, p.role_kind, p.role_name
+        );
+        if p.hops.is_empty() {
+            println!("          {binding}");
+        } else {
+            // First hop printed as "via <identity> [mechanism]"
+            let (id, mech) = &p.hops[0];
+            let mech_s = if mech.is_empty() { String::new() } else { format!(" [{mech}]") };
+            println!("          via {id}{mech_s}");
+            // Subsequent hops each get a "  → via" prefix
+            for (id, mech) in &p.hops[1..] {
+                let mech_s = if mech.is_empty() { String::new() } else { format!(" [{mech}]") };
+                println!("            → via {id}{mech_s}");
+            }
+            println!("            → {binding}");
+        }
+    }
+}
+
 fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label: &str) {
     let can_gained = enc.check_permission_expansion(before_label, after_label);
     let can_lost = enc.check_permission_contraction(before_label, after_label);
     let eff_gained = enc.check_effective_can_expansion(before_label, after_label);
     let eff_lost = enc.check_effective_can_contraction(before_label, after_label);
 
-    if can_gained.is_empty() && can_lost.is_empty() && eff_gained.is_empty() && eff_lost.is_empty() {
-        println!("(no permission changes)");
+    let total_gained = can_gained.len() + eff_gained.len();
+    let total_lost = can_lost.len() + eff_lost.len();
+
+    if total_gained > 0 {
+        println!("FAIL  {} new permission(s) granted", total_gained);
+    } else if total_lost > 0 {
+        println!("PASS  {} permission(s) removed, none added", total_lost);
+    } else {
+        println!("PASS  no permission changes");
         return;
     }
 
+    let verdicts = per_principal_verdicts(&can_gained, &can_lost, &eff_gained, &eff_lost);
+
     println!("=== Access diff: '{}' → '{}' ===", before_label, after_label);
+    if !verdicts.is_empty() {
+        println!();
+        println!("  Per-principal:");
+        let col_w = verdicts.iter().map(|(p, _, _)| p.len()).max().unwrap_or(8).min(32);
+        for (principal, gained, lost) in &verdicts {
+            let label = if *gained > 0 { "FAIL" } else { "PASS" };
+            println!("    {label}  {principal:<col_w$}  +{gained} gained / -{lost} lost");
+        }
+        println!();
+    }
 
     if !can_gained.is_empty() {
         println!("  CAN GAINED ({}):", can_gained.len());
@@ -666,6 +717,30 @@ fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label:
         let via_rel = smt::rbac_model::fn_name("indirect_perm", before_label);
         print_eff_diffs_grouped(&eff_lost, &via_rel, &enc.facts);
     }
+}
+
+fn per_principal_verdicts(
+    can_gained: &[smt::diff::CanDiff],
+    can_lost: &[smt::diff::CanDiff],
+    eff_gained: &[smt::diff::EffDiff],
+    eff_lost: &[smt::diff::EffDiff],
+) -> Vec<(String, usize, usize)> {
+    let mut map: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for d in can_gained { map.entry(d.principal.clone()).or_default().0 += 1; }
+    for d in eff_gained { map.entry(d.principal.clone()).or_default().0 += 1; }
+    for d in can_lost   { map.entry(d.principal.clone()).or_default().1 += 1; }
+    for d in eff_lost   { map.entry(d.principal.clone()).or_default().1 += 1; }
+
+    let mut result: Vec<(String, usize, usize)> = map
+        .into_iter()
+        .map(|(p, (gained, lost))| (p, gained, lost))
+        .collect();
+    result.sort_by(|a, b| {
+        let a_fails = a.1 > 0;
+        let b_fails = b.1 > 0;
+        b_fails.cmp(&a_fails).then(a.0.cmp(&b.0))
+    });
+    result
 }
 
 /// Group effective-can diffs by (principal, escalation-target) and print.
@@ -778,6 +853,60 @@ fn smt_command(input: &str, store: &EvalStore) {
                         "        UNEXPECTED can({:?}, {:?}, {:?}, {:?})",
                         v.principal, v.namespace, v.resource, v.verb
                     );
+                    print_violation_paths(&v.paths);
+                }
+            }
+        }
+        "reaches" | "cluster-admin" => {
+            // Parse --direct flag out of the token stream before positional args.
+            let tokens: Vec<&str> = rest.split_whitespace().collect();
+            let include_direct = tokens.iter().any(|t| *t == "--direct");
+            let mut token_iter = tokens.iter().filter(|t| **t != "--direct").copied();
+
+            let (namespace, apigroup, resource, verb, expected) = if subcommand == "cluster-admin" {
+                let expected_owned: Vec<String> = token_iter
+                    .filter(|s| !matches!(*s, "[]" | "[" | "]"))
+                    .map(|s| s.trim_matches('"').to_string())
+                    .collect();
+                ("", "*", "*", "*", expected_owned)
+            } else {
+                let (Some(ns_raw), Some(ag_raw), Some(res_raw), Some(verb_raw)) =
+                    (token_iter.next(), token_iter.next(), token_iter.next(), token_iter.next())
+                else {
+                    eprintln!("Usage: ::smt reaches <namespace> <apigroup> <resource> <verb> [--direct] [expected ...]");
+                    eprintln!("       Use ::smt cluster-admin [--direct] to check for cluster-admin level access.");
+                    return;
+                };
+                let expected_owned: Vec<String> = token_iter
+                    .filter(|s| !matches!(*s, "[]" | "[" | "]"))
+                    .map(|s| s.trim_matches('"').to_string())
+                    .collect();
+                (
+                    ns_raw.trim_matches('"'),
+                    ag_raw.trim_matches('"'),
+                    res_raw.trim_matches('"'),
+                    verb_raw.trim_matches('"'),
+                    expected_owned,
+                )
+            };
+            let expected: Vec<&str> = expected.iter().map(String::as_str).collect();
+
+            let cfg = z3::Config::new();
+            let ctx = z3::Context::new(&cfg);
+            let mut enc = smt::SmtEncoder::new(&ctx);
+            enc.assert_rbac_axioms(store);
+
+            let violations = enc.check_reaches(namespace, apigroup, resource, verb, &expected, include_direct);
+            if violations.is_empty() {
+                println!("PASS  effective_can(_, {namespace:?}, {apigroup:?}, {resource:?}, {verb:?})");
+            } else {
+                println!(
+                    "FAIL  {} principal(s) can reach ({namespace:?}, {apigroup:?}, {resource:?}, {verb:?}):",
+                    violations.len()
+                );
+                for v in &violations {
+                    println!("        {}", v.principal);
+                    print_violation_paths(&v.paths);
                 }
             }
         }
@@ -847,7 +976,7 @@ fn smt_command(input: &str, store: &EvalStore) {
         }
         _ => {
             eprintln!("Unknown SMT subcommand: {subcommand:?}");
-            eprintln!("Available: check_access, check_isolation, node_selector, anti_affinity");
+            eprintln!("Available: check_access, check_isolation, reaches, cluster-admin, node_selector, anti_affinity");
         }
     }
 }

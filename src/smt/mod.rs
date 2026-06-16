@@ -12,11 +12,24 @@ pub mod diff;
 pub mod rbac_model;
 pub mod scheduling;
 
+pub struct AccessPath {
+    pub binding_kind: &'static str,   // "RoleBinding" | "ClusterRoleBinding"
+    pub binding_namespace: String,    // "" for ClusterRoleBinding
+    pub binding_name: String,
+    pub role_kind: &'static str,      // "Role" | "ClusterRole"
+    pub role_name: String,
+    // Escalation chain leading to this binding.
+    // Each element is (identity, mechanism_used_to_reach_it).
+    // Empty for direct grants (no escalation needed).
+    pub hops: Vec<(String, String)>,
+}
+
 pub struct Violation {
     pub principal: String,
     pub namespace: String,
     pub resource: String,
     pub verb: String,
+    pub paths: Vec<AccessPath>,
 }
 
 /// Encodes Mangle ground facts as Z3 assertions and exposes the solver for
