@@ -929,6 +929,7 @@ checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 [[package]]
 name = "mangle-analysis"
 version = "0.7.0"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#a18010b9c3a2d13d390773baf20f7350827fa32d"
 dependencies = [
  "anyhow",
  "fxhash",
@@ -941,6 +942,7 @@ dependencies = [
 [[package]]
 name = "mangle-ast"
 version = "0.7.0"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#a18010b9c3a2d13d390773baf20f7350827fa32d"
 dependencies = [
  "bumpalo",
  "fxhash",
@@ -950,6 +952,7 @@ dependencies = [
 [[package]]
 name = "mangle-codegen"
 version = "0.7.0"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#a18010b9c3a2d13d390773baf20f7350827fa32d"
 dependencies = [
  "anyhow",
  "fxhash",
@@ -962,6 +965,7 @@ dependencies = [
 [[package]]
 name = "mangle-common"
 version = "0.7.0"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#a18010b9c3a2d13d390773baf20f7350827fa32d"
 dependencies = [
  "anyhow",
  "fxhash",
@@ -971,6 +975,7 @@ dependencies = [
 [[package]]
 name = "mangle-driver"
 version = "0.7.0"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#a18010b9c3a2d13d390773baf20f7350827fa32d"
 dependencies = [
  "anyhow",
  "fxhash",
@@ -985,6 +990,7 @@ dependencies = [
 [[package]]
 name = "mangle-interpreter"
 version = "0.7.0"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#a18010b9c3a2d13d390773baf20f7350827fa32d"
 dependencies = [
  "anyhow",
  "mangle-ast",
@@ -995,10 +1001,12 @@ dependencies = [
 [[package]]
 name = "mangle-ir"
 version = "0.7.0"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#a18010b9c3a2d13d390773baf20f7350827fa32d"
 
 [[package]]
 name = "mangle-parse"
 version = "0.7.0"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#a18010b9c3a2d13d390773baf20f7350827fa32d"
 dependencies = [
  "anyhow",
  "googletest",
