@@ -19,7 +19,7 @@
 #
 # Demo flow:
 #   \snapshot baseline
-#   \source scenarios/alice-twohop.mg
+#   \source examples/two-hop-escalation/alice-twohop.mg
 #   \access-diff baseline
 #   \smt cluster-admin
 

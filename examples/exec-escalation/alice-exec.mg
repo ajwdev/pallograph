@@ -12,7 +12,7 @@
 #
 # Demo flow:
 #   \snapshot baseline
-#   \source scenarios/alice-exec.mg
+#   \source examples/exec-escalation/alice-exec.mg
 #   \access-diff baseline
 #   \smt cluster-admin
 

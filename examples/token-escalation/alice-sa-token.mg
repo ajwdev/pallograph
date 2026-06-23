@@ -13,7 +13,7 @@
 #
 # Demo flow:
 #   \snapshot baseline
-#   \source scenarios/alice-sa-token.mg
+#   \source examples/token-escalation/alice-sa-token.mg
 #   \access-diff baseline
 #   \smt cluster-admin
 

@@ -11,7 +11,7 @@
 #
 # Demo flow:
 #   \snapshot baseline
-#   \source scenarios/hidden-clusterrole.mg
+#   \source examples/hidden-clusterrole/hidden-clusterrole.mg
 #   \access-diff baseline
 #   \smt cluster-admin
 
