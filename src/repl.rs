@@ -3,8 +3,12 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::Result;
 use mangle_common::Value;
 use mangle_interpreter::ProvenanceEntry;
+use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::validate::Validator;
+use rustyline::{Context, Helper};
 
 use crate::edb::{FixtureSource, JsonFileSource, KubectlSource};
 use crate::snapshot::{Diff, Scope, Snapshot};
@@ -12,6 +16,29 @@ use crate::engine::{Engine, EvalStore};
 use crate::load;
 use crate::query;
 use crate::smt;
+
+struct ReplHelper {
+    path_completer: FilenameCompleter,
+}
+
+impl Completer for ReplHelper {
+    type Candidate = Pair;
+
+    fn complete(&self, line: &str, pos: usize, ctx: &Context<'_>) -> rustyline::Result<(usize, Vec<Pair>)> {
+        if line.starts_with('!') && pos >= 1 {
+            let (start, candidates) = self.path_completer.complete(&line[1..], pos - 1, ctx)?;
+            return Ok((start + 1, candidates));
+        }
+        Ok((pos, vec![]))
+    }
+}
+
+impl Hinter for ReplHelper {
+    type Hint = String;
+}
+impl Highlighter for ReplHelper {}
+impl Validator for ReplHelper {}
+impl Helper for ReplHelper {}
 
 pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     println!("\n=== Interactive Query Mode ===");
@@ -44,12 +71,17 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     println!("  \\access-diff <name>               — diff RBAC can/5 permission closure vs named snapshot");
     println!("  \\access-diff <name1> <name2>      — diff RBAC can/5 between two named snapshots");
     println!("  \\reset                            — clear session state (_N results, \\define rules, + facts), re-evaluate");
+    println!("  !<cmd>                            — run a shell command (e.g. !cat examples/foo.mg)");
     println!("  \\quit                             — exit");
     println!("  (legacy: ::cmd also accepted as alias for \\cmd)");
     println!();
 
     let history_path = dirs_home().join(".pallograph_history");
-    let mut rl = DefaultEditor::new()?;
+    let config = rustyline::Config::builder()
+        .completion_type(rustyline::config::CompletionType::List)
+        .build();
+    let mut rl = rustyline::Editor::<ReplHelper, rustyline::history::DefaultHistory>::with_config(config)?;
+    rl.set_helper(Some(ReplHelper { path_completer: FilenameCompleter::new() }));
     let _ = rl.load_history(&history_path);
 
     let mut current_store = store;
@@ -89,6 +121,29 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                 rl.add_history_entry(&line)?;
                 // Rewrite snapshot->relation references to snapshot__relation before parsing.
                 let line = rewrite_snapshot_refs(&line);
+
+                if line.starts_with('!') {
+                    let cmd = line[1..].trim();
+                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+                    let shell_name = std::path::Path::new(&shell)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("sh")
+                        .to_string();
+                    let status = if shell_name == "zsh" {
+                        std::process::Command::new(&shell)
+                            .args(["-i", "-o", "nomonitor", "-c", cmd])
+                            .status()
+                    } else {
+                        std::process::Command::new(&shell)
+                            .args(["-ic", cmd])
+                            .status()
+                    };
+                    if let Err(e) = status {
+                        eprintln!("Shell error: {e}");
+                    }
+                    continue;
+                }
 
                 if line == "::quit" || line == "::exit" || line == "::q" {
                     break;
