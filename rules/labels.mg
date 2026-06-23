@@ -25,7 +25,7 @@
 #   k8s/5                     - Kubernetes objects loaded from the cluster
 #   object_label/6            - (ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue)
 #                               One fact per label on any object. Extracted at load time
-#                               in Go because Mangle cannot enumerate struct fields with
+#                               in Rust because Mangle cannot enumerate struct fields with
 #                               a variable key — :match_field requires a constant field name.
 #   selector_match_label/6    - (ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue)
 #                               One fact per matchLabels entry. Also covers flat
