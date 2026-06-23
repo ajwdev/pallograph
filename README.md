@@ -1,3 +1,3 @@
 # Pallograph
 
-An experiment is pairing Kubernetes controllers with Datalog.
+An experiment in pairing Kubernetes controllers with Datalog and Z3.
