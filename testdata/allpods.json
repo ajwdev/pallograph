@@ -2694,3 +2694,71 @@
     "startTime": "2025-11-18T03:45:10Z"
   }
 }
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "creationTimestamp": "2025-11-18T03:46:00Z",
+    "generateName": "node-exporter-",
+    "labels": {
+      "app": "node-exporter"
+    },
+    "name": "node-exporter-xk9p2",
+    "namespace": "monitoring",
+    "uid": "d1e2f3a4-b5c6-7890-defa-000000000001"
+  },
+  "spec": {
+    "containers": [
+      {
+        "image": "quay.io/prometheus/node-exporter:v1.8.2",
+        "name": "node-exporter",
+        "resources": {}
+      }
+    ],
+    "dnsPolicy": "ClusterFirst",
+    "hostNetwork": true,
+    "nodeName": "kind-control-plane",
+    "restartPolicy": "Always",
+    "serviceAccount": "node-exporter",
+    "serviceAccountName": "node-exporter"
+  },
+  "status": {
+    "phase": "Running",
+    "hostIP": "172.18.0.2",
+    "podIP": "172.18.0.2"
+  }
+}
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "creationTimestamp": "2025-11-18T03:46:10Z",
+    "generateName": "fluentd-",
+    "labels": {
+      "app": "fluentd"
+    },
+    "name": "fluentd-m7r4t",
+    "namespace": "logging",
+    "uid": "e1f2a3b4-c5d6-7890-efab-000000000001"
+  },
+  "spec": {
+    "containers": [
+      {
+        "image": "fluent/fluentd-kubernetes-daemonset:v1.17-debian-forward",
+        "name": "fluentd",
+        "resources": {}
+      }
+    ],
+    "dnsPolicy": "ClusterFirst",
+    "hostNetwork": true,
+    "nodeName": "kind-control-plane",
+    "restartPolicy": "Always",
+    "serviceAccount": "fluentd",
+    "serviceAccountName": "fluentd"
+  },
+  "status": {
+    "phase": "Running",
+    "hostIP": "172.18.0.2",
+    "podIP": "172.18.0.2"
+  }
+}
