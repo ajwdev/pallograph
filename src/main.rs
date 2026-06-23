@@ -2,7 +2,6 @@
 
 mod edb;
 mod engine;
-mod handlers;
 mod load;
 // mod op_printer;
 mod query;
@@ -18,7 +17,6 @@ use clap::Parser;
 use mangle_interpreter::MemStore;
 
 use engine::{Backend, DdBackend, Engine, InterpreterBackend};
-use handlers::{DryRunCollector, Handler, LogHandler, Violation};
 
 #[derive(clap::ValueEnum, Clone)]
 enum BackendKind {
@@ -80,29 +78,7 @@ async fn main() -> Result<()> {
         return cp.dump_plan();
     }
 
-    println!("=== Evaluating policies ===");
     let store = engine.evaluate()?;
-
-    // Mirror the Go POC's default policy predicate set.
-    // Additional predicates (sa_is_cluster_admin, role_has_wildcard_verb, etc.)
-    // are available via --repl.
-    let policy_predicates = ["orphaned_sa", "host_network_pod", "privileged_pod"];
-
-    let mut log_handler = LogHandler;
-    let mut dry_run = DryRunCollector::new();
-
-    for pred in &policy_predicates {
-        for tuple in store.scan(pred) {
-            let v = Violation {
-                policy: pred.to_string(),
-                args: tuple.clone(),
-            };
-            log_handler.handle(&v);
-            dry_run.handle(&v);
-        }
-    }
-
-    dry_run.print_summary();
 
     if cli.smt {
         let cfg = z3::Config::new();
