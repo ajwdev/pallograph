@@ -1,15 +1,19 @@
 # Scenario: Indirect escalation via serviceaccounts/token
+# See README.md for the full story.
 #
-# A PR adds a RoleBinding granting alice "serviceaccounts/token create" in
-# kube-system. This lets alice mint a token for any SA in that namespace —
-# including the default SA, which has cluster-admin.
+# A PR adds one RoleBinding granting alice "serviceaccounts/token create" in
+# kube-system. This lets alice mint a bearer token for any SA in the namespace
+# — including kube-system:default, which has cluster-admin.
 #
-# Escalation mechanism: token_accessible_sa in escalation.mg
-#   alice --[serviceaccounts/token create]--> mint token for default SA
-#         --[cluster-admin]----------------> all permissions
+# The escalation is driven by token_accessible_sa (escalation.mg), which finds
+# every SA in namespaces where alice can create tokens.
 #
-# Contrast with alice-exec.mg: exec requires a running pod; token creation
-# works even if no pods are scheduled. A quieter path.
+# Attack chain:
+#   alice --[serviceaccounts/token create in kube-system]--> mint token for kube-system:default
+#         --[cluster-admin CRB]----------------------------> all permissions
+#
+# Contrast with exec-escalation: exec requires a running pod in the namespace.
+# Token creation works as long as the SA exists — no pods needed. Quieter.
 #
 # Demo flow:
 #   \snapshot baseline
