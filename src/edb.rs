@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -40,50 +40,6 @@ const CLUSTER_RESOURCES: &[(&str, &str, &str, &str)] = &[
         "clusterrolebindings",
     ),
 ];
-
-// ---- RBAC collection ----
-//
-// During loading, RBAC objects are parsed into RbacCollector. After all files
-// are loaded, emit_can_facts emits can(Principal, Ns, Resource, Verb) EDB facts.
-// Wildcards ("*") are preserved as-is — no expansion. Escalation rules in
-// escalation.mg handle the 4 wildcard combos explicitly at each usage site.
-// CRB grants are expanded to every known concrete namespace (that expansion IS
-// enumerable since namespaces are finite and loaded from cluster objects).
-
-#[derive(Default)]
-struct RbacCollector {
-    // name → [(apiGroup, resource, verb)]
-    clusterrole_rules: HashMap<String, Vec<(String, String, String)>>,
-    // aggregation: name → [(label_key, label_value)] selector conditions
-    clusterrole_agg: HashMap<String, Vec<(String, String)>>,
-    // name → labels map (for matching agg selectors)
-    clusterrole_labels: HashMap<String, HashMap<String, String>>,
-    // (namespace, name) → [(apiGroup, resource, verb)]
-    role_rules: HashMap<(String, String), Vec<(String, String, String)>>,
-    rolebindings: Vec<RbacBinding>,
-    clusterrolebindings: Vec<RbacClusterBinding>,
-    // All concrete namespaces seen across any k8s object
-    namespaces: HashSet<String>,
-}
-
-struct RbacBinding {
-    namespace: String,
-    subjects: Vec<RbacSubject>,
-    roleref_kind: String,
-    roleref_name: String,
-}
-
-struct RbacClusterBinding {
-    subjects: Vec<RbacSubject>,
-    roleref_name: String,
-}
-
-#[derive(Clone)]
-enum RbacSubject {
-    ServiceAccount { namespace: String, name: String },
-    User(String),
-    Group(String),
-}
 
 // ---- fact source abstraction ----
 
@@ -234,10 +190,8 @@ fn parse_k8s_json(bytes: &[u8]) -> Result<Vec<(DynamicObject, Option<(String, St
 }
 
 pub fn populate(store: &mut MemStore, source: &mut dyn FactSource) -> Result<()> {
-    let mut rbac = RbacCollector::default();
     for (obj, type_hint) in source.k8s_objects()? {
         add_object(store, &obj, type_hint.as_ref().map(|(av, k)| (av.as_str(), k.as_str())));
-        collect_rbac_object(&mut rbac, &obj);
     }
     for line in source.api_resource_lines()? {
         let line = line.trim().to_string();
@@ -252,10 +206,6 @@ pub fn populate(store: &mut MemStore, source: &mut dyn FactSource) -> Result<()>
                 Value::String(resource.to_string()),
             ],
         );
-    }
-    emit_can_facts(store, &rbac);
-    for ns in &rbac.namespaces {
-        store.add_fact("namespace", vec![Value::String(ns.clone())]);
     }
     Ok(())
 }
@@ -318,232 +268,27 @@ fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str
     }
 }
 
-// ---- RBAC collection helpers ----
+// ---- aggregation selector extraction ----
 
-fn collect_rbac_object(rbac: &mut RbacCollector, obj: &DynamicObject) {
-    let kind = obj.types.as_ref().map(|t| t.kind.as_str()).unwrap_or("");
-    let namespace = obj.namespace().unwrap_or_default();
-    let name = obj.name_any();
-
-    if !namespace.is_empty() {
-        rbac.namespaces.insert(namespace.clone());
-    }
-
-    match kind {
-        "ClusterRole" => {
-            let rules = extract_role_rules(&obj.data);
-            rbac.clusterrole_rules.insert(name.clone(), rules);
-
-            if let Some(labels) = &obj.metadata.labels {
-                rbac.clusterrole_labels.insert(
-                    name.clone(),
-                    labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-                );
-            }
-
-            if let Some(selectors) = obj
-                .data
-                .get("aggregationRule")
-                .and_then(|a| a.get("clusterRoleSelectors"))
-                .and_then(|s| s.as_array())
-            {
-                let mut agg = Vec::new();
-                for sel in selectors {
-                    if let Some(ml) = sel.get("matchLabels").and_then(|m| m.as_object()) {
-                        for (k, v) in ml {
-                            if let Json::String(vs) = v {
-                                agg.push((k.clone(), vs.clone()));
-                            }
-                        }
-                    }
-                }
-                if !agg.is_empty() {
-                    rbac.clusterrole_agg.insert(name, agg);
-                }
-            }
-        }
-        "Role" => {
-            rbac.role_rules.insert((namespace, name), extract_role_rules(&obj.data));
-        }
-        "RoleBinding" => {
-            if let Some((roleref_kind, roleref_name)) = extract_roleref(&obj.data) {
-                rbac.rolebindings.push(RbacBinding {
-                    namespace,
-                    subjects: extract_subjects(&obj.data),
-                    roleref_kind,
-                    roleref_name,
-                });
-            }
-        }
-        "ClusterRoleBinding" => {
-            if let Some((_, roleref_name)) = extract_roleref(&obj.data) {
-                rbac.clusterrolebindings.push(RbacClusterBinding {
-                    subjects: extract_subjects(&obj.data),
-                    roleref_name,
-                });
-            }
-        }
-        _ => {}
-    }
-}
-
-fn extract_role_rules(data: &Json) -> Vec<(String, String, String)> {
-    let mut result = Vec::new();
-    let Some(rules) = data.get("rules").and_then(|r| r.as_array()) else {
-        return result;
-    };
-    for rule in rules {
-        let api_groups = json_str_list(rule, "apiGroups");
-        let resources = json_str_list(rule, "resources");
-        let verbs = json_str_list(rule, "verbs");
-        for ag in &api_groups {
-            for r in &resources {
-                for v in &verbs {
-                    result.push((ag.clone(), r.clone(), v.clone()));
-                }
-            }
-        }
-    }
-    result
-}
-
-fn extract_subjects(data: &Json) -> Vec<RbacSubject> {
-    let Some(subjects) = data.get("subjects").and_then(|s| s.as_array()) else {
-        return vec![];
-    };
-    subjects
-        .iter()
-        .filter_map(|subj| {
-            let kind = subj.get("kind")?.as_str()?;
-            let name = subj.get("name")?.as_str()?.to_string();
-            match kind {
-                "ServiceAccount" => {
-                    let ns = subj
-                        .get("namespace")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    Some(RbacSubject::ServiceAccount { namespace: ns, name })
-                }
-                "User" => Some(RbacSubject::User(name)),
-                "Group" => Some(RbacSubject::Group(name)),
-                _ => None,
-            }
-        })
-        .collect()
-}
-
-fn extract_roleref(data: &Json) -> Option<(String, String)> {
-    let rr = data.get("roleRef")?;
-    let kind = rr.get("kind")?.as_str()?.to_string();
-    let name = rr.get("name")?.as_str()?.to_string();
-    Some((kind, name))
-}
-
-fn json_str_list(val: &Json, key: &str) -> Vec<String> {
-    val.get(key)
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default()
-}
-
-// ---- can fact emission ----
-
-fn emit_can_facts(store: &mut MemStore, rbac: &RbacCollector) {
-    let resolved = resolve_clusterrole_perms(rbac);
-
-    // RoleBinding → scoped to the binding's namespace. Wildcards preserved as-is.
-    for rb in &rbac.rolebindings {
-        let perms = match rb.roleref_kind.as_str() {
-            "Role" => rbac
-                .role_rules
-                .get(&(rb.namespace.clone(), rb.roleref_name.clone()))
-                .map(Vec::as_slice)
-                .unwrap_or_default(),
-            "ClusterRole" => resolved
-                .get(&rb.roleref_name)
-                .map(Vec::as_slice)
-                .unwrap_or_default(),
-            _ => continue,
-        };
-        for subj in &rb.subjects {
-            let principal = subject_principal(subj);
-            for (apigroup, resource, verb) in perms {
-                add_can(store, &principal, &rb.namespace, apigroup, resource, verb);
-            }
-        }
-    }
-
-    // ClusterRoleBinding → one fact per concrete namespace. Wildcards preserved.
-    for crb in &rbac.clusterrolebindings {
-        let perms = resolved
-            .get(&crb.roleref_name)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        for subj in &crb.subjects {
-            let principal = subject_principal(subj);
-            for ns in &rbac.namespaces {
-                for (apigroup, resource, verb) in perms {
-                    add_can(store, &principal, ns, apigroup, resource, verb);
-                }
-            }
-        }
-    }
-}
-
-fn resolve_clusterrole_perms(
-    rbac: &RbacCollector,
-) -> HashMap<String, Vec<(String, String, String)>> {
-    let mut resolved = rbac.clusterrole_rules.clone();
-
-    // One pass handles the typical one-level aggregation depth in Kubernetes.
-    for (agg_name, selectors) in &rbac.clusterrole_agg {
-        let extra: Vec<(String, String, String)> = rbac
-            .clusterrole_labels
-            .iter()
-            .filter(|(_, labels)| {
-                selectors
-                    .iter()
-                    .all(|(k, v)| labels.get(k).map(|lv| lv == v).unwrap_or(false))
-            })
-            .flat_map(|(source_name, _)| {
-                rbac.clusterrole_rules
-                    .get(source_name)
-                    .cloned()
-                    .unwrap_or_default()
-            })
-            .collect();
-        resolved.entry(agg_name.clone()).or_default().extend(extra);
-    }
-
-    resolved
-}
-
-
-fn subject_principal(subj: &RbacSubject) -> String {
-    match subj {
-        RbacSubject::ServiceAccount { namespace, name } => {
-            format!("system:serviceaccount:{namespace}:{name}")
-        }
-        RbacSubject::User(name) | RbacSubject::Group(name) => name.clone(),
-    }
-}
-
-fn add_can(store: &mut MemStore, principal: &str, ns: &str, apigroup: &str, resource: &str, verb: &str) {
-    store.add_fact(
-        "can",
-        vec![
-            Value::String(principal.to_string()),
-            Value::String(ns.to_string()),
-            Value::String(apigroup.to_string()),
-            Value::String(resource.to_string()),
-            Value::String(verb.to_string()),
-        ],
-    );
-}
-
-// ---- existing extraction helpers (unchanged) ----
-
+/// Emit the requirements from one aggregation selector entry as standard selector
+/// EDB facts (selector_match_label, selector_expr_in, etc.) under a synthetic owner:
+///
+///   (ApiVersion="pallograph.dev/agg", Kind="ClusterRoleAggregation",
+///    Namespace=<index>, Name=<aggregator ClusterRole name>)
+///
+/// Using the index in the Namespace slot gives each clusterRoleSelectors[i] its own
+/// owner, so requirements within a single selector are AND'd (all must hold) while
+/// separate selectors are OR'd (independent owners) — matching K8s semantics.
+///
+/// The sel_obj_candidate Case 2 rule in labels.mg (Namespace="") then pairs these
+/// selectors against all cluster-scoped objects, which includes ClusterRoles.
+/// The aggregation rule in rbac.mg pins the object to "rbac.authorization.k8s.io/v1"
+/// / "ClusterRole" / "" to extract SourceCR from the matches.
+///
+/// Note: an empty clusterRoleSelector (no matchLabels, no matchExpressions) produces
+/// no requirements, so selector_has_requirements is false and it matches nothing —
+/// fail-closed behavior. This is safer for security analysis than the K8s controller
+/// behavior (which treats an empty selector as "match all").
 fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Json) {
     let selectors = data
         .get("aggregationRule")
@@ -551,23 +296,137 @@ fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Js
         .and_then(|s| s.as_array());
     let Some(selectors) = selectors else { return };
 
-    for selector in selectors {
-        let Some(match_labels) = selector
-            .get("matchLabels")
-            .and_then(|m| m.as_object())
-        else {
-            continue;
-        };
-        for (key, val) in match_labels {
-            if let Json::String(v) = val {
-                store.add_fact("clusterrole_agg_selector", vec![
-                    Value::String(name.to_string()),
-                    Value::String(key.clone()),
-                    Value::String(v.clone()),
-                ]);
+    for (i, selector) in selectors.iter().enumerate() {
+        let owner = vec![
+            Value::String("pallograph.dev/agg".into()),
+            Value::String("ClusterRoleAggregation".into()),
+            Value::String(i.to_string()),
+            Value::String(name.to_string()),
+        ];
+        emit_selector_requirements(store, owner, selector);
+    }
+}
+
+// ---- label and selector extraction ----
+
+/// Emit selector requirements (matchLabels and matchExpressions) as EDB facts.
+///
+/// The `owner` slice must be exactly four Values:
+///   [ApiVersion, Kind, Namespace, Name]
+/// which identifies the object that "owns" this selector (i.e. the object whose
+/// spec.selector or aggregation clusterRoleSelector this is).
+///
+/// Emits: selector_match_label/6, selector_expr_in/6, selector_expr_notin/6,
+///        selector_expr_exists/5, selector_expr_notexists/5.
+///
+/// These feed the selector_matches/8 engine in labels.mg, which implements
+/// AND semantics (all requirements within one selector must hold) via the
+/// *_unsatisfied negation pattern.
+fn emit_selector_requirements(store: &mut MemStore, owner: Vec<Value>, selector: &Json) {
+    let match_labels = selector.get("matchLabels").and_then(|v| v.as_object());
+    let match_exprs = selector.get("matchExpressions").and_then(|v| v.as_array());
+
+    if let Some(ml) = match_labels {
+        for (k, v) in ml {
+            if let Json::String(vs) = v {
+                let mut args = owner.clone();
+                args.push(Value::String(k.clone()));
+                args.push(Value::String(vs.clone()));
+                store.add_fact("selector_match_label", args);
             }
         }
     }
+
+    if let Some(exprs) = match_exprs {
+        for expr in exprs {
+            let key = match expr.get("key").and_then(|v| v.as_str()) {
+                Some(k) => k,
+                None => continue,
+            };
+            let op = expr.get("operator").and_then(|v| v.as_str()).unwrap_or("");
+            let values = expr.get("values").and_then(|v| v.as_array());
+            match op {
+                "In" => {
+                    for v in values.into_iter().flatten() {
+                        if let Json::String(vs) = v {
+                            let mut args = owner.clone();
+                            args.push(Value::String(key.into()));
+                            args.push(Value::String(vs.clone()));
+                            store.add_fact("selector_expr_in", args);
+                        }
+                    }
+                }
+                "NotIn" => {
+                    for v in values.into_iter().flatten() {
+                        if let Json::String(vs) = v {
+                            let mut args = owner.clone();
+                            args.push(Value::String(key.into()));
+                            args.push(Value::String(vs.clone()));
+                            store.add_fact("selector_expr_notin", args);
+                        }
+                    }
+                }
+                "Exists" => {
+                    let mut args = owner.clone();
+                    args.push(Value::String(key.into()));
+                    store.add_fact("selector_expr_exists", args);
+                }
+                "DoesNotExist" => {
+                    let mut args = owner.clone();
+                    args.push(Value::String(key.into()));
+                    store.add_fact("selector_expr_notexists", args);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Flat selector (Service-style: no matchLabels/matchExpressions) → matchLabels
+    if match_labels.is_none() && match_exprs.is_none() {
+        if let Some(flat) = selector.as_object() {
+            for (k, v) in flat {
+                if let Json::String(vs) = v {
+                    let mut args = owner.clone();
+                    args.push(Value::String(k.clone()));
+                    args.push(Value::String(vs.clone()));
+                    store.add_fact("selector_match_label", args);
+                }
+            }
+        }
+    }
+}
+
+fn extract_labels_and_selectors(
+    store: &mut MemStore,
+    api_version: &str,
+    kind: &str,
+    namespace: &str,
+    name: &str,
+    labels: Option<&BTreeMap<String, String>>,
+    data: &Json,
+) {
+    let owner = vec![
+        Value::String(api_version.into()),
+        Value::String(kind.into()),
+        Value::String(namespace.into()),
+        Value::String(name.into()),
+    ];
+
+    // metadata.labels → object_label/6
+    if let Some(labels) = labels {
+        for (k, v) in labels {
+            let mut args = owner.clone();
+            args.push(Value::String(k.clone()));
+            args.push(Value::String(v.clone()));
+            store.add_fact("object_label", args);
+        }
+    }
+
+    // spec.selector → selector_match_label/selector_expr_*/6
+    let Some(selector) = data.get("spec").and_then(|s| s.get("selector")) else {
+        return;
+    };
+    emit_selector_requirements(store, owner, selector);
 }
 
 fn extract_pod_scheduling(store: &mut MemStore, namespace: &str, name: &str, data: &Json) {
@@ -642,110 +501,228 @@ fn extract_node_data(store: &mut MemStore, name: &str, data: &Json) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{Engine, InterpreterBackend};
+    use serde_json::json;
+    use std::path::Path;
 
-fn extract_labels_and_selectors(
-    store: &mut MemStore,
-    api_version: &str,
-    kind: &str,
-    namespace: &str,
-    name: &str,
-    labels: Option<&BTreeMap<String, String>>,
-    data: &Json,
-) {
-    let owner = || {
-        vec![
-            Value::String(api_version.into()),
-            Value::String(kind.into()),
-            Value::String(namespace.into()),
-            Value::String(name.into()),
-        ]
-    };
-
-    // metadata.labels → object_label/6
-    if let Some(labels) = labels {
-        for (k, v) in labels {
-            let mut args = owner();
-            args.push(Value::String(k.clone()));
-            args.push(Value::String(v.clone()));
-            store.add_fact("object_label", args);
-        }
+    fn engine_from_store(store: MemStore) -> Engine {
+        Engine::new(store, Path::new("rules"), Box::new(InterpreterBackend))
+            .expect("engine")
     }
 
-    // spec.selector
-    let selector = match data.get("spec").and_then(|s| s.get("selector")) {
-        Some(s) => s,
-        None => return,
-    };
-
-    let match_labels = selector.get("matchLabels").and_then(|v| v.as_object());
-    let match_exprs = selector.get("matchExpressions").and_then(|v| v.as_array());
-
-    if let Some(ml) = match_labels {
-        for (k, v) in ml {
-            if let Json::String(vs) = v {
-                let mut args = owner();
-                args.push(Value::String(k.clone()));
-                args.push(Value::String(vs.clone()));
-                store.add_fact("selector_match_label", args);
-            }
-        }
+    /// Construct and add a ClusterRole with explicit rules.
+    fn add_clusterrole(
+        store: &mut MemStore,
+        name: &str,
+        labels: serde_json::Value,
+        rules: serde_json::Value,
+    ) {
+        let obj: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": {
+                "name": name,
+                "labels": labels
+            },
+            "rules": rules
+        }))
+        .unwrap();
+        add_object(store, &obj, Some(("rbac.authorization.k8s.io/v1", "ClusterRole")));
     }
 
-    if let Some(exprs) = match_exprs {
-        for expr in exprs {
-            let key = match expr.get("key").and_then(|v| v.as_str()) {
-                Some(k) => k,
-                None => continue,
-            };
-            let op = expr.get("operator").and_then(|v| v.as_str()).unwrap_or("");
-            let values = expr.get("values").and_then(|v| v.as_array());
-            match op {
-                "In" => {
-                    for v in values.into_iter().flatten() {
-                        if let Json::String(vs) = v {
-                            let mut args = owner();
-                            args.push(Value::String(key.into()));
-                            args.push(Value::String(vs.clone()));
-                            store.add_fact("selector_expr_in", args);
-                        }
-                    }
-                }
-                "NotIn" => {
-                    for v in values.into_iter().flatten() {
-                        if let Json::String(vs) = v {
-                            let mut args = owner();
-                            args.push(Value::String(key.into()));
-                            args.push(Value::String(vs.clone()));
-                            store.add_fact("selector_expr_notin", args);
-                        }
-                    }
-                }
-                "Exists" => {
-                    let mut args = owner();
-                    args.push(Value::String(key.into()));
-                    store.add_fact("selector_expr_exists", args);
-                }
-                "DoesNotExist" => {
-                    let mut args = owner();
-                    args.push(Value::String(key.into()));
-                    store.add_fact("selector_expr_notexists", args);
-                }
-                _ => {}
-            }
-        }
+    /// Construct and add an aggregating ClusterRole (no direct rules, aggregationRule only).
+    fn add_aggregating_clusterrole(
+        store: &mut MemStore,
+        name: &str,
+        selectors: serde_json::Value,
+    ) {
+        let obj: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": { "name": name },
+            "aggregationRule": {
+                "clusterRoleSelectors": selectors
+            },
+            "rules": []
+        }))
+        .unwrap();
+        add_object(store, &obj, Some(("rbac.authorization.k8s.io/v1", "ClusterRole")));
     }
 
-    // Flat spec.selector (Service-style, no matchLabels/matchExpressions) → matchLabels
-    if match_labels.is_none() && match_exprs.is_none() {
-        if let Some(flat) = selector.as_object() {
-            for (k, v) in flat {
-                if let Json::String(vs) = v {
-                    let mut args = owner();
-                    args.push(Value::String(k.clone()));
-                    args.push(Value::String(vs.clone()));
-                    store.add_fact("selector_match_label", args);
-                }
-            }
-        }
+    fn has_clusterrole_perm(
+        result: &crate::engine::EvalStore,
+        role: &str,
+        apigroup: &str,
+        resource: &str,
+        verb: &str,
+    ) -> bool {
+        result.scan("clusterrole_perm").iter().any(|row| {
+            row == &vec![
+                Value::String(role.into()),
+                Value::String(apigroup.into()),
+                Value::String(resource.into()),
+                Value::String(verb.into()),
+            ]
+        })
+    }
+
+    // AND semantics: all matchLabels within one selector must be satisfied.
+    #[test]
+    fn aggregation_and_semantics_within_selector() {
+        let mut store = MemStore::new();
+
+        // One selector entry with two requirements: key-a=true AND key-b=true.
+        add_aggregating_clusterrole(&mut store, "my-agg", json!([
+            {"matchLabels": {"key-a": "true", "key-b": "true"}}
+        ]));
+        // Source CR with only key-a — must NOT be aggregated.
+        add_clusterrole(&mut store, "only-a", json!({"key-a": "true"}), json!([
+            {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}
+        ]));
+        // Source CR with both keys — MUST be aggregated.
+        add_clusterrole(&mut store, "both-ab", json!({"key-a": "true", "key-b": "true"}), json!([
+            {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+        ]));
+
+        let result = engine_from_store(store).evaluate().unwrap();
+
+        assert!(
+            !has_clusterrole_perm(&result, "my-agg", "", "pods", "list"),
+            "single-label match (only key-a) should not satisfy a two-label selector"
+        );
+        assert!(
+            has_clusterrole_perm(&result, "my-agg", "", "pods", "get"),
+            "both-label match should aggregate"
+        );
+    }
+
+    // OR semantics: separate selector entries are independent — either matching is enough.
+    #[test]
+    fn aggregation_or_semantics_across_selectors() {
+        let mut store = MemStore::new();
+
+        add_aggregating_clusterrole(&mut store, "my-agg", json!([
+            {"matchLabels": {"sel-a": "true"}},
+            {"matchLabels": {"sel-b": "true"}}
+        ]));
+        add_clusterrole(&mut store, "cr-a", json!({"sel-a": "true"}), json!([
+            {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+        ]));
+        add_clusterrole(&mut store, "cr-b", json!({"sel-b": "true"}), json!([
+            {"apiGroups": [""], "resources": ["services"], "verbs": ["get"]}
+        ]));
+
+        let result = engine_from_store(store).evaluate().unwrap();
+
+        assert!(
+            has_clusterrole_perm(&result, "my-agg", "", "pods", "get"),
+            "CR matching selector A should be aggregated"
+        );
+        assert!(
+            has_clusterrole_perm(&result, "my-agg", "", "services", "get"),
+            "CR matching selector B should be aggregated"
+        );
+    }
+
+    // matchExpressions / Exists: CR with the key present is aggregated, without is not.
+    #[test]
+    fn aggregation_match_expressions_exists() {
+        let mut store = MemStore::new();
+
+        add_aggregating_clusterrole(&mut store, "my-agg", json!([
+            {"matchExpressions": [{"key": "rbac.io/agg", "operator": "Exists"}]}
+        ]));
+        add_clusterrole(&mut store, "has-key", json!({"rbac.io/agg": "anything"}), json!([
+            {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["get"]}
+        ]));
+        add_clusterrole(&mut store, "no-key", json!({}), json!([
+            {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["list"]}
+        ]));
+
+        let result = engine_from_store(store).evaluate().unwrap();
+
+        assert!(
+            has_clusterrole_perm(&result, "my-agg", "apps", "deployments", "get"),
+            "Exists should match CR with key present"
+        );
+        assert!(
+            !has_clusterrole_perm(&result, "my-agg", "apps", "deployments", "list"),
+            "Exists should not match CR without key"
+        );
+    }
+
+    // matchExpressions / In: only CRs whose label value is in the allowed set are aggregated.
+    #[test]
+    fn aggregation_match_expressions_in() {
+        let mut store = MemStore::new();
+
+        add_aggregating_clusterrole(&mut store, "my-agg", json!([
+            {"matchExpressions": [
+                {"key": "tier", "operator": "In", "values": ["admin", "edit"]}
+            ]}
+        ]));
+        add_clusterrole(&mut store, "is-admin", json!({"tier": "admin"}), json!([
+            {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}
+        ]));
+        add_clusterrole(&mut store, "is-view", json!({"tier": "view"}), json!([
+            {"apiGroups": [""], "resources": ["secrets"], "verbs": ["list"]}
+        ]));
+
+        let result = engine_from_store(store).evaluate().unwrap();
+
+        assert!(
+            has_clusterrole_perm(&result, "my-agg", "", "secrets", "get"),
+            "tier=admin should match In(admin,edit)"
+        );
+        assert!(
+            !has_clusterrole_perm(&result, "my-agg", "", "secrets", "list"),
+            "tier=view should not match In(admin,edit)"
+        );
+    }
+
+    // Idempotency: a ClusterRole with both a pre-populated .rules AND an aggregationRule
+    // pointing at the same source must yield the same permission set as either alone.
+    // This guards against double-counting on live clusters where the aggregation controller
+    // has already written resolved rules into .rules.
+    #[test]
+    fn aggregation_idempotency_double_count() {
+        let mut store = MemStore::new();
+
+        // Aggregator that also has the rule pre-populated (as on a live cluster).
+        let obj: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": { "name": "my-agg" },
+            "aggregationRule": {
+                "clusterRoleSelectors": [{"matchLabels": {"agg-to-me": "true"}}]
+            },
+            "rules": [
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+            ]
+        }))
+        .unwrap();
+        add_object(&mut store, &obj, Some(("rbac.authorization.k8s.io/v1", "ClusterRole")));
+
+        // Source CR that contributes the same rule.
+        add_clusterrole(&mut store, "src-cr", json!({"agg-to-me": "true"}), json!([
+            {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+        ]));
+
+        let result = engine_from_store(store).evaluate().unwrap();
+
+        // Datalog relations are sets: duplicate derivations collapse.
+        let count = result
+            .scan("clusterrole_perm")
+            .iter()
+            .filter(|row| {
+                row.len() == 4
+                    && row[0] == Value::String("my-agg".into())
+                    && row[3] == Value::String("get".into())
+            })
+            .count();
+        assert_eq!(count, 1, "duplicate derivation paths must collapse to a single fact");
     }
 }

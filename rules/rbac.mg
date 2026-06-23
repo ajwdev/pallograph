@@ -21,6 +21,7 @@
 #     → all_user_cluster_perm       (cluster-wide paths only, for users+groups)
 #   all_{sa,user,group}_perm/N
 #     → direct_perm/5  (principal, namespace, apigroup, resource, verb; wildcards preserved as-is)
+#     → can/5          (alias for direct_perm; for REPL scanning — Z3 builds its own rec-func)
 
 # ---- Type filter predicates ----
 
@@ -264,10 +265,23 @@ all_user_perm(Username, "", ApiGroup, Resource, Verb) :-
 # ClusterRoles can declare an aggregationRule whose clusterRoleSelectors list
 # pulls in permissions from any ClusterRole whose labels match. This is how the
 # built-in cluster-admin/admin/edit/view roles work.
+#
+# Each clusterRoleSelectors[i] entry is emitted by edb.rs as a synthetic selector
+# owner (ApiVersion="pallograph.dev/agg", Kind="ClusterRoleAggregation",
+# Namespace=i, Name=<AggCR>), with its matchLabels and matchExpressions requirements
+# stored as standard selector_match_label/selector_expr_*/6 EDB facts. The
+# selector_matches/8 engine in labels.mg then provides:
+#   - AND semantics within one selector: all requirements must hold.
+#   - OR semantics across selectors: each index is a separate owner.
+#
+# Note: an empty clusterRoleSelector (no matchLabels, no matchExpressions) produces
+# no requirements and therefore matches nothing (fail-closed). This differs from the
+# K8s aggregation controller, which treats an empty selector as "match all", but is
+# safer for security analysis purposes.
 
 clusterrole_aggregates(AggCR, SourceCR) :-
-    clusterrole_agg_selector(AggCR, LabelKey, LabelValue),
-    object_label("rbac.authorization.k8s.io/v1", "ClusterRole", "", SourceCR, LabelKey, LabelValue).
+    selector_matches("pallograph.dev/agg", "ClusterRoleAggregation", SelIdx, AggCR,
+                     "rbac.authorization.k8s.io/v1", "ClusterRole", "", SourceCR).
 
 clusterrole_perm(AggCR, ApiGroup, Resource, Verb) :-
     clusterrole_aggregates(AggCR, SourceCR),
@@ -288,3 +302,15 @@ direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
 
 direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
     all_group_perm(Principal, Namespace, ApiGroup, Resource, Verb).
+
+# ---- can/5 alias ----
+#
+# A scannable alias for direct_perm. The Z3 SMT layer builds its own can/effective_can
+# recursive functions from direct_perm and indirect_perm directly (see smt/rbac_model.rs);
+# this relation exists for interactive querying in the REPL.
+#
+# Cluster-wide grants (ClusterRoleBinding path) carry Namespace="" here, consistent
+# with direct_perm. The old Rust can/5 emitter expanded those to every concrete
+# namespace — that was an implementation artifact, not the K8s model.
+can(Principal, Namespace, ApiGroup, Resource, Verb) :-
+    direct_perm(Principal, Namespace, ApiGroup, Resource, Verb).

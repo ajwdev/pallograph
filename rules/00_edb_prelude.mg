@@ -10,4 +10,3 @@ Decl selector_expr_in(ApiVersion, Kind, Namespace, Name, LabelKey, AllowedValue)
 Decl selector_expr_notin(ApiVersion, Kind, Namespace, Name, LabelKey, ExcludedValue).
 Decl selector_expr_exists(ApiVersion, Kind, Namespace, Name, LabelKey).
 Decl selector_expr_notexists(ApiVersion, Kind, Namespace, Name, LabelKey).
-Decl clusterrole_agg_selector(ClusterRoleName, LabelKey, LabelValue).
