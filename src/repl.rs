@@ -46,7 +46,7 @@ fn print_help() {
     println!("Querying");
     println!("  <predicate>                            — show all tuples for a relation");
     println!("  <predicate>(arg, _, ...)               — filter by constants (_ or uppercase vars match any)");
-    println!("  \\show all                              — list all known predicates with arity");
+    println!("  \\show [rel...]                         — list predicates with arity (all if none given)");
     println!("  \\arity <rel>                           — show arity of a single relation");
     println!("  \\query <body>  / ?- <body>             — evaluate a one-shot conjunctive query");
     println!("  \\why <pred>(<args>...)                 — show derivation tree for a fact");
@@ -172,10 +172,19 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                     println!("Pretty printing {}.", if pretty { "enabled" } else { "disabled" });
                     continue;
                 }
-                if line == "::show all" {
-                    let mut names: Vec<&str> = current_store.relation_names()
-                        .filter(|n| !n.starts_with(':'))
+                if line == "::show" || line.starts_with("::show ") {
+                    let args: Vec<&str> = line
+                        .strip_prefix("::show")
+                        .unwrap_or("")
+                        .split_whitespace()
                         .collect();
+                    let mut names: Vec<&str> = if args.is_empty() {
+                        current_store.relation_names()
+                            .filter(|n| !n.starts_with(':'))
+                            .collect()
+                    } else {
+                        args
+                    };
                     names.sort_unstable();
                     for n in names {
                         match current_store.scan(n).first().map(|t| t.len()) {
