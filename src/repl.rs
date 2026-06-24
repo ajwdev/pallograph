@@ -12,7 +12,7 @@ use rustyline::{Context, Helper};
 
 use crate::edb::{K8sManifestsSource, ShellSource};
 use crate::snapshot::{Diff, Scope, Snapshot};
-use crate::engine::{Engine, EvalStore};
+use crate::engine::{Engine, EvalStore, RelationDoc};
 use crate::load;
 use crate::query;
 use crate::smt;
@@ -40,13 +40,60 @@ impl Highlighter for ReplHelper {}
 impl Validator for ReplHelper {}
 impl Helper for ReplHelper {}
 
+/// Render a relation's arity: the row width if any rows exist, else the declared
+/// column count from its `Decl`, else `?` when the arity is genuinely unknown.
+fn arity_display(store_arity: Option<usize>, doc: Option<&RelationDoc>) -> String {
+    store_arity
+        .or_else(|| doc.map(|d| d.columns.len()).filter(|n| *n > 0))
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Print a psql `\d`-style detail block for one relation: its description and a
+/// per-column listing of name, type, and description. Falls back to a bare
+/// arity line when the relation has no `Decl` (e.g. derived predicates).
+fn print_relation_detail(name: &str, store: &EvalStore, doc: Option<&RelationDoc>) {
+    let arity = arity_display(store.scan(name).first().map(|t| t.len()), doc);
+    println!("{name}/{arity}");
+    let Some(doc) = doc else {
+        return;
+    };
+    if let Some(desc) = &doc.description {
+        println!("  {desc}");
+    }
+    if doc.columns.is_empty() {
+        return;
+    }
+    let name_w = doc.columns.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    let ty_w = doc
+        .columns
+        .iter()
+        .map(|c| c.ty.as_deref().unwrap_or("").len())
+        .max()
+        .unwrap_or(0);
+    for (i, col) in doc.columns.iter().enumerate() {
+        let ty = col.ty.as_deref().unwrap_or("");
+        let desc = col
+            .description
+            .as_deref()
+            .map(|d| format!("  — {d}"))
+            .unwrap_or_default();
+        println!(
+            "  {i}. {:name_w$}  {:ty_w$}{desc}",
+            col.name, ty,
+        );
+    }
+}
+
 fn print_help() {
     println!("\n=== Interactive Query Mode ===");
     println!();
     println!("Querying");
     println!("  <predicate>                            — show all tuples for a relation");
     println!("  <predicate>(arg, _, ...)               — filter by constants (_ or uppercase vars match any)");
-    println!("  \\show [rel...]                         — list predicates with arity (all if none given)");
+    println!("  \\show                                  — list documented relations (arity + description)");
+    println!("  \\show --all                            — also list undocumented intermediate relations");
+    println!("  \\show <rel...>                         — describe relations (columns, types, docs)");
     println!("  \\arity <rel>                           — show arity of a single relation");
     println!("  \\query <body>  / ?- <body>             — evaluate a one-shot conjunctive query");
     println!("  \\why <pred>(<args>...)                 — show derivation tree for a fact");
@@ -173,23 +220,54 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                     continue;
                 }
                 if line == "::show" || line.starts_with("::show ") {
-                    let args: Vec<&str> = line
+                    let tokens: Vec<&str> = line
                         .strip_prefix("::show")
                         .unwrap_or("")
                         .split_whitespace()
                         .collect();
-                    let mut names: Vec<&str> = if args.is_empty() {
-                        current_store.relation_names()
+                    // `--all`/`*` reveals undocumented intermediate relations in the
+                    // list view; remaining tokens are explicit relation names.
+                    let show_all = tokens.iter().any(|t| *t == "--all" || *t == "*");
+                    let names: Vec<&str> = tokens
+                        .into_iter()
+                        .filter(|t| *t != "--all" && *t != "*")
+                        .collect();
+                    let docs = engine.relation_docs().unwrap_or_default();
+                    if names.is_empty() {
+                        // List view. By default only documented relations are shown;
+                        // undocumented intermediates are hidden unless --all is given.
+                        let mut names: Vec<&str> = current_store.relation_names()
                             .filter(|n| !n.starts_with(':'))
-                            .collect()
+                            .collect();
+                        names.sort_unstable();
+                        let mut hidden = 0;
+                        for n in names {
+                            let documented = docs
+                                .get(n)
+                                .map(|d| d.description.is_some())
+                                .unwrap_or(false);
+                            if !documented && !show_all {
+                                hidden += 1;
+                                continue;
+                            }
+                            let desc = docs
+                                .get(n)
+                                .and_then(|d| d.description.as_deref())
+                                .map(|d| format!("  — {d}"))
+                                .unwrap_or_default();
+                            let arity = arity_display(
+                                current_store.scan(n).first().map(|t| t.len()),
+                                docs.get(n),
+                            );
+                            println!("  {n}/{arity}{desc}");
+                        }
+                        if hidden > 0 {
+                            println!("  ({hidden} undocumented relation(s) hidden; ::show --all to include)");
+                        }
                     } else {
-                        args
-                    };
-                    names.sort_unstable();
-                    for n in names {
-                        match current_store.scan(n).first().map(|t| t.len()) {
-                            Some(arity) => println!("  {n}/{arity}"),
-                            None => println!("  {n} (empty)"),
+                        // Detail view: a psql \d-style block per requested relation.
+                        for n in names {
+                            print_relation_detail(n, &current_store, docs.get(n));
                         }
                     }
                     continue;
