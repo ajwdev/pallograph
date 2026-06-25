@@ -53,11 +53,6 @@ orphaned_sa(Namespace, SAName) :-
     serviceaccount(Namespace, SAName, _),
     !sa_in_use(Namespace, SAName).
 
-# Pods with existing SAs (join)
-pod_with_sa(Namespace, PodName, SAName) :-
-    pod_sa(Namespace, PodName, SAName),
-    serviceaccount(Namespace, SAName, _).
-
 # ---- RBAC policy predicates ----
 #
 # Note on Kubernetes RBAC wildcards: the string "*" means "all" in k8s but is

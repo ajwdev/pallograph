@@ -56,14 +56,6 @@ Decl user_groups(Username, Group)
   ]
   bound [/string, /string].
 
-Decl api_resource(ApiGroup, Resource)
-  descr [
-    doc("Known API resources, one row per group/resource."),
-    arg(ApiGroup, "API group, empty for the core group"),
-    arg(Resource, "plural resource name, e.g. pods")
-  ]
-  bound [/string, /string].
-
 Decl object_label(ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue)
   descr [
     doc("Labels on objects, one row per label."),

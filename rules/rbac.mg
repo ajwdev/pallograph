@@ -20,7 +20,6 @@
 #     → all_user_cluster_perm       (cluster-wide paths only, for users+groups)
 #   all_{sa,user,group}_perm/N
 #     → direct_perm/5  (principal, namespace, apigroup, resource, verb; wildcards preserved as-is)
-#     → can/5          (alias for direct_perm; for REPL scanning — Z3 builds its own rec-func)
 
 # ---- Type filter predicates ----
 
@@ -311,25 +310,3 @@ direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
 
 direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
     all_group_perm(Principal, Namespace, ApiGroup, Resource, Verb).
-
-# ---- can/5 alias ----
-#
-# A scannable alias for direct_perm. The Z3 SMT layer builds its own can/effective_can
-# recursive functions from direct_perm and indirect_perm directly (see smt/rbac_model.rs);
-# this relation exists for interactive querying in the REPL.
-#
-# Cluster-wide grants (ClusterRoleBinding path) carry Namespace="" here, consistent
-# with direct_perm. The old Rust can/5 emitter expanded those to every concrete
-# namespace — that was an implementation artifact, not the K8s model.
-Decl can(Principal, Namespace, ApiGroup, Resource, Verb)
-  descr [
-    doc("Who can do what: scannable alias of direct_perm for REPL queries."),
-    arg(Principal, "user, group, or system:serviceaccount:<ns>:<name>"),
-    arg(Namespace, "namespace the grant applies in; empty for cluster-wide"),
-    arg(ApiGroup, "API group; * is a literal wildcard"),
-    arg(Resource, "resource, e.g. pods; * is a literal wildcard"),
-    arg(Verb, "verb, e.g. get/list/create; * is a literal wildcard")
-  ].
-
-can(Principal, Namespace, ApiGroup, Resource, Verb) :-
-    direct_perm(Principal, Namespace, ApiGroup, Resource, Verb).
