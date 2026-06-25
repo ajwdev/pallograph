@@ -10,7 +10,7 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
-use crate::edb::{FixtureSource, JsonFileSource, KubectlSource};
+use crate::edb::{K8sManifestsSource, ShellSource};
 use crate::snapshot::{Diff, Scope, Snapshot};
 use crate::engine::{Engine, EvalStore};
 use crate::load;
@@ -454,12 +454,10 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                     let rest = rest.trim();
                     let source_result: anyhow::Result<Box<dyn crate::edb::FactSource>> =
                         if rest.starts_with('!') {
-                            let args: Vec<String> = rest[1..].split_whitespace().map(String::from).collect();
-                            Ok(Box::new(KubectlSource { args }))
-                        } else if std::path::Path::new(rest).is_dir() {
-                            Ok(Box::new(FixtureSource { dir: rest.into() }))
+                            let command = rest[1..].trim().to_string();
+                            Ok(Box::new(ShellSource { command }))
                         } else {
-                            Ok(Box::new(JsonFileSource { path: rest.into() }))
+                            Ok(Box::new(K8sManifestsSource { paths: vec![rest.to_string()] }))
                         };
                     match source_result.and_then(|mut src| engine.populate_from(src.as_mut())) {
                         Ok(()) => match engine.evaluate() {

@@ -1,6 +1,4 @@
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use kube::api::{ApiResource, DynamicObject, ListParams};
@@ -8,6 +6,8 @@ use kube::{Api, Client, ResourceExt};
 use mangle_common::Value;
 use mangle_interpreter::MemStore;
 use serde_json::Value as Json;
+
+use serde::Deserialize;
 
 use crate::value::json_to_value;
 
@@ -45,39 +45,57 @@ const CLUSTER_RESOURCES: &[(&str, &str, &str, &str)] = &[
 
 pub trait FactSource {
     fn k8s_objects(&mut self) -> Result<Vec<(DynamicObject, Option<(String, String)>)>>;
-    fn api_resource_lines(&mut self) -> Result<Vec<String>>;
 }
 
-pub struct FixtureSource {
-    pub dir: PathBuf,
+/// Loads k8s objects from a list of paths, globs, or directories.
+/// - Plain directory: expands to `dir/**/*`, filtered to .json/.yaml/.yml
+/// - Glob pattern: expanded as-is (supports **), filtered to .json/.yaml/.yml
+/// - Explicit file: parsed directly
+pub struct K8sManifestsSource {
+    pub paths: Vec<String>,
 }
 
-impl FactSource for FixtureSource {
+impl FactSource for K8sManifestsSource {
     fn k8s_objects(&mut self) -> Result<Vec<(DynamicObject, Option<(String, String)>)>> {
         let mut objects = Vec::new();
-        for filename in &["allpods.json", "nodes.json", "serviceaccounts.json", "rbac.json", "test_scheduling.json"] {
-            let path = self.dir.join(filename);
-            if !path.exists() {
-                continue;
-            }
-            let file = std::fs::File::open(&path).with_context(|| format!("opening {filename}"))?;
-            for result in serde_json::Deserializer::from_reader(BufReader::new(file)).into_iter::<DynamicObject>() {
-                objects.push((result.with_context(|| format!("parsing {filename}"))?, None));
+        for pattern in &self.paths {
+            let expanded = expand_pattern(pattern);
+            for path in expanded {
+                let path = path?;
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if !matches!(ext, "json" | "yaml" | "yml") {
+                    continue;
+                }
+                let bytes = std::fs::read(&path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                let parsed = match ext {
+                    "json" => parse_k8s_json(&bytes),
+                    _ => parse_k8s_yaml(&bytes),
+                }
+                .with_context(|| format!("parsing {}", path.display()))?;
+                objects.extend(parsed);
             }
         }
         Ok(objects)
     }
+}
 
-    fn api_resource_lines(&mut self) -> Result<Vec<String>> {
-        let path = self.dir.join("api-resources.txt");
-        if !path.exists() {
-            return Ok(vec![]);
-        }
-        let file = std::fs::File::open(&path).context("opening api-resources.txt")?;
-        BufReader::new(file)
-            .lines()
-            .map(|l| l.context("reading api-resources.txt"))
-            .collect()
+fn expand_pattern(pattern: &str) -> Box<dyn Iterator<Item = Result<std::path::PathBuf>>> {
+    let path = std::path::Path::new(pattern);
+    // Plain directory — expand recursively to all files.
+    let glob_pattern = if path.is_dir() && !pattern.contains('*') {
+        format!("{pattern}/**/*")
+    } else {
+        pattern.to_string()
+    };
+    let opts = glob::MatchOptions { require_literal_separator: false, ..Default::default() };
+    match glob::glob_with(&glob_pattern, opts) {
+        Ok(paths) => Box::new(paths.filter_map(|e| match e {
+            Ok(p) if p.is_file() => Some(Ok(p)),
+            Ok(_) => None,
+            Err(e) => Some(Err(anyhow::anyhow!(e))),
+        })),
+        Err(e) => Box::new(std::iter::once(Err(anyhow::anyhow!("invalid glob pattern {pattern:?}: {e}")))),
     }
 }
 
@@ -85,14 +103,9 @@ pub struct ClusterSource {
     objects: Vec<(DynamicObject, Option<(String, String)>)>,
 }
 
-/// Shells out to `kubectl <args> -o json` and parses the resulting k8s objects.
-pub struct KubectlSource {
-    pub args: Vec<String>,
-}
-
-/// Reads a single JSON file containing k8s objects (DynamicObject, multi-doc, or a List).
-pub struct JsonFileSource {
-    pub path: PathBuf,
+/// Runs an arbitrary shell command via `sh -c` and parses the output as k8s objects.
+pub struct ShellSource {
+    pub command: String,
 }
 
 impl ClusterSource {
@@ -127,63 +140,60 @@ impl FactSource for ClusterSource {
     fn k8s_objects(&mut self) -> Result<Vec<(DynamicObject, Option<(String, String)>)>> {
         Ok(std::mem::take(&mut self.objects))
     }
-
-    fn api_resource_lines(&mut self) -> Result<Vec<String>> {
-        Ok(vec![])
-    }
 }
 
-impl FactSource for KubectlSource {
+impl FactSource for ShellSource {
     fn k8s_objects(&mut self) -> Result<Vec<(DynamicObject, Option<(String, String)>)>> {
-        let mut cmd = std::process::Command::new("kubectl");
-        cmd.args(&self.args);
-        // Append -o json if the user didn't include it.
-        if !self.args.iter().any(|a| a == "-o" || a == "--output") {
-            cmd.args(["-o", "json"]);
-        }
-        let output = cmd.output().context("running kubectl")?;
+        let output = std::process::Command::new("sh")
+            .args(["-c", &self.command])
+            .output()
+            .with_context(|| format!("running: {}", self.command))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("kubectl exited non-zero: {}", stderr.trim());
+            anyhow::bail!("command exited non-zero: {}", stderr.trim());
         }
         parse_k8s_json(&output.stdout)
     }
-
-    fn api_resource_lines(&mut self) -> Result<Vec<String>> {
-        Ok(vec![])
-    }
 }
 
-impl FactSource for JsonFileSource {
-    fn k8s_objects(&mut self) -> Result<Vec<(DynamicObject, Option<(String, String)>)>> {
-        let bytes = std::fs::read(&self.path)
-            .with_context(|| format!("reading {}", self.path.display()))?;
-        parse_k8s_json(&bytes)
-    }
-
-    fn api_resource_lines(&mut self) -> Result<Vec<String>> {
-        Ok(vec![])
-    }
-}
-
-/// Parse raw JSON bytes into DynamicObjects. Handles:
-/// - A top-level `{"kind": "List", "items": [...]}` wrapper (kubectl default)
-/// - A single object
-/// - Concatenated / multi-doc (streaming deserialization)
-fn parse_k8s_json(bytes: &[u8]) -> Result<Vec<(DynamicObject, Option<(String, String)>)>> {
+/// Parse YAML bytes into DynamicObjects.
+/// Handles multi-document YAML (--- separators) and List unwrapping.
+fn parse_k8s_yaml(bytes: &[u8]) -> Result<Vec<(DynamicObject, Option<(String, String)>)>> {
+    let text = std::str::from_utf8(bytes).context("invalid UTF-8")?;
     let mut objects = Vec::new();
-    // Try top-level array/List parse first, then fall back to streaming.
-    let v: serde_json::Value = serde_json::from_slice(bytes).context("parsing JSON")?;
-    if let Some(items) = v.get("items").and_then(|i| i.as_array()) {
-        for item in items {
+    for document in serde_yaml::Deserializer::from_str(text) {
+        let value = serde_yaml::Value::deserialize(document).context("parsing document")?;
+        if let Some(items) = value.get("items").and_then(|i| i.as_sequence()) {
+            for item in items {
+                let obj: DynamicObject =
+                    serde_yaml::from_value(item.clone()).context("parsing DynamicObject")?;
+                objects.push((obj, None));
+            }
+        } else {
             let obj: DynamicObject =
-                serde_json::from_value(item.clone()).context("parsing DynamicObject")?;
+                serde_yaml::from_value(value).context("parsing DynamicObject")?;
             objects.push((obj, None));
         }
-    } else {
-        // Single object or fall through to streaming.
-        for result in serde_json::Deserializer::from_slice(bytes).into_iter::<DynamicObject>() {
-            objects.push((result.context("parsing DynamicObject")?, None));
+    }
+    Ok(objects)
+}
+
+/// Parse JSON bytes into DynamicObjects.
+/// Handles List unwrapping and concatenated top-level objects (streaming).
+fn parse_k8s_json(bytes: &[u8]) -> Result<Vec<(DynamicObject, Option<(String, String)>)>> {
+    let mut objects = Vec::new();
+    for result in serde_json::Deserializer::from_slice(bytes).into_iter::<serde_json::Value>() {
+        let value = result.context("parsing JSON")?;
+        if let Some(items) = value.get("items").and_then(|i| i.as_array()) {
+            for item in items {
+                let obj: DynamicObject =
+                    serde_json::from_value(item.clone()).context("parsing DynamicObject")?;
+                objects.push((obj, None));
+            }
+        } else {
+            let obj: DynamicObject =
+                serde_json::from_value(value).context("parsing DynamicObject")?;
+            objects.push((obj, None));
         }
     }
     Ok(objects)
@@ -193,30 +203,20 @@ pub fn populate(store: &mut MemStore, source: &mut dyn FactSource) -> Result<()>
     for (obj, type_hint) in source.k8s_objects()? {
         add_object(store, &obj, type_hint.as_ref().map(|(av, k)| (av.as_str(), k.as_str())));
     }
-    for line in source.api_resource_lines()? {
-        let line = line.trim().to_string();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (resource, api_group) = line.split_once('.').unwrap_or((&line, ""));
-        store.add_fact(
-            "api_resource",
-            vec![
-                Value::String(api_group.to_string()),
-                Value::String(resource.to_string()),
-            ],
-        );
-    }
     Ok(())
 }
 
-pub fn load_all(store: &mut MemStore, fixtures_dir: &Path) -> Result<()> {
-    populate(store, &mut FixtureSource { dir: fixtures_dir.to_path_buf() })
+pub fn load_from_manifests(store: &mut MemStore, paths: Vec<String>) -> Result<()> {
+    populate(store, &mut K8sManifestsSource { paths })
 }
 
 pub async fn load_from_cluster(store: &mut MemStore, client: Client) -> Result<()> {
     let mut source = ClusterSource::fetch(client).await?;
     populate(store, &mut source)
+}
+
+pub fn load_k8s_from_command(store: &mut MemStore, command: &str) -> Result<()> {
+    populate(store, &mut ShellSource { command: command.to_string() })
 }
 
 fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str, &str)>) {
@@ -724,5 +724,90 @@ mod tests {
             })
             .count();
         assert_eq!(count, 1, "duplicate derivation paths must collapse to a single fact");
+    }
+
+    fn kinds(objects: &[(DynamicObject, Option<(String, String)>)]) -> Vec<&str> {
+        objects.iter().map(|(o, _)| o.types.as_ref().unwrap().kind.as_str()).collect()
+    }
+
+    #[test]
+    fn json_single_object() {
+        let input = r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"pod-a"}}"#;
+        let result = parse_k8s_json(input.as_bytes()).unwrap();
+        assert_eq!(kinds(&result), vec!["Pod"]);
+    }
+
+    #[test]
+    fn json_concatenated_objects() {
+        let input = r#"
+            {"apiVersion":"v1","kind":"Pod","metadata":{"name":"pod-a"}}
+            {"apiVersion":"v1","kind":"Pod","metadata":{"name":"pod-b"}}
+            {"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"sa-a"}}
+        "#;
+        let result = parse_k8s_json(input.as_bytes()).unwrap();
+        assert_eq!(kinds(&result), vec!["Pod", "Pod", "ServiceAccount"]);
+    }
+
+    #[test]
+    fn json_list_unwrapping() {
+        let input = r#"{
+            "apiVersion": "v1",
+            "kind": "List",
+            "items": [
+                {"apiVersion":"v1","kind":"Pod","metadata":{"name":"pod-a"}},
+                {"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"sa-a"}}
+            ]
+        }"#;
+        let result = parse_k8s_json(input.as_bytes()).unwrap();
+        assert_eq!(kinds(&result), vec!["Pod", "ServiceAccount"]);
+    }
+
+    #[test]
+    fn yaml_single_document() {
+        let input = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: pod-a\n";
+        let result = parse_k8s_yaml(input.as_bytes()).unwrap();
+        assert_eq!(kinds(&result), vec!["Pod"]);
+    }
+
+    #[test]
+    fn yaml_multi_document() {
+        let input = "\
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-a
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-a
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cr-a
+rules: []
+";
+        let result = parse_k8s_yaml(input.as_bytes()).unwrap();
+        assert_eq!(kinds(&result), vec!["Pod", "ServiceAccount", "ClusterRole"]);
+    }
+
+    #[test]
+    fn yaml_list_unwrapping() {
+        let input = "\
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: pod-a
+  - apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: sa-a
+";
+        let result = parse_k8s_yaml(input.as_bytes()).unwrap();
+        assert_eq!(kinds(&result), vec!["Pod", "ServiceAccount"]);
     }
 }

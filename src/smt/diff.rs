@@ -146,7 +146,7 @@ mod tests {
 
     fn load_engine() -> Engine {
         let mut edb = MemStore::new();
-        edb::load_all(&mut edb, Path::new("testdata")).expect("load testdata");
+        edb::load_from_manifests(&mut edb, vec!["testdata".to_string()]).expect("load testdata");
         Engine::new(edb, Path::new("rules"), Box::new(InterpreterBackend)).expect("engine")
     }
 

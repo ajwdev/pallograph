@@ -3,7 +3,6 @@ Decl node_allocatable(NodeName, Resource, Quantity).
 Decl pod_node_selector(Namespace, Name, Key, Value).
 Decl pod_anti_affinity_req(Namespace, Name, MatchKey, MatchValue, TopologyKey).
 Decl user_groups(Username, Group).
-Decl api_resource(ApiGroup, Resource).
 Decl object_label(ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue).
 Decl selector_match_label(ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue).
 Decl selector_expr_in(ApiVersion, Kind, Namespace, Name, LabelKey, AllowedValue).

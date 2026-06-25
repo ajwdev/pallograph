@@ -1,0 +1,56 @@
+# pallograph.toml
+#
+# Place this file as ./pallograph.toml (project-local) or
+# ~/.config/pallograph/config.toml (user global).
+# The project-local file takes precedence.
+
+# Profile to use when --profile is not specified.
+default_profile = "dev"
+
+# --- Datasources ---
+# Each datasource has a source (how to fetch) and content (how to parse).
+#
+# source:  "k8s" | "file" | "shell"
+# content: "k8s-manifests" | "json-tuples"  (required for file and shell; not used for k8s)
+
+# Live Kubernetes cluster via KUBECONFIG / in-cluster auth.
+[datasources.prod]
+source = "k8s"
+
+# Local directory or file of k8s JSON manifests.
+[datasources.local]
+source = "file"
+paths = ["testdata/"]
+content = "k8s-manifests"
+
+# Shell command — full command including any flags, context, etc.
+# [datasources.staging]
+# source = "shell"
+# command = "kubectl --context staging get pods,sa,roles,rolebindings,clusterroles,clusterrolebindings --all-namespaces -o json"
+# content = "k8s-manifests"
+
+# Flat JSON tuples loaded into a named Mangle relation (from a file).
+# [datasources.github-perms]
+# source = "file"
+# paths = ["github-perms.json"]
+# content = "json-tuples"
+# relation = "github_permission"
+
+# Flat JSON tuples from a shell command.
+# [datasources.live-github-perms]
+# source = "shell"
+# command = "gh api orgs/myorg/members | jq '[.[] | [.login, .role]]'"
+# content = "json-tuples"
+# relation = "github_member"
+
+# --- Profiles ---
+# Each profile lists datasource names to load in order.
+
+[profiles.dev]
+sources = ["local"]
+
+[profiles.prod]
+sources = ["prod"]
+
+# [profiles.augmented]
+# sources = ["prod", "github-perms"]

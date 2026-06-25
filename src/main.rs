@@ -1,5 +1,6 @@
 #![feature(iter_intersperse)]
 
+mod config;
 mod edb;
 mod engine;
 mod load;
@@ -12,7 +13,7 @@ mod value;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use mangle_interpreter::MemStore;
 
@@ -26,21 +27,21 @@ enum BackendKind {
 
 #[derive(Parser)]
 struct Cli {
-    /// Start the interactive query REPL after evaluation.
-    #[arg(long)]
-    repl: bool,
-
     /// Directory containing .mg rule files. Defaults to ./rules.
     #[arg(long, default_value = "rules")]
     rules: PathBuf,
 
-    /// Directory containing fixture JSON files. Defaults to ./testdata.
-    #[arg(long, default_value = "testdata")]
-    fixtures: PathBuf,
+    /// Path to a config file (overrides default search locations).
+    #[arg(short = 'C')]
+    config: Option<PathBuf>,
 
-    /// Load facts from the live Kubernetes cluster (uses KUBECONFIG / in-cluster auth).
+    /// Load facts from a fixture directory (overrides config file).
     #[arg(long)]
-    live: bool,
+    fixtures: Option<PathBuf>,
+
+    /// Select a named profile from the config file.
+    #[arg(long)]
+    profile: Option<String>,
 
     #[arg(long)]
     explain: bool,
@@ -53,17 +54,87 @@ struct Cli {
     backend: BackendKind,
 }
 
+async fn load_datasource(edb: &mut MemStore, name: &str, ds: &config::Datasource) -> Result<()> {
+    use config::{ContentKind, SourceKind};
+    match ds.source {
+        SourceKind::K8s => {
+            println!("  {name}: cluster (live)");
+            let client = kube::Client::try_default().await?;
+            edb::load_from_cluster(edb, client).await?;
+        }
+        SourceKind::File => {
+            let paths = ds.paths.as_ref()
+                .with_context(|| format!("datasource '{name}': source=\"file\" requires paths"))?;
+            let content = ds.content.as_ref()
+                .with_context(|| format!("datasource '{name}': source=\"file\" requires content"))?;
+            match content {
+                ContentKind::K8sManifests => {
+                    println!("  {name}: file ({}) → k8s-manifests", paths.join(", "));
+                    edb::load_from_manifests(edb, paths.clone())?;
+                }
+                ContentKind::JsonTuples => {
+                    let relation = ds.relation.as_deref()
+                        .with_context(|| format!("datasource '{name}': content=\"json-tuples\" requires a relation"))?;
+                    for path in paths {
+                        println!("  {name}: file ({path}) → json-tuples:{relation}");
+                        load::load_tuples_into_store(edb, relation, path)?;
+                    }
+                }
+            }
+        }
+        SourceKind::Shell => {
+            let command = ds.command.as_deref()
+                .with_context(|| format!("datasource '{name}': source=\"shell\" requires a command"))?;
+            let content = ds.content.as_ref()
+                .with_context(|| format!("datasource '{name}': source=\"shell\" requires content"))?;
+            match content {
+                ContentKind::K8sManifests => {
+                    println!("  {name}: shell → k8s-manifests");
+                    edb::load_k8s_from_command(edb, command)?;
+                }
+                ContentKind::JsonTuples => {
+                    let relation = ds.relation.as_deref()
+                        .with_context(|| format!("datasource '{name}': content=\"json-tuples\" requires a relation"))?;
+                    println!("  {name}: shell → json-tuples:{relation}");
+                    load::load_tuples_into_store(edb, relation, &format!("! {command}"))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Load EDB facts into a staging MemStore.
+    // Priority: --live / --fixtures flags (explicit overrides) > config file > testdata/ default.
     let mut edb = MemStore::new();
-    if cli.live {
-        let client = kube::Client::try_default().await?;
-        edb::load_from_cluster(&mut edb, client).await?;
+    if let Some(manifests_path) = &cli.fixtures {
+        println!("datasource: k8s-manifests ({})", manifests_path.display());
+        edb::load_from_manifests(&mut edb, vec![manifests_path.to_string_lossy().into_owned()])?;
     } else {
-        edb::load_all(&mut edb, &cli.fixtures)?;
+        match config::load_config(cli.config.as_deref())? {
+            Some(cfg) => {
+                let profile_name = cli.profile
+                    .as_deref()
+                    .or(cfg.default_profile.as_deref())
+                    .context("no --profile given and no default_profile in config")?;
+                let profile = cfg.profiles.get(profile_name)
+                    .with_context(|| format!("profile '{profile_name}' not found in config"))?;
+                println!("datasource: profile \"{profile_name}\"");
+                for name in &profile.sources {
+                    let ds = cfg.datasources.get(name.as_str())
+                        .with_context(|| format!("datasource '{name}' not found in config"))?;
+                    load_datasource(&mut edb, name, ds).await?;
+                }
+            }
+            None => {
+                println!("datasource: k8s-manifests (testdata) [default]");
+                edb::load_from_manifests(&mut edb, vec!["testdata".to_string()])?;
+            }
+        }
     }
 
     let backend: Box<dyn Backend> = match cli.backend {
@@ -108,9 +179,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    if cli.repl {
-        repl::run(&mut engine, store)?;
-    }
+    repl::run(&mut engine, store)?;
 
     Ok(())
 }
