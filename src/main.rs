@@ -36,20 +36,12 @@ struct Cli {
     #[arg(short = 'C')]
     config: Option<PathBuf>,
 
-    /// Load facts from a fixture directory (overrides config file).
-    #[arg(long)]
-    fixtures: Option<PathBuf>,
-
     /// Select a named profile from the config file.
     #[arg(long)]
     profile: Option<String>,
 
     #[arg(long)]
     explain: bool,
-
-    /// Run Z3 constraint check on policy violations after evaluation.
-    #[arg(long)]
-    smt: bool,
 
     #[arg(long, value_enum, default_value = "interpreter")]
     backend: BackendKind,
@@ -115,31 +107,26 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Load EDB facts into a staging MemStore.
-    // Priority: --live / --fixtures flags (explicit overrides) > config file > testdata/ default.
+    // Priority: config file > testdata/ default.
     let mut edb = MemStore::new();
-    if let Some(manifests_path) = &cli.fixtures {
-        eprintln!("datasource: k8s-manifests ({})", manifests_path.display());
-        edb::load_from_manifests(&mut edb, vec![manifests_path.to_string_lossy().into_owned()])?;
-    } else {
-        match config::load_config(cli.config.as_deref())? {
-            Some(cfg) => {
-                let profile_name = cli.profile
-                    .as_deref()
-                    .or(cfg.default_profile.as_deref())
-                    .context("no --profile given and no default_profile in config")?;
-                let profile = cfg.profiles.get(profile_name)
-                    .with_context(|| format!("profile '{profile_name}' not found in config"))?;
-                eprintln!("datasource: profile \"{profile_name}\"");
-                for name in &profile.sources {
-                    let ds = cfg.datasources.get(name.as_str())
-                        .with_context(|| format!("datasource '{name}' not found in config"))?;
-                    load_datasource(&mut edb, name, ds).await?;
-                }
+    match config::load_config(cli.config.as_deref())? {
+        Some(cfg) => {
+            let profile_name = cli.profile
+                .as_deref()
+                .or(cfg.default_profile.as_deref())
+                .context("no --profile given and no default_profile in config")?;
+            let profile = cfg.profiles.get(profile_name)
+                .with_context(|| format!("profile '{profile_name}' not found in config"))?;
+            eprintln!("datasource: profile \"{profile_name}\"");
+            for name in &profile.sources {
+                let ds = cfg.datasources.get(name.as_str())
+                    .with_context(|| format!("datasource '{name}' not found in config"))?;
+                load_datasource(&mut edb, name, ds).await?;
             }
-            None => {
-                eprintln!("datasource: k8s-manifests (testdata) [default]");
-                edb::load_from_manifests(&mut edb, vec!["testdata".to_string()])?;
-            }
+        }
+        None => {
+            eprintln!("datasource: k8s-manifests (testdata) [default]");
+            edb::load_from_manifests(&mut edb, vec!["testdata".to_string()])?;
         }
     }
 
@@ -156,34 +143,6 @@ async fn main() -> Result<()> {
     }
 
     let store = engine.evaluate()?;
-
-    if cli.smt {
-        let cfg = z3::Config::new();
-        let ctx = z3::Context::new(&cfg);
-        let mut enc = smt::SmtEncoder::new(&ctx);
-
-        enc.assert_rbac_axioms(&store);
-
-        // Each entry: (namespace, resource, verb, expected_principals)
-        // namespace="" checks cluster-wide (CRB) grants only.
-        let checks: &[(&str, &str, &str, &[&str])] = &[
-            ("", "pods", "delete", &["admin@example.com", "developer@example.com"]),
-            ("", "pods", "get",    &["admin@example.com", "developer@example.com"]),
-        ];
-
-        println!("\n=== Z3 access invariant checks ===");
-        for (namespace, resource, verb, expected) in checks {
-            let violations = enc.check_access_invariant(namespace, resource, verb, expected);
-            if violations.is_empty() {
-                println!("PASS  can(_, {namespace:?}, {resource:?}, {verb:?})");
-            } else {
-                println!("FAIL  can(_, {namespace:?}, {resource:?}, {verb:?}) — {} unexpected principal(s):", violations.len());
-                for v in &violations {
-                    println!("        UNEXPECTED can({:?}, {:?}, {:?}, {:?})", v.principal, v.namespace, v.resource, v.verb);
-                }
-            }
-        }
-    }
 
     repl::run(&mut engine, store, cli.format)?;
 
