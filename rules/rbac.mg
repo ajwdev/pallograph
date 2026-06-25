@@ -3,7 +3,6 @@
 # Base facts (EDB - Extensional Database, i.e. facts asserted directly, not derived):
 #   k8s/5          - Kubernetes objects loaded from the cluster
 #   user_groups/2  - (Username, Group) populated at query time from a UserInfo struct
-#   api_resource/2 - (ApiGroup, Resource) loaded from `kubectl api-resources -o name`
 #
 # Predicate hierarchy (IDB - Intensional Database, i.e. facts derived by rules):
 #   k8s/5
