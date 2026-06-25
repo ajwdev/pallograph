@@ -94,7 +94,6 @@ fn print_help() {
     println!("  \\show                                  — list documented relations (arity + description)");
     println!("  \\show --all                            — also list undocumented intermediate relations");
     println!("  \\show <rel...>                         — describe relations (columns, types, docs)");
-    println!("  \\arity <rel>                           — show arity of a single relation");
     println!("  \\query <body>  / ?- <body>             — evaluate a one-shot conjunctive query");
     println!("  \\why <pred>(<args>...)                 — show derivation tree for a fact");
     println!();
@@ -269,14 +268,6 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                         for n in names {
                             print_relation_detail(n, &current_store, docs.get(n));
                         }
-                    }
-                    continue;
-                }
-                if let Some(rel) = line.strip_prefix("::arity ") {
-                    let rel = rel.trim();
-                    match current_store.scan(rel).first().map(|t| t.len()) {
-                        Some(arity) => println!("{rel}/{arity}"),
-                        None => println!("Unknown relation '{rel}'."),
                     }
                     continue;
                 }
