@@ -292,6 +292,16 @@ clusterrole_perm(AggCR, ApiGroup, Resource, Verb) :-
 # preserved as-is — no expansion. Namespace="" for cluster-wide grants (CRB path).
 # SA principals are formatted as system:serviceaccount:<ns>:<name>.
 
+Decl direct_perm(Principal, Namespace, ApiGroup, Resource, Verb)
+  descr [
+    doc("Effective RBAC permissions granted directly by a binding (no escalation)."),
+    arg(Principal, "user, group, or system:serviceaccount:<ns>:<name>"),
+    arg(Namespace, "namespace the grant applies in; empty for cluster-wide"),
+    arg(ApiGroup, "API group; * is a literal wildcard"),
+    arg(Resource, "resource, e.g. pods; * is a literal wildcard"),
+    arg(Verb, "verb, e.g. get/list/create; * is a literal wildcard")
+  ].
+
 direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
     all_user_perm(Principal, Namespace, ApiGroup, Resource, Verb).
 
@@ -311,5 +321,15 @@ direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
 # Cluster-wide grants (ClusterRoleBinding path) carry Namespace="" here, consistent
 # with direct_perm. The old Rust can/5 emitter expanded those to every concrete
 # namespace — that was an implementation artifact, not the K8s model.
+Decl can(Principal, Namespace, ApiGroup, Resource, Verb)
+  descr [
+    doc("Who can do what: scannable alias of direct_perm for REPL queries."),
+    arg(Principal, "user, group, or system:serviceaccount:<ns>:<name>"),
+    arg(Namespace, "namespace the grant applies in; empty for cluster-wide"),
+    arg(ApiGroup, "API group; * is a literal wildcard"),
+    arg(Resource, "resource, e.g. pods; * is a literal wildcard"),
+    arg(Verb, "verb, e.g. get/list/create; * is a literal wildcard")
+  ].
+
 can(Principal, Namespace, ApiGroup, Resource, Verb) :-
     direct_perm(Principal, Namespace, ApiGroup, Resource, Verb).

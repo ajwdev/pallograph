@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::io::IsTerminal;
 
 use anyhow::Result;
 use mangle_common::Value;
@@ -12,7 +13,7 @@ use rustyline::{Context, Helper};
 
 use crate::edb::{K8sManifestsSource, ShellSource};
 use crate::snapshot::{Diff, Scope, Snapshot};
-use crate::engine::{Engine, EvalStore};
+use crate::engine::{Engine, EvalStore, RelationDoc};
 use crate::load;
 use crate::query;
 use crate::smt;
@@ -40,14 +41,106 @@ impl Highlighter for ReplHelper {}
 impl Validator for ReplHelper {}
 impl Helper for ReplHelper {}
 
+/// Render a relation's arity: the row width if any rows exist, else the declared
+/// column count from its `Decl`, else `?` when the arity is genuinely unknown.
+fn arity_display(store_arity: Option<usize>, doc: Option<&RelationDoc>) -> String {
+    store_arity
+        .or_else(|| doc.map(|d| d.columns.len()).filter(|n| *n > 0))
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Print a psql `\d`-style detail block for one relation: its description and a
+/// per-column listing of name, type, and description. Falls back to a bare
+/// arity line when the relation has no `Decl` (e.g. derived predicates).
+fn print_relation_detail(name: &str, store: &EvalStore, doc: Option<&RelationDoc>) {
+    let arity = arity_display(store.scan(name).first().map(|t| t.len()), doc);
+    println!("{name}/{arity}");
+    let Some(doc) = doc else {
+        return;
+    };
+    if let Some(desc) = &doc.description {
+        println!("  {desc}");
+    }
+    if doc.columns.is_empty() {
+        return;
+    }
+    let name_w = doc.columns.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    let ty_w = doc
+        .columns
+        .iter()
+        .map(|c| c.ty.as_deref().unwrap_or("").len())
+        .max()
+        .unwrap_or(0);
+    for (i, col) in doc.columns.iter().enumerate() {
+        let ty = col.ty.as_deref().unwrap_or("");
+        let desc = col
+            .description
+            .as_deref()
+            .map(|d| format!("  — {d}"))
+            .unwrap_or_default();
+        println!(
+            "  {i}. {:name_w$}  {:ty_w$}{desc}",
+            col.name, ty,
+        );
+    }
+}
+
+/// How result-set tuples are rendered. `Plain` and `Pretty` are the original
+/// human display (compact / indented). `Ndjson` emits one JSON object per tuple
+/// on its own line, for piping into `jq`, DuckDB, etc.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    #[default]
+    Plain,
+    Pretty,
+    Ndjson,
+}
+
+impl OutputFormat {
+    fn label(self) -> &'static str {
+        match self {
+            OutputFormat::Plain => "plain",
+            OutputFormat::Pretty => "pretty",
+            OutputFormat::Ndjson => "ndjson",
+        }
+    }
+}
+
+/// The declared column names for a relation, in order, for use as NDJSON keys.
+/// Empty when the relation has no `Decl` (callers fall back to positional keys).
+fn column_keys(engine: &Engine, relation: &str) -> Vec<String> {
+    engine
+        .relation_docs()
+        .ok()
+        .and_then(|docs| {
+            docs.get(relation)
+                .map(|d| d.columns.iter().map(|c| c.name.clone()).collect())
+        })
+        .unwrap_or_default()
+}
+
+/// Render one tuple as a single-line NDJSON object. `key` maps a column index to
+/// its key (relation column name or query variable); indices it doesn't cover
+/// fall back to positional `c0, c1, ...`.
+fn ndjson_row(tuple: &[Value], key: impl Fn(usize) -> Option<String>) -> String {
+    let mut map = serde_json::Map::with_capacity(tuple.len());
+    for (i, val) in tuple.iter().enumerate() {
+        let k = key(i).unwrap_or_else(|| format!("c{i}"));
+        map.insert(k, crate::value::value_to_json(val));
+    }
+    serde_json::Value::Object(map).to_string()
+}
+
 fn print_help() {
     println!("\n=== Interactive Query Mode ===");
     println!();
     println!("Querying");
     println!("  <predicate>                            — show all tuples for a relation");
     println!("  <predicate>(arg, _, ...)               — filter by constants (_ or uppercase vars match any)");
-    println!("  \\show all                              — list all known predicates with arity");
-    println!("  \\arity <rel>                           — show arity of a single relation");
+    println!("  \\show                                  — list documented relations (arity + description)");
+    println!("  \\show --all                            — also list undocumented intermediate relations");
+    println!("  \\show <rel...>                         — describe relations (columns, types, docs)");
     println!("  \\query <body>  / ?- <body>             — evaluate a one-shot conjunctive query");
     println!("  \\why <pred>(<args>...)                 — show derivation tree for a fact");
     println!();
@@ -79,6 +172,7 @@ fn print_help() {
     println!();
     println!("Session");
     println!("  \\pretty                                — toggle compact/pretty tuple display");
+    println!("  \\format plain|pretty|ndjson            — set output format (ndjson = one JSON object per row, for piping)");
     println!("  \\reset                                 — clear session state (_N results, \\define rules, + facts), re-evaluate");
     println!("  !<cmd>                                 — run a shell command");
     println!("  \\help                                  — show this help");
@@ -88,8 +182,14 @@ fn print_help() {
     println!();
 }
 
-pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
-    print_help();
+pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Result<()> {
+    // Banner is interactive chrome: skip it when stdout is redirected so a
+    // piped session (e.g. `... | pallograph --format ndjson > out.json`) yields
+    // clean data. Status/diagnostic lines go to stderr for the same reason.
+    let interactive = std::io::stdout().is_terminal();
+    if interactive {
+        print_help();
+    }
 
     let history_path = dirs_home().join(".pallograph_history");
     let config = rustyline::Config::builder()
@@ -100,7 +200,7 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
     let _ = rl.load_history(&history_path);
 
     let mut current_store = store;
-    let mut pretty = false;
+    let mut format = format;
     let mut query_counter: u32 = 0;
     let mut snapshot_counter: u64 = 0;
     let mut snapshot_names: HashMap<String, u64> = HashMap::new();
@@ -168,28 +268,80 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                     continue;
                 }
                 if line == "::pretty" {
-                    pretty = !pretty;
-                    println!("Pretty printing {}.", if pretty { "enabled" } else { "disabled" });
+                    // Shortcut: toggle between plain and pretty display.
+                    format = if format == OutputFormat::Pretty {
+                        OutputFormat::Plain
+                    } else {
+                        OutputFormat::Pretty
+                    };
+                    eprintln!("Output format: {}.", format.label());
                     continue;
                 }
-                if line == "::show all" {
-                    let mut names: Vec<&str> = current_store.relation_names()
-                        .filter(|n| !n.starts_with(':'))
-                        .collect();
-                    names.sort_unstable();
-                    for n in names {
-                        match current_store.scan(n).first().map(|t| t.len()) {
-                            Some(arity) => println!("  {n}/{arity}"),
-                            None => println!("  {n} (empty)"),
+                if line == "::format" || line.starts_with("::format ") {
+                    let arg = line.strip_prefix("::format").unwrap_or("").trim();
+                    match arg {
+                        "plain" => format = OutputFormat::Plain,
+                        "pretty" => format = OutputFormat::Pretty,
+                        "ndjson" => format = OutputFormat::Ndjson,
+                        "" => {} // no arg: just report the current format
+                        other => {
+                            eprintln!("Unknown format '{other}'. Use: plain | pretty | ndjson.");
+                            continue;
                         }
                     }
+                    eprintln!("Output format: {}.", format.label());
                     continue;
                 }
-                if let Some(rel) = line.strip_prefix("::arity ") {
-                    let rel = rel.trim();
-                    match current_store.scan(rel).first().map(|t| t.len()) {
-                        Some(arity) => println!("{rel}/{arity}"),
-                        None => println!("Unknown relation '{rel}'."),
+                if line == "::show" || line.starts_with("::show ") {
+                    let tokens: Vec<&str> = line
+                        .strip_prefix("::show")
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .collect();
+                    // `--all`/`*` reveals undocumented intermediate relations in the
+                    // list view; remaining tokens are explicit relation names.
+                    let show_all = tokens.iter().any(|t| *t == "--all" || *t == "*");
+                    let names: Vec<&str> = tokens
+                        .into_iter()
+                        .filter(|t| *t != "--all" && *t != "*")
+                        .collect();
+                    let docs = engine.relation_docs().unwrap_or_default();
+                    if names.is_empty() {
+                        // List view. By default only documented relations are shown;
+                        // undocumented intermediates are hidden unless --all is given.
+                        let mut names: Vec<&str> = current_store.relation_names()
+                            .filter(|n| !n.starts_with(':'))
+                            .collect();
+                        names.sort_unstable();
+                        let mut hidden = 0;
+                        for n in names {
+                            let documented = docs
+                                .get(n)
+                                .map(|d| d.description.is_some())
+                                .unwrap_or(false);
+                            if !documented && !show_all {
+                                hidden += 1;
+                                continue;
+                            }
+                            let desc = docs
+                                .get(n)
+                                .and_then(|d| d.description.as_deref())
+                                .map(|d| format!("  — {d}"))
+                                .unwrap_or_default();
+                            let arity = arity_display(
+                                current_store.scan(n).first().map(|t| t.len()),
+                                docs.get(n),
+                            );
+                            println!("  {n}/{arity}{desc}");
+                        }
+                        if hidden > 0 {
+                            println!("  ({hidden} undocumented relation(s) hidden; ::show --all to include)");
+                        }
+                    } else {
+                        // Detail view: a psql \d-style block per requested relation.
+                        for n in names {
+                            print_relation_detail(n, &current_store, docs.get(n));
+                        }
                     }
                     continue;
                 }
@@ -219,18 +371,23 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                             current_store = new_store;
                             let tuples = current_store.scan(&result_name).to_vec();
                             if tuples.is_empty() {
-                                println!("No results.");
+                                eprintln!("No results.");
                                 engine.remove_rules_for(&result_name);
                             } else {
                                 for tuple in &tuples {
-                                    let parts: Vec<String> = vars
-                                        .iter()
-                                        .zip(tuple.iter())
-                                        .map(|(name, val)| format!("{name} = {val}"))
-                                        .collect();
-                                    println!("  {}", parts.join(", "));
+                                    if format == OutputFormat::Ndjson {
+                                        // Keys are the query's variable names.
+                                        println!("{}", ndjson_row(tuple, |i| vars.get(i).cloned()));
+                                    } else {
+                                        let parts: Vec<String> = vars
+                                            .iter()
+                                            .zip(tuple.iter())
+                                            .map(|(name, val)| format!("{name} = {val}"))
+                                            .collect();
+                                        println!("  {}", parts.join(", "));
+                                    }
                                 }
-                                println!("Found {} result(s): (→ {result_name})", tuples.len());
+                                eprintln!("Found {} result(s): (→ {result_name})", tuples.len());
                                 query_counter += 1;
                             }
                         }
@@ -273,7 +430,7 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                             let rows = current_store.scan(&q.predicate);
                             let matched = query::filter_tuples(rows, &q);
                             if matched.is_empty() {
-                                println!("No matching facts for '{rest}'.");
+                                eprintln!("No matching facts for '{rest}'.");
                             } else {
                                 let index = build_provenance_index(&current_store.provenance);
                                 for tuple in matched {
@@ -415,7 +572,7 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
-                            println!("Rule added and evaluated.");
+                            eprintln!("Rule added and evaluated.");
                         }
                         Err(e) => {
                             engine.truncate_rules(checkpoint);
@@ -435,7 +592,7 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                                 match engine.evaluate() {
                                     Ok(new_store) => {
                                         current_store = new_store;
-                                        println!("Sourced and evaluated.");
+                                        eprintln!("Sourced and evaluated.");
                                     }
                                     Err(e) => {
                                         engine.truncate_rules(checkpoint);
@@ -463,7 +620,7 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                         Ok(()) => match engine.evaluate() {
                             Ok(new_store) => {
                                 current_store = new_store;
-                                println!("Loaded and evaluated.");
+                                eprintln!("Loaded and evaluated.");
                             }
                             Err(e) => eprintln!("Error: {e:#}"),
                         },
@@ -486,7 +643,7 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                         Ok(n) => match engine.evaluate() {
                             Ok(new_store) => {
                                 current_store = new_store;
-                                println!("Inserted {n} fact(s) into {relation} and evaluated.");
+                                eprintln!("Inserted {n} fact(s) into {relation} and evaluated.");
                             }
                             Err(e) => eprintln!("Error: {e:#}"),
                         },
@@ -550,7 +707,7 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                                 match engine.evaluate() {
                                     Ok(new_store) => {
                                         current_store = new_store;
-                                        println!("Asserted.");
+                                        eprintln!("Asserted.");
                                     }
                                     Err(e) => eprintln!("Error: {e:#}"),
                                 }
@@ -572,12 +729,12 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                                 match engine.evaluate() {
                                     Ok(new_store) => {
                                         current_store = new_store;
-                                        println!("Retracted.");
+                                        eprintln!("Retracted.");
                                     }
                                     Err(e) => eprintln!("Error: {e:#}"),
                                 }
                             } else {
-                                println!("No matching fact found.");
+                                eprintln!("No matching fact found.");
                             }
                         }
                         Err(e) => eprintln!("Parse error: {e}"),
@@ -592,16 +749,21 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                             let matched = query::filter_tuples(rows, &q);
                             let pred = &q.predicate;
                             if matched.is_empty() {
-                                println!("No entries for '{pred}'.");
+                                eprintln!("No entries for '{pred}'.");
                             } else {
                                 let count = matched.len();
+                                let cols = column_keys(engine, pred);
                                 for tuple in matched {
-                                    let args: Vec<String> = tuple.iter().map(|v| {
-                                        if pretty { format_pretty(v) } else { v.to_string() }
-                                    }).collect();
-                                    println!("  {pred}({})", args.join(", "));
+                                    if format == OutputFormat::Ndjson {
+                                        println!("{}", ndjson_row(tuple, |i| cols.get(i).cloned()));
+                                    } else {
+                                        let args: Vec<String> = tuple.iter().map(|v| {
+                                            if format == OutputFormat::Pretty { format_pretty(v) } else { v.to_string() }
+                                        }).collect();
+                                        println!("  {pred}({})", args.join(", "));
+                                    }
                                 }
-                                println!("Found {} entries:", count);
+                                eprintln!("Found {} entries:", count);
                             }
                         }
                         Err(e) => eprintln!("Parse error: {e}"),
@@ -611,15 +773,20 @@ pub fn run(engine: &mut Engine, store: EvalStore) -> Result<()> {
                     let pred = line.split('/').next().unwrap_or(&line).trim();
                     let tuples = current_store.scan(pred);
                     if tuples.is_empty() {
-                        println!("No entries for '{pred}'.");
+                        eprintln!("No entries for '{pred}'.");
                     } else {
+                        let cols = column_keys(engine, pred);
                         for tuple in tuples {
-                            let args: Vec<String> = tuple.iter().map(|v| {
-                                if pretty { format_pretty(v) } else { v.to_string() }
-                            }).collect();
-                            println!("  {pred}({})", args.join(", "));
+                            if format == OutputFormat::Ndjson {
+                                println!("{}", ndjson_row(tuple, |i| cols.get(i).cloned()));
+                            } else {
+                                let args: Vec<String> = tuple.iter().map(|v| {
+                                    if format == OutputFormat::Pretty { format_pretty(v) } else { v.to_string() }
+                                }).collect();
+                                println!("  {pred}({})", args.join(", "));
+                            }
                         }
-                        println!("Found {} entries:", tuples.len());
+                        eprintln!("Found {} entries:", tuples.len());
                     }
                 }
             }
@@ -1301,4 +1468,33 @@ fn count_top_level_args(s: &str) -> usize {
         }
     }
     count
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::ndjson_row;
+    use mangle_common::Value;
+
+    #[test]
+    fn ndjson_row_uses_provided_keys() {
+        let tuple = vec![Value::String("alice".into()), Value::Name("/devs".into())];
+        let keys = ["Username", "Group"];
+        let line = ndjson_row(&tuple, |i| keys.get(i).map(|s| s.to_string()));
+        assert_eq!(line, r#"{"Username":"alice","Group":"/devs"}"#);
+    }
+
+    #[test]
+    fn ndjson_row_falls_back_to_positional_keys() {
+        let tuple = vec![Value::Number(1), Value::Number(2)];
+        // No keys supplied: positional c0, c1, ...
+        let line = ndjson_row(&tuple, |_| None);
+        assert_eq!(line, r#"{"c0":1,"c1":2}"#);
+    }
+
+    #[test]
+    fn ndjson_row_is_single_line() {
+        let tuple = vec![Value::String("a".into()), Value::String("b".into())];
+        let line = ndjson_row(&tuple, |_| None);
+        assert!(!line.contains('\n'));
+    }
 }

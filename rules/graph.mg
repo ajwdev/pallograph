@@ -33,6 +33,20 @@ graph_edge(SrcApiVersion, SrcKind, SrcNamespace, SrcName,
 
 # ---- reachable ----
 #
+Decl reachable(SrcApiVersion, SrcKind, SrcNamespace, SrcName,
+               DstApiVersion, DstKind, DstNamespace, DstName)
+  descr [
+    doc("Object graph reachability: Src reaches Dst via one or more relationship edges."),
+    arg(SrcApiVersion, "source object apiVersion"),
+    arg(SrcKind, "source object kind"),
+    arg(SrcNamespace, "source object namespace; empty for cluster-scoped"),
+    arg(SrcName, "source object name"),
+    arg(DstApiVersion, "destination object apiVersion"),
+    arg(DstKind, "destination object kind"),
+    arg(DstNamespace, "destination object namespace; empty for cluster-scoped"),
+    arg(DstName, "destination object name")
+  ].
+
 # Base case: a direct edge is reachable.
 reachable(SrcApiVersion, SrcKind, SrcNamespace, SrcName,
           DstApiVersion, DstKind, DstNamespace, DstName) :-

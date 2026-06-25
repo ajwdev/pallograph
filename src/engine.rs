@@ -32,6 +32,23 @@ impl EvalStore {
 
 }
 
+/// Documentation for a single relation column, derived from a `Decl`'s head
+/// argument names, `bound [...]` types, and `arg(Col, "...")` descr atoms.
+#[derive(Debug, Default, Clone)]
+pub struct ColumnDoc {
+    pub name: String,
+    pub ty: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Documentation for a relation, derived from its `Decl`. `description` comes
+/// from a `doc("...")` descr atom; `columns` is positional.
+#[derive(Debug, Default, Clone)]
+pub struct RelationDoc {
+    pub description: Option<String>,
+    pub columns: Vec<ColumnDoc>,
+}
+
 pub struct CompiledProgram {
     ir: Ir,
     // TODO We might not need this
@@ -54,6 +71,102 @@ impl CompiledProgram {
         }
 
         Ok(Self { ir, arena, strata })
+    }
+
+    /// Extract per-relation documentation from the compiled `Decl`s in the IR:
+    /// column names (from the decl head), types (from `bound [...]`), the
+    /// relation description (from a `doc("...")` descr atom), and per-column
+    /// descriptions (from `arg(Col, "...")` descr atoms).
+    pub fn relation_docs(&self) -> HashMap<String, RelationDoc> {
+        let mut docs = HashMap::new();
+        for inst in &self.ir.insts {
+            let Inst::Decl { atom, descr, bounds, .. } = inst else {
+                continue;
+            };
+            let Inst::Atom { predicate, args } = self.ir.get(*atom) else {
+                continue;
+            };
+            let rel_name = self.ir.resolve_name(*predicate).to_string();
+
+            // Column names from the decl head arguments.
+            let mut columns: Vec<ColumnDoc> = args
+                .iter()
+                .map(|a| ColumnDoc {
+                    name: match self.ir.get(*a) {
+                        Inst::Var(n) => self.ir.resolve_name(*n).to_string(),
+                        other => format!("{other:?}"),
+                    },
+                    ..Default::default()
+                })
+                .collect();
+
+            // Types from the first bound decl, applied positionally.
+            if let Some(first) = bounds.first()
+                && let Inst::BoundDecl { base_terms } = self.ir.get(*first)
+            {
+                for (col, term) in columns.iter_mut().zip(base_terms.iter()) {
+                    col.ty = Some(self.format_type(*term));
+                }
+            }
+
+            // Descriptions from descr atoms: doc(...) for the relation,
+            // arg(Col, "...") for individual columns.
+            let mut description = None;
+            for d in descr {
+                let Inst::Atom { predicate, args } = self.ir.get(*d) else {
+                    continue;
+                };
+                match self.ir.resolve_name(*predicate) {
+                    "doc" => {
+                        if let Some(text) = args.first().and_then(|a| self.string_of(*a)) {
+                            description = Some(text);
+                        }
+                    }
+                    "arg" => {
+                        if let (Some(col_name), Some(text)) = (
+                            args.first().and_then(|a| self.var_name_of(*a)),
+                            args.get(1).and_then(|a| self.string_of(*a)),
+                        ) && let Some(col) = columns.iter_mut().find(|c| c.name == col_name)
+                        {
+                            col.description = Some(text);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            docs.insert(rel_name, RelationDoc { description, columns });
+        }
+        docs
+    }
+
+    /// Resolve a string literal instruction to its value, if it is one.
+    fn string_of(&self, id: InstId) -> Option<String> {
+        match self.ir.get(id) {
+            Inst::String(s) => Some(self.ir.resolve_string(*s).to_string()),
+            _ => None,
+        }
+    }
+
+    /// Resolve a variable instruction to its name, if it is one.
+    fn var_name_of(&self, id: InstId) -> Option<String> {
+        match self.ir.get(id) {
+            Inst::Var(n) => Some(self.ir.resolve_name(*n).to_string()),
+            _ => None,
+        }
+    }
+
+    /// Render a type bound term: a plain name like `/string`, or a composite
+    /// like `fn:List<...>` rendered with its applied arguments.
+    fn format_type(&self, id: InstId) -> String {
+        match self.ir.get(id) {
+            Inst::Name(n) => self.ir.resolve_name(*n).to_string(),
+            Inst::ApplyFn { function, args } => {
+                let inner: Vec<String> = args.iter().map(|a| self.format_type(*a)).collect();
+                format!("{}<{}>", self.ir.resolve_name(*function), inner.join(", "))
+            }
+            other => format!("{other:?}"),
+        }
     }
 
     fn format_slice_name_ids(&self, vars: &[NameId]) -> String {
@@ -598,6 +711,12 @@ impl Engine {
 
     pub fn evaluate(&self) -> Result<EvalStore> {
         self.backend.evaluate(&self.edb, &self.rule_sources)
+    }
+
+    /// Per-relation documentation (descriptions + column types) extracted from
+    /// the compiled `Decl`s. Recomputed on demand; `::show` is infrequent.
+    pub fn relation_docs(&self) -> Result<HashMap<String, RelationDoc>> {
+        Ok(self.compile()?.relation_docs())
     }
 }
 

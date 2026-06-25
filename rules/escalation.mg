@@ -117,6 +117,13 @@ impersonatable_sa(P, SANs, SAName) :-
 # Because provenance records only the first (is_new) insertion, \why on any
 # controls_identity fact will show the shortest path to the target.
 
+Decl escalation_hop(Principal, Target)
+  descr [
+    doc("Single-step escalation: Principal can assume Target's identity via one mechanism."),
+    arg(Principal, "the principal performing the escalation"),
+    arg(Target, "the identity Principal can directly assume")
+  ].
+
 escalation_hop(P, Target) :-
     impersonatable_sa(P, SANs, SAName)
     |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
@@ -146,6 +153,13 @@ escalation_hop(P, Target) :-
 # Transitive closure over escalation_hop. The recursive rule extends by exactly
 # one escalation_hop (not controls_identity on both sides), preserving BFS order.
 
+Decl controls_identity(Principal, Target)
+  descr [
+    doc("Principal can assume Target's identity via one or more escalation hops (transitively closed)."),
+    arg(Principal, "the principal that gains control"),
+    arg(Target, "the identity Principal ultimately controls")
+  ].
+
 controls_identity(P, Target) :- escalation_hop(P, Target), P != Target.
 
 controls_identity(P, Target) :-
@@ -157,6 +171,17 @@ controls_identity(P, Target) :-
 # Permissions P gains via escalation, with the intermediate identity recorded.
 # Target is the identity P controls that holds the direct_perm. Wildcards
 # preserved as-is. Does not include P's own direct_perm.
+
+Decl indirect_perm(Principal, Namespace, ApiGroup, Resource, Verb, ViaIdentity)
+  descr [
+    doc("Permissions Principal gains through escalation, with the borrowed identity recorded."),
+    arg(Principal, "the principal that gains the permission"),
+    arg(Namespace, "namespace the grant applies in; empty for cluster-wide"),
+    arg(ApiGroup, "API group; * is a literal wildcard"),
+    arg(Resource, "resource; * is a literal wildcard"),
+    arg(Verb, "verb; * is a literal wildcard"),
+    arg(ViaIdentity, "the controlled identity that actually holds the grant")
+  ].
 
 indirect_perm(P, Ns, ApiGroup, Resource, Verb, Target) :-
     controls_identity(P, Target),
