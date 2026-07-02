@@ -1,0 +1,12 @@
+[package]
+name = "cel-z3"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+z3 = "0.12"
+cel = "0.14"
+thiserror = "1"
+
+[features]
+z3-static = ["z3/static-link-z3"]
