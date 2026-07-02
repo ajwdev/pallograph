@@ -7,6 +7,9 @@ license = "MIT OR Apache-2.0"
 [profile.release]
 debug = true # Keeps debug symbols without sacrificing release optimizations
 
+[workspace]
+members = ["crates/cel-z3"]
+
 [build-dependencies]
 mangle-ast    = "0.9.1"
 mangle-driver = "0.9.1"
@@ -38,6 +41,7 @@ differential-dataflow = "0.23.0"
 timely = "0.29.0"
 crossbeam-channel = "0.5"
 z3 = "0.12"
+cel-z3 = { path = "crates/cel-z3" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -53,4 +57,4 @@ name = "incremental"
 harness = false
 
 [features]
-z3-static = ["z3/static-link-z3"]
+z3-static = ["z3/static-link-z3", "cel-z3/z3-static"]
