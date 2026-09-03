@@ -86,9 +86,18 @@ perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",      "impersonate"
 perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",      "*").
 
 # ---- Escalation path helpers ----
+#
+# Each helper has two forms: namespace-scoped (Ns matches directly) and
+# cluster-wide (Ns=""). CRBs produce direct_perm with Ns="" which means
+# "all namespaces" in K8s, so the cluster-wide variants join against all
+# real namespaces where the target resource exists.
 
 token_accessible_sa(P, SANs, SAName) :-
     perm_sa_token_create(P, SANs),
+    serviceaccount(SANs, SAName, _).
+
+token_accessible_sa(P, SANs, SAName) :-
+    perm_sa_token_create(P, ""),
     serviceaccount(SANs, SAName, _).
 
 exec_reachable_sa(P, PodNs, SAName) :-
@@ -96,15 +105,31 @@ exec_reachable_sa(P, PodNs, SAName) :-
     pod_sa(PodNs, _, SAName).
 
 exec_reachable_sa(P, PodNs, SAName) :-
+    perm_pods_exec_create(P, ""),
+    pod_sa(PodNs, _, SAName).
+
+exec_reachable_sa(P, PodNs, SAName) :-
     perm_pods_attach_create(P, PodNs),
+    pod_sa(PodNs, _, SAName).
+
+exec_reachable_sa(P, PodNs, SAName) :-
+    perm_pods_attach_create(P, ""),
     pod_sa(PodNs, _, SAName).
 
 pod_creatable_sa(P, SANs, SAName) :-
     perm_pods_create(P, SANs),
     serviceaccount(SANs, SAName, _).
 
+pod_creatable_sa(P, SANs, SAName) :-
+    perm_pods_create(P, ""),
+    serviceaccount(SANs, SAName, _).
+
 impersonatable_sa(P, SANs, SAName) :-
     perm_sa_impersonate(P, SANs),
+    serviceaccount(SANs, SAName, _).
+
+impersonatable_sa(P, SANs, SAName) :-
+    perm_sa_impersonate(P, ""),
     serviceaccount(SANs, SAName, _).
 
 # ---- escalation_hop ----
