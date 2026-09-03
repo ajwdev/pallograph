@@ -336,10 +336,19 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 // Only split at newlines where parentheses are balanced and we're
                 // not inside a string, so that multi-line expressions (e.g. a fact
                 // argument that wraps across lines) are kept together.
+                // Only enter this branch when we have multiple commands to split;
+                // a single command with embedded newlines (e.g. a string that wraps
+                // across terminal lines) would loop forever here.
                 if line.contains('\n') {
-                    pending.extend(split_commands(&line));
-                    continue;
+                    let cmds = split_commands(&line);
+                    if cmds.len() > 1 {
+                        pending.extend(cmds);
+                        continue;
+                    }
+                    // Single command whose newlines are all inside strings
+                    // (e.g. terminal line-wrap during paste). Collapse them.
                 }
+                let line = collapse_string_newlines(&line);
                 rl.add_history_entry(&line)?;
                 // Rewrite snapshot->relation references to snapshot__relation before parsing.
                 let line = rewrite_snapshot_refs(&line);
@@ -936,6 +945,30 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
 /// Split a multi-line pasted string into individual commands, keeping lines
 /// together when a newline falls inside an unbalanced parenthesis or string.
+fn collapse_string_newlines(input: &str) -> String {
+    if !input.contains('\n') {
+        return input.to_string();
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                in_string = !in_string;
+                out.push('"');
+            }
+            '\n' if in_string => {
+                while chars.peek().map_or(false, |c| c.is_ascii_whitespace() && *c != '\n') {
+                    chars.next();
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 fn split_commands(input: &str) -> Vec<String> {
     let mut commands = Vec::new();
     let mut current = String::new();
