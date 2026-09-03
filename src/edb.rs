@@ -43,6 +43,7 @@ const CLUSTER_RESOURCES: &[(&str, &str, &str, &str)] = &[
         "ClusterRoleBinding",
         "clusterrolebindings",
     ),
+    ("karpenter.sh", "v1", "NodePool", "nodepools"),
 ];
 
 // ---- fact source abstraction ----
@@ -269,6 +270,9 @@ fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str
     }
     if kind == "ClusterRole" {
         extract_clusterrole_agg_selectors(store, &name, &obj.data);
+    }
+    if kind == "NodePool" {
+        extract_nodepool_data(store, &name, &obj.data);
     }
 }
 
@@ -534,6 +538,89 @@ fn extract_node_data(store: &mut MemStore, name: &str, data: &Json) {
                 Value::String(name.to_string()),
                 Value::String(resource.clone()),
                 Value::String(q),
+            ]);
+        }
+    }
+}
+
+fn extract_nodepool_data(store: &mut MemStore, name: &str, data: &Json) {
+    let template = match data.get("spec").and_then(|s| s.get("template")) {
+        Some(t) => t,
+        None => return,
+    };
+
+    // spec.template.metadata.labels → nodepool_label(Pool, Key, Value)
+    if let Some(labels) = template
+        .get("metadata")
+        .and_then(|m| m.get("labels"))
+        .and_then(|l| l.as_object())
+    {
+        for (key, val) in labels {
+            if let Json::String(v) = val {
+                store.add_fact("nodepool_label", vec![
+                    Value::String(name.to_string()),
+                    Value::String(key.clone()),
+                    Value::String(v.clone()),
+                ]);
+            }
+        }
+    }
+
+    let spec = match template.get("spec") {
+        Some(s) => s,
+        None => return,
+    };
+
+    // spec.template.spec.requirements → nodepool_requirement(Pool, Key, Operator, Value)
+    if let Some(reqs) = spec.get("requirements").and_then(|r| r.as_array()) {
+        for req in reqs {
+            let key = match req.get("key").and_then(|k| k.as_str()) {
+                Some(k) => k,
+                None => continue,
+            };
+            let operator = match req.get("operator").and_then(|o| o.as_str()) {
+                Some(o) => o,
+                None => continue,
+            };
+            match operator {
+                "In" | "NotIn" => {
+                    if let Some(values) = req.get("values").and_then(|v| v.as_array()) {
+                        for val in values {
+                            if let Some(v) = val.as_str() {
+                                store.add_fact("nodepool_requirement", vec![
+                                    Value::String(name.to_string()),
+                                    Value::String(key.to_string()),
+                                    Value::String(operator.to_string()),
+                                    Value::String(v.to_string()),
+                                ]);
+                            }
+                        }
+                    }
+                }
+                "Exists" | "DoesNotExist" => {
+                    store.add_fact("nodepool_requirement", vec![
+                        Value::String(name.to_string()),
+                        Value::String(key.to_string()),
+                        Value::String(operator.to_string()),
+                        Value::String(String::new()),
+                    ]);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // spec.template.spec.taints → nodepool_taint(Pool, Key, Value, Effect)
+    if let Some(taints) = spec.get("taints").and_then(|t| t.as_array()) {
+        for taint in taints {
+            let key = taint.get("key").and_then(|k| k.as_str()).unwrap_or("");
+            let value = taint.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            let effect = taint.get("effect").and_then(|e| e.as_str()).unwrap_or("");
+            store.add_fact("nodepool_taint", vec![
+                Value::String(name.to_string()),
+                Value::String(key.to_string()),
+                Value::String(value.to_string()),
+                Value::String(effect.to_string()),
             ]);
         }
     }

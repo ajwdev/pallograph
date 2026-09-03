@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-frontend
+  namespace: production
+spec:
+  serviceAccountName: default
+  nodeSelector:
+    kubernetes.io/arch: amd64
+    kubernetes.io/os: linux
+  containers:
+    - name: nginx
+      image: nginx:1.25
+---
+# This pod requires A100 GPUs, but the gpu NodePool only offers v100.
+# No NodePool can satisfy nvidia.com/gpu-type=a100 -- Z3 proves UNSAT.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: training-job
+  namespace: ml-team
+spec:
+  serviceAccountName: default
+  nodeSelector:
+    nvidia.com/gpu-type: a100
+    kubernetes.io/arch: amd64
+  containers:
+    - name: trainer
+      image: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+---
+# This pod requires Windows nodes, but all NodePools only offer linux.
+# Z3 proves no provisioned node can ever have kubernetes.io/os=windows.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: legacy-dotnet
+  namespace: default
+spec:
+  serviceAccountName: default
+  nodeSelector:
+    kubernetes.io/os: windows
+    kubernetes.io/arch: amd64
+  containers:
+    - name: app
+      image: mcr.microsoft.com/dotnet/aspnet:8.0
