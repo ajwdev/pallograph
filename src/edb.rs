@@ -1,7 +1,11 @@
+// Copyright (c) 2026 Andrew Williams
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use kube::api::{ApiResource, DynamicObject, ListParams};
+use kube::core::labels::Expression;
 use kube::{Api, Client, ResourceExt};
 use mangle_common::Value;
 use mangle_interpreter::MemStore;
@@ -304,6 +308,40 @@ fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Js
             Value::String(name.to_string()),
         ];
         emit_selector_requirements(store, owner, selector);
+    }
+}
+
+/// Build the EDB fact tuples for one selector requirement (a kube `Expression`)
+/// under `owner` (a 4-element [ApiVersion, Kind, Namespace, Name] slice),
+/// returning them rather than writing to a store so the caller can add them to a
+/// MemStore (load path) or assert/retract them on an Engine (REPL `::match`).
+///
+/// The fact shapes match those emitted by `emit_selector_requirements`:
+///   Equal        -> selector_match_label
+///   In           -> selector_expr_in     (one per value)
+///   NotIn        -> selector_expr_notin  (one per value)
+///   NotEqual     -> selector_expr_notin  (single value; NotEqual(k,v) == NotIn(k,{v}))
+///   Exists       -> selector_expr_exists
+///   DoesNotExist -> selector_expr_notexists
+pub fn expression_facts(owner: &[Value], expr: &Expression) -> Vec<(&'static str, Vec<Value>)> {
+    let fact = |rel: &'static str, extra: &[&str]| {
+        let mut args = owner.to_vec();
+        args.extend(extra.iter().map(|e| Value::String((*e).to_string())));
+        (rel, args)
+    };
+    match expr {
+        Expression::Equal(k, v) => vec![fact("selector_match_label", &[k, v])],
+        Expression::NotEqual(k, v) => vec![fact("selector_expr_notin", &[k, v])],
+        Expression::In(k, set) => set
+            .iter()
+            .map(|v| fact("selector_expr_in", &[k, v]))
+            .collect(),
+        Expression::NotIn(k, set) => set
+            .iter()
+            .map(|v| fact("selector_expr_notin", &[k, v]))
+            .collect(),
+        Expression::Exists(k) => vec![fact("selector_expr_exists", &[k])],
+        Expression::DoesNotExist(k) => vec![fact("selector_expr_notexists", &[k])],
     }
 }
 

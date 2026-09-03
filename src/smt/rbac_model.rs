@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Andrew Williams
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // RBAC model for Z3 using RecFuncDecl.
 //
 // Mangle provides the primitive IDB facts: role/binding relations,

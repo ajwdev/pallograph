@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Andrew Williams
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 #![feature(iter_intersperse)]
 
 mod config;
@@ -7,6 +10,7 @@ mod load;
 // mod op_printer;
 mod query;
 mod repl;
+mod selector;
 mod smt;
 pub mod snapshot;
 mod value;

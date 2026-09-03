@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Andrew Williams
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use mangle_ast::Arena;
 use mangle_driver::compile_units;
 

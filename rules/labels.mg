@@ -232,6 +232,10 @@ selector_any_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
 # A selector matches an object when it is a candidate pair and no requirement
 # of any type is unsatisfied. This is the primary exported predicate.
 #
+# This predicate is cross-Kind: it matches a selector against objects of every
+# Kind, which native Kubernetes does not do. For native-K8s single-Kind scoping,
+# see selector_matches_kind below.
+#
 # Args: (SelApiVersion, SelKind, SelNamespace, SelName,
 #        ObjApiVersion, ObjKind, ObjNamespace, ObjName)
 
@@ -241,3 +245,32 @@ selector_matches(SelApiVersion, SelKind, SelNamespace, SelName,
                       ObjApiVersion, ObjKind, ObjNamespace, ObjName),
     !selector_any_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
                               ObjApiVersion, ObjKind, ObjNamespace, ObjName).
+
+# ---- selector_matches_kind ----
+#
+# Native-Kubernetes-style scoped matching: restricts matches to a single target
+# Kind, the way a real selector is evaluated against one resource type. Built
+# directly on selector_matches/8, so all five requirement types and AND/OR
+# semantics are inherited unchanged.
+#
+# TargetApiVersion/TargetKind are bound by the caller and unified with the
+# object's type, so the Obj type positions can be left as wildcards at the call
+# site:
+#   selector_matches_kind("apps/v1", "Deployment", "ns", "dep", "v1", "Pod", _, _, _, _)
+#
+# Scoping to a Kind makes the cluster-scoped over-match of negative requirements
+# (e.g. a NotIn-only selector matching every Node and ClusterRole) structurally
+# impossible here, while NotIn-matches-all-objects-lacking-the-key within the
+# target Kind stays correct.
+#
+# Args: (SelApiVersion, SelKind, SelNamespace, SelName,
+#        TargetApiVersion, TargetKind,
+#        ObjApiVersion, ObjKind, ObjNamespace, ObjName)
+
+selector_matches_kind(SelApiVersion, SelKind, SelNamespace, SelName,
+                      TargetApiVersion, TargetKind,
+                      ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
+    selector_matches(SelApiVersion, SelKind, SelNamespace, SelName,
+                     ObjApiVersion, ObjKind, ObjNamespace, ObjName),
+    ObjApiVersion = TargetApiVersion,
+    ObjKind = TargetKind.

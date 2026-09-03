@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Andrew Williams
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use std::collections::HashSet;
 
 use z3::ast::{Ast, Bool};

@@ -2,6 +2,7 @@
 name = "pallograph"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [build-dependencies]
 mangle-ast    = { git = "https://codeberg.org/ajwdev/mangle-rs.git", branch = "ajw-backport-old-funcs" }

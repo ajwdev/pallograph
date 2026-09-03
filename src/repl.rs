@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Andrew Williams
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use std::collections::{BTreeMap, HashMap};
 use std::io::IsTerminal;
 
@@ -143,6 +146,8 @@ fn print_help() {
     println!("  \\show <rel...>                         — describe relations (columns, types, docs)");
     println!("  \\query <body>  / ?- <body>             — evaluate a one-shot conjunctive query");
     println!("  \\why <pred>(<args>...)                 — show derivation tree for a fact");
+    println!("  \\match <Kind> <ns> <selector>          — objects of <Kind> in <ns> matching a kubectl selector (ns \"\" = cluster-scoped)");
+    println!("  \\match_all <ns> <selector>             — objects of any Kind in <ns> matching a kubectl selector");
     println!();
     println!("EDB / Rules");
     println!("  +pred(arg1, arg2, ...).                — insert a ground fact and re-evaluate");
@@ -180,6 +185,108 @@ fn print_help() {
     println!();
     println!("  (legacy: ::cmd also accepted as alias for \\cmd)");
     println!();
+}
+
+/// Run a real kubectl-style label selector through the `labels.mg` engine and
+/// print the objects it matches. The selector is parsed into kube `Expression`s,
+/// asserted as synthetic `selector_*` facts under a query owner, evaluated, then
+/// retracted so the engine's EDB is left untouched (the same assert→query→retract
+/// path the `+`/`?-`/`-` commands expose). `kind = Some(k)` scopes to one Kind
+/// (`::match`); `None` matches any Kind (`::match_all`). `namespace` scopes the
+/// owner; "" targets cluster-scoped objects.
+fn run_match(
+    engine: &mut Engine,
+    kind: Option<&str>,
+    namespace: &str,
+    selector_str: &str,
+    format: OutputFormat,
+) {
+    let exprs = match crate::selector::parse_selector(selector_str) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Selector parse error: {e:#}");
+            return;
+        }
+    };
+
+    // Allow the cluster-scoped namespace to be typed as "" (and "demo" as a
+    // convenience); the REPL does not otherwise strip argument quotes.
+    let namespace = namespace.trim_matches('"');
+
+    let owner = vec![
+        Value::String("pallograph.dev/query".to_string()),
+        Value::String("Match".to_string()),
+        Value::String(namespace.to_string()),
+        Value::String("query".to_string()),
+    ];
+
+    // Build the synthetic selector facts and assert them on the engine.
+    let mut facts: Vec<(String, Vec<Value>)> = Vec::new();
+    for expr in &exprs {
+        for (rel, args) in crate::edb::expression_facts(&owner, expr) {
+            facts.push((rel.to_string(), args));
+        }
+    }
+    for (rel, args) in &facts {
+        engine.add_fact(rel.clone(), args.clone());
+    }
+
+    // Evaluate, then immediately retract the synthetic facts so the EDB is left
+    // exactly as it was (we never touch `current_store`).
+    let result = engine.evaluate();
+    for (rel, args) in &facts {
+        engine.retract_fact(rel, args);
+    }
+    let store = match result {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            return;
+        }
+    };
+
+    // selector_matches columns: 0 SelApiVersion, 1 SelKind, 2 SelNamespace,
+    // 3 SelName, 4 ObjApiVersion, 5 ObjKind, 6 ObjNamespace, 7 ObjName.
+    //
+    // Scope results to the requested namespace (ObjNamespace == namespace) so the
+    // command behaves like `kubectl -n <ns>`. Without this, labels.mg's Case 2
+    // (cluster-scoped pairing) would surface unrelated cluster-scoped objects for
+    // a namespaced query — visible with negative selectors, which match by
+    // absence. A namespace of "" therefore targets cluster-scoped objects only.
+    let ns_val = Value::String(namespace.to_string());
+    let mut matched: Vec<&Vec<Value>> = store
+        .scan("selector_matches")
+        .iter()
+        .filter(|row| row.len() == 8 && row[0..4] == owner[..])
+        .filter(|row| row[6] == ns_val)
+        .filter(|row| kind.map_or(true, |k| row[5] == Value::String(k.to_string())))
+        .collect();
+    matched.sort();
+
+    if matched.is_empty() {
+        eprintln!("No matches.");
+        return;
+    }
+    for row in &matched {
+        let obj = &row[4..8]; // ApiVersion, Kind, Namespace, Name
+        if format == OutputFormat::Ndjson {
+            let cols = ["apiVersion", "kind", "namespace", "name"];
+            println!("{}", ndjson_row(obj, |i| cols.get(i).map(|s| s.to_string())));
+        } else {
+            let parts: Vec<String> = obj
+                .iter()
+                .map(|v| {
+                    if format == OutputFormat::Pretty {
+                        format_pretty(v)
+                    } else {
+                        v.to_string()
+                    }
+                })
+                .collect();
+            println!("  {}", parts.join("/"));
+        }
+    }
+    eprintln!("Found {} match(es).", matched.len());
 }
 
 pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Result<()> {
@@ -738,6 +845,30 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             }
                         }
                         Err(e) => eprintln!("Parse error: {e}"),
+                    }
+                    continue;
+                }
+
+                // ::match <Kind> <namespace> <selector>  — scoped to one Kind
+                if let Some(rest) = line.strip_prefix("::match ") {
+                    let parts: Vec<&str> = rest.trim().splitn(3, char::is_whitespace).collect();
+                    match parts.as_slice() {
+                        [kind, namespace, selector] => {
+                            run_match(engine, Some(kind), namespace, selector, format);
+                        }
+                        _ => eprintln!("Usage: ::match <Kind> <namespace> <selector>  (namespace \"\" for cluster-scoped)"),
+                    }
+                    continue;
+                }
+
+                // ::match_all <namespace> <selector>  — any Kind
+                if let Some(rest) = line.strip_prefix("::match_all ") {
+                    let parts: Vec<&str> = rest.trim().splitn(2, char::is_whitespace).collect();
+                    match parts.as_slice() {
+                        [namespace, selector] => {
+                            run_match(engine, None, namespace, selector, format);
+                        }
+                        _ => eprintln!("Usage: ::match_all <namespace> <selector>"),
                     }
                     continue;
                 }
