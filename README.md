@@ -1,6 +1,7 @@
 # Pallograph
 
-An experiment in pairing Kubernetes controllers with Datalog and Z3.
+An experiment in pairing Kubernetes controllers with Datalog (Mangle) and Z3.
+Successor to [pallograph-ddlog](https://github.com/ajwdev/pallograph-ddlog).
 
 ## License
 
