@@ -318,7 +318,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
         let raw = if let Some(queued) = pending.pop_front() {
             Ok(queued)
         } else {
-            rl.readline("pallograph> ")
+            rl.readline("\x1b[1;31mpallograph>\x1b[0m ")
         };
         match raw {
             Ok(line) => {
