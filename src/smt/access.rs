@@ -346,6 +346,46 @@ impl<'ctx> SmtEncoder<'ctx> {
         violations
     }
 
+    /// Return all principals with a direct `can` entry matching (namespace, apigroup,
+    /// resource, verb), along with their relevant binding paths.
+    /// Used by `cluster-admin` and `reaches` output to show the direct-grant tier.
+    pub fn direct_violations(
+        &self,
+        namespace: &str,
+        apigroup: &str,
+        resource: &str,
+        verb: &str,
+    ) -> Vec<Violation> {
+        // entry covers query when the entry is "*" (grants all) or matches exactly.
+        // A query of "*" is only satisfied by an entry of "*"; a specific entry
+        // like "pods" does not cover a query of "*".
+        let wc = |entry: &str, query: &str| entry == "*" || entry == query;
+        let matching: Vec<String> = {
+            let mut seen = HashSet::new();
+            self.can_entries.get("")
+                .into_iter()
+                .flatten()
+                .filter(|(_, e_ns, e_ag, e_r, e_v)| {
+                    e_ns == namespace
+                        && wc(e_ag, apigroup)
+                        && wc(e_r, resource)
+                        && wc(e_v, verb)
+                })
+                .filter_map(|(p, ..)| if seen.insert(p.clone()) { Some(p.clone()) } else { None })
+                .collect()
+        };
+
+        matching
+            .into_iter()
+            .map(|p| {
+                // paths_for_principal with perm_filter + has_direct=true returns only
+                // the binding(s) that grant the queried permission — no via-chains.
+                let paths = self.paths_for_principal(&p, "", Some((namespace, apigroup, resource, verb)));
+                Violation { principal: p, namespace: namespace.to_string(), resource: resource.to_string(), verb: verb.to_string(), paths }
+            })
+            .collect()
+    }
+
     /// Return all binding/role paths that grant `principal` access, derived from
     /// the RBAC subject and roleref facts loaded by `assert_rbac_axioms`.
     /// For each `controls_identity(principal, target)` entry, also returns the
@@ -400,7 +440,7 @@ impl<'ctx> SmtEncoder<'ctx> {
         // Without a perm_filter (check_access_invariant mode): always show direct bindings.
         let Some((q_ns, q_ag, q_r, q_v)) = perm_filter else {
             let mut paths = Vec::new();
-            self.collect_binding_paths(&rb_bindings, &crb_bindings, vec![], &mut paths);
+            self.collect_binding_paths(&rb_bindings, &crb_bindings, vec![], None, &mut paths);
             return paths;
         };
 
@@ -418,9 +458,10 @@ impl<'ctx> SmtEncoder<'ctx> {
         let mut paths = Vec::new();
 
         // For principals with direct access, show their binding — it IS the explanation.
-        // Via-paths would be redundant noise.
+        // Via-paths would be redundant noise. Filter to only the binding(s) that grant
+        // the queried permission so irrelevant sibling bindings don't appear.
         if has_direct {
-            self.collect_binding_paths(&rb_bindings, &crb_bindings, vec![], &mut paths);
+            self.collect_binding_paths(&rb_bindings, &crb_bindings, vec![], perm_filter, &mut paths);
             return paths;
         }
 
@@ -509,7 +550,7 @@ impl<'ctx> SmtEncoder<'ctx> {
                 })
                 .unwrap_or_default();
 
-            self.collect_binding_paths(&target_rb, &target_crb, hops.clone(), &mut paths);
+            self.collect_binding_paths(&target_rb, &target_crb, hops.clone(), perm_filter, &mut paths);
         }
 
         paths
@@ -654,11 +695,47 @@ impl<'ctx> SmtEncoder<'ctx> {
         }
     }
 
+    /// Return true when a ClusterRole's permissions include at least one rule
+    /// that matches `(q_ag, q_r, q_v)` under wildcard semantics.
+    /// Semantics: the entry covers the query when `entry == "*"` (grants all)
+    /// or `entry == query` (exact match). A query of `"*"` is only covered by
+    /// an entry of `"*"` — a specific entry like `"pods"` does not cover `"*"`.
+    fn clusterrole_matches(&self, role_name: &str, q_ag: &str, q_r: &str, q_v: &str) -> bool {
+        use mangle_common::Value;
+        let wc = |entry: &str, query: &str| entry == "*" || entry == query;
+        self.facts.get("clusterrole_perm").is_some_and(|rows| {
+            rows.iter().any(|t| {
+                if let [Value::String(rn), Value::String(e_ag), Value::String(e_r), Value::String(e_v)] = t.as_slice() {
+                    rn == role_name && wc(e_ag, q_ag) && wc(e_r, q_r) && wc(e_v, q_v)
+                } else { false }
+            })
+        })
+    }
+
+    /// Return true when a Role's permissions (scoped to `role_ns`) include at
+    /// least one rule that matches `(q_ag, q_r, q_v)` under wildcard semantics.
+    fn role_matches(&self, role_ns: &str, role_name: &str, q_ag: &str, q_r: &str, q_v: &str) -> bool {
+        use mangle_common::Value;
+        let wc = |entry: &str, query: &str| entry == "*" || entry == query;
+        self.facts.get("role_perm").is_some_and(|rows| {
+            rows.iter().any(|t| {
+                // role_perm: (Namespace, RoleName, ApiGroup, Resource, Verb)
+                if let [Value::String(rns), Value::String(rn), Value::String(e_ag), Value::String(e_r), Value::String(e_v)] = t.as_slice() {
+                    rns == role_ns && rn == role_name && wc(e_ag, q_ag) && wc(e_r, q_r) && wc(e_v, q_v)
+                } else { false }
+            })
+        })
+    }
+
     fn collect_binding_paths(
         &self,
         rb_bindings: &HashSet<(String, String)>,
         crb_bindings: &HashSet<String>,
         hops: Vec<(String, String)>,
+        // When Some, only bindings whose referenced role grants the queried
+        // permission are included. Eliminates irrelevant bindings (e.g.
+        // leader-election Roles) from escalation path display.
+        perm_filter: Option<(&str, &str, &str, &str)>,
         out: &mut Vec<AccessPath>,
     ) {
         use mangle_common::Value;
@@ -667,6 +744,14 @@ impl<'ctx> SmtEncoder<'ctx> {
             for t in rows {
                 if let [Value::String(b_ns), Value::String(b_name), Value::String(ref_kind), Value::String(ref_name)] = t.as_slice() {
                     if rb_bindings.contains(&(b_ns.clone(), b_name.clone())) {
+                        if let Some((_, q_ag, q_r, q_v)) = perm_filter {
+                            let matches = if ref_kind == "Role" {
+                                self.role_matches(b_ns, ref_name, q_ag, q_r, q_v)
+                            } else {
+                                self.clusterrole_matches(ref_name, q_ag, q_r, q_v)
+                            };
+                            if !matches { continue; }
+                        }
                         out.push(AccessPath {
                             binding_kind: "RoleBinding",
                             binding_namespace: b_ns.clone(),
@@ -684,6 +769,9 @@ impl<'ctx> SmtEncoder<'ctx> {
             for t in rows {
                 if let [Value::String(b_name), Value::String(ref_name)] = t.as_slice() {
                     if crb_bindings.contains(b_name) {
+                        if let Some((_, q_ag, q_r, q_v)) = perm_filter {
+                            if !self.clusterrole_matches(ref_name, q_ag, q_r, q_v) { continue; }
+                        }
                         out.push(AccessPath {
                             binding_kind: "ClusterRoleBinding",
                             binding_namespace: String::new(),
@@ -694,6 +782,77 @@ impl<'ctx> SmtEncoder<'ctx> {
                         });
                     }
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use mangle_common::Value;
+    use mangle_interpreter::MemStore;
+
+    use super::super::SmtEncoder;
+    use crate::edb;
+    use crate::engine::{Engine, InterpreterBackend};
+
+    /// `testdata/` plus extra NDJSON manifests written to a throwaway directory.
+    fn load_engine_with(extra: &str) -> Engine {
+        let dir = std::env::temp_dir().join(format!("pallograph-access-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("extra.json"), extra).expect("write extra manifests");
+        let mut edb = MemStore::new();
+        let paths = vec!["testdata".to_string(), dir.to_string_lossy().into_owned()];
+        let loaded = edb::load_from_manifests(&mut edb, paths);
+        let _ = std::fs::remove_dir_all(&dir);
+        loaded.expect("load manifests");
+        Engine::new(edb, Path::new("rules"), Box::new(InterpreterBackend)).expect("engine")
+    }
+
+    #[test]
+    fn direct_violations_show_only_bindings_that_grant_the_permission() {
+        // admin@example.com already holds cluster-admin. Give it a second, unrelated
+        // binding (like a controller's leader-election Role) that grants nothing
+        // close to */*/*; it must not be shown as an explanation.
+        let eval = load_engine_with(concat!(
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"Role","metadata":{"name":"leader-election","namespace":"kube-system"},"rules":[{"apiGroups":["coordination.k8s.io"],"resources":["leases"],"verbs":["get","update"]}]}"#, "\n",
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"leader-election","namespace":"kube-system"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"leader-election"},"subjects":[{"kind":"User","name":"admin@example.com"}]}"#, "\n",
+        ))
+        .evaluate()
+        .expect("evaluate");
+        assert!(
+            eval.scan("rolebinding_roleref").iter().any(|t| t.contains(&Value::String("leader-election".into()))),
+            "fixture binding was not loaded"
+        );
+
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let mut enc = SmtEncoder::new(&ctx);
+        enc.assert_rbac_axioms(&eval);
+
+        let direct = enc.direct_violations("", "*", "*", "*");
+        let admin = direct
+            .iter()
+            .find(|v| v.principal == "admin@example.com")
+            .unwrap_or_else(|| panic!("admin@example.com missing from {:?}", direct.iter().map(|v| &v.principal).collect::<Vec<_>>()));
+        assert!(
+            admin.paths.iter().all(|p| p.role_name != "leader-election"),
+            "non-granting binding shown: {:?}",
+            admin.paths.iter().map(|p| (&p.binding_name, &p.role_name)).collect::<Vec<_>>()
+        );
+
+        // Every displayed binding, for every principal, references a granting role.
+        for v in &direct {
+            assert!(!v.paths.is_empty(), "{} has no explaining binding", v.principal);
+            for p in &v.paths {
+                let grants = if p.role_kind == "Role" {
+                    enc.role_matches(&p.binding_namespace, &p.role_name, "*", "*", "*")
+                } else {
+                    enc.clusterrole_matches(&p.role_name, "*", "*", "*")
+                };
+                assert!(grants, "{} shown via {} which does not grant */*/*", v.principal, p.role_name);
             }
         }
     }

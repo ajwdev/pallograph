@@ -15,6 +15,7 @@ pub mod diff;
 pub mod rbac_model;
 pub mod scheduling;
 
+#[derive(Clone)]
 pub struct AccessPath {
     pub binding_kind: &'static str,   // "RoleBinding" | "ClusterRoleBinding"
     pub binding_namespace: String,    // "" for ClusterRoleBinding
