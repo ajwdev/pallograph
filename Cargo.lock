@@ -940,7 +940,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 [[package]]
 name = "mangle-analysis"
 version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#aa3d41c7f8b1cebacd3e93a5080812cff09bd620"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#f885e75ed07ae26a03e2b804958dda71dcbc1e44"
 dependencies = [
  "anyhow",
  "googletest",
@@ -953,7 +953,7 @@ dependencies = [
 [[package]]
 name = "mangle-ast"
 version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#aa3d41c7f8b1cebacd3e93a5080812cff09bd620"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#f885e75ed07ae26a03e2b804958dda71dcbc1e44"
 dependencies = [
  "bumpalo",
  "googletest",
@@ -963,7 +963,7 @@ dependencies = [
 [[package]]
 name = "mangle-codegen"
 version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#aa3d41c7f8b1cebacd3e93a5080812cff09bd620"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#f885e75ed07ae26a03e2b804958dda71dcbc1e44"
 dependencies = [
  "anyhow",
  "mangle-analysis",
@@ -976,7 +976,7 @@ dependencies = [
 [[package]]
 name = "mangle-common"
 version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#aa3d41c7f8b1cebacd3e93a5080812cff09bd620"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#f885e75ed07ae26a03e2b804958dda71dcbc1e44"
 dependencies = [
  "anyhow",
  "mangle-ast",
@@ -986,7 +986,7 @@ dependencies = [
 [[package]]
 name = "mangle-driver"
 version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#aa3d41c7f8b1cebacd3e93a5080812cff09bd620"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#f885e75ed07ae26a03e2b804958dda71dcbc1e44"
 dependencies = [
  "anyhow",
  "mangle-analysis",
@@ -1001,7 +1001,7 @@ dependencies = [
 [[package]]
 name = "mangle-interpreter"
 version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#aa3d41c7f8b1cebacd3e93a5080812cff09bd620"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#f885e75ed07ae26a03e2b804958dda71dcbc1e44"
 dependencies = [
  "anyhow",
  "mangle-ast",
@@ -1012,12 +1012,12 @@ dependencies = [
 [[package]]
 name = "mangle-ir"
 version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#aa3d41c7f8b1cebacd3e93a5080812cff09bd620"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#f885e75ed07ae26a03e2b804958dda71dcbc1e44"
 
 [[package]]
 name = "mangle-parse"
 version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=ajw-backport-old-funcs#aa3d41c7f8b1cebacd3e93a5080812cff09bd620"
+source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#f885e75ed07ae26a03e2b804958dda71dcbc1e44"
 dependencies = [
  "anyhow",
  "googletest",

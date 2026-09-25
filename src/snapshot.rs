@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use mangle_common::{Store, Value};
-use mangle_interpreter::MemStore;
+use crate::engine::EdbStore;
 
 use crate::engine::EvalStore;
 
@@ -54,7 +54,7 @@ impl Snapshot {
             .unwrap_or_default()
     }
 
-    pub fn from_store(store: &MemStore, scope: Scope) -> Self {
+    pub fn from_store(store: &EdbStore, scope: Scope) -> Self {
         let mut relations = BTreeMap::new();
         let names: Vec<String> = match scope {
             Scope::All => store.relation_names(),
@@ -157,13 +157,13 @@ fn format_tuple(tuple: &[Value]) -> String {
 mod tests {
     use std::path::Path;
 
-    use mangle_interpreter::MemStore;
+    use crate::engine::EdbStore;
 
     use super::*;
     use crate::edb;
 
-    fn load_testdata() -> MemStore {
-        let mut store = MemStore::new();
+    fn load_testdata() -> EdbStore {
+        let mut store = EdbStore::new();
         edb::load_from_manifests(&mut store, vec!["testdata".to_string()]).expect("load testdata");
         store
     }

@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use mangle_interpreter::MemStore;
+use crate::engine::EdbStore;
 
 use engine::{Backend, DdBackend, Engine, InterpreterBackend};
 use repl::OutputFormat;
@@ -56,7 +56,7 @@ struct Cli {
     format: OutputFormat,
 }
 
-async fn load_datasource(edb: &mut MemStore, name: &str, ds: &config::Datasource) -> Result<()> {
+async fn load_datasource(edb: &mut EdbStore, name: &str, ds: &config::Datasource) -> Result<()> {
     use config::{ContentKind, SourceKind};
     match ds.source {
         SourceKind::K8s => {
@@ -110,9 +110,9 @@ async fn load_datasource(edb: &mut MemStore, name: &str, ds: &config::Datasource
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Load EDB facts into a staging MemStore.
+    // Load EDB facts into a staging EdbStore.
     // Priority: config file > testdata/ default.
-    let mut edb = MemStore::new();
+    let mut edb = EdbStore::new();
     match config::load_config(cli.config.as_deref())? {
         Some(cfg) => {
             let profile_name = cli.profile

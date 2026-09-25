@@ -8,8 +8,10 @@ use anyhow::{Context, Result, bail};
 use mangle_ast::Arena;
 use mangle_common::{Store, Value};
 use mangle_driver::compile_units;
-use mangle_interpreter::{Interpreter, MemStore, ProvenanceEntry};
+use mangle_interpreter::{IndexedMemStore, Interpreter, ProvenanceEntry};
 use mangle_ir::physical::{Condition, Constant, DataSource, Op, Operand};
+
+pub type EdbStore = IndexedMemStore;
 use mangle_ir::{Inst, InstId, Ir, NameId};
 
 const EDB_DECLS: &str = include_str!("../rules/00_edb_prelude.mg");
@@ -438,7 +440,7 @@ impl Backend for InterpreterBackend {
         let arena = Arena::new_with_global_interner();
         let (mut ir, stratified) = compile_units(&sources, &arena).context("compile rules")?;
 
-        let mut store = MemStore::new();
+        let mut store = EdbStore::new();
         for (rel, tuple) in edb {
             store.add_fact(rel, tuple.clone());
         }
@@ -616,7 +618,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(edb_store: MemStore, rules_dir: &Path, backend: Box<dyn Backend>) -> Result<Self> {
+    pub fn new(edb_store: EdbStore, rules_dir: &Path, backend: Box<dyn Backend>) -> Result<Self> {
         let rule_files =
             glob::glob(&rules_dir.join("*.mg").to_string_lossy()).context("glob rules")?;
 
@@ -674,7 +676,7 @@ impl Engine {
 
     /// Load facts from a FactSource through the k8s projection pipeline, appending to the EDB.
     pub fn populate_from(&mut self, source: &mut dyn crate::edb::FactSource) -> Result<()> {
-        let mut tmp = mangle_interpreter::MemStore::new();
+        let mut tmp = EdbStore::new();
         crate::edb::populate(&mut tmp, source)?;
         self.edb.extend(drain_store(tmp));
         Ok(())
@@ -723,8 +725,7 @@ impl Engine {
     }
 }
 
-/// Drain all facts from a MemStore into a Vec for later replay.
-fn drain_store(store: MemStore) -> Vec<(String, Vec<Value>)> {
+fn drain_store(store: EdbStore) -> Vec<(String, Vec<Value>)> {
     let mut out = Vec::new();
     for rel in store.relation_names() {
         let rel: String = rel;

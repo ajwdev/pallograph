@@ -140,7 +140,7 @@ mod tests {
     use std::path::Path;
 
     use mangle_common::Value;
-    use mangle_interpreter::MemStore;
+    use crate::engine::EdbStore;
 
     use crate::edb;
     use crate::engine::{Engine, InterpreterBackend};
@@ -148,7 +148,7 @@ mod tests {
     use super::super::SmtEncoder;
 
     fn load_engine() -> Engine {
-        let mut edb = MemStore::new();
+        let mut edb = EdbStore::new();
         edb::load_from_manifests(&mut edb, vec!["testdata".to_string()]).expect("load testdata");
         Engine::new(edb, Path::new("rules"), Box::new(InterpreterBackend)).expect("engine")
     }
@@ -173,12 +173,12 @@ mod tests {
     #[test]
     fn expansion_detects_new_binding() {
         let empty_snap = {
-            let store = MemStore::new();
+            let store = EdbStore::new();
             Snapshot::from_store(&store, Scope::All)
         };
 
         let after_snap = {
-            let mut store = MemStore::new();
+            let mut store = EdbStore::new();
             store.add_fact("direct_perm", vec![
                 Value::String("alice".into()),
                 Value::String("default".into()),
@@ -214,7 +214,7 @@ mod tests {
         // Tuple-level diff would falsely report GAINED pods/get.
         // The Z3 semantic check must return empty (the narrow grant is subsumed).
         let before_snap = {
-            let mut store = MemStore::new();
+            let mut store = EdbStore::new();
             store.add_fact("direct_perm", vec![
                 Value::String("alice".into()),
                 Value::String("default".into()),
@@ -226,7 +226,7 @@ mod tests {
         };
 
         let after_snap = {
-            let mut store = MemStore::new();
+            let mut store = EdbStore::new();
             // Same wildcard grant as before.
             store.add_fact("direct_perm", vec![
                 Value::String("alice".into()),

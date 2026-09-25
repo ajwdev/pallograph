@@ -3,7 +3,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use mangle_common::Value;
-use mangle_interpreter::MemStore;
+use crate::engine::EdbStore;
 use serde_json::Value as Json;
 
 use crate::engine::Engine;
@@ -29,10 +29,10 @@ pub fn read_source(source: &str) -> Result<Vec<u8>> {
     }
 }
 
-/// Load flat tuples from `source` into `relation` on a raw `MemStore`.
+/// Load flat tuples from `source` into `relation` on a raw `EdbStore`.
 /// Used at startup before the Engine is constructed. Arity is validated
 /// within the batch; cross-relation mismatches surface at evaluation time.
-pub fn load_tuples_into_store(store: &mut MemStore, relation: &str, source: &str) -> Result<usize> {
+pub fn load_tuples_into_store(store: &mut EdbStore, relation: &str, source: &str) -> Result<usize> {
     let bytes = read_source(source)?;
     let tuples = parse_tuples(&bytes)?;
     if let Some(arity) = tuples.first().map(|t| t.len()) {
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn load_via_shell() {
-        let store = mangle_interpreter::MemStore::new();
+        let store = EdbStore::new();
         let mut engine = Engine::new(
             store,
             std::path::Path::new("rules"),

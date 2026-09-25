@@ -8,7 +8,7 @@ use kube::api::{ApiResource, DynamicObject, ListParams};
 use kube::core::labels::Expression;
 use kube::{Api, Client, ResourceExt};
 use mangle_common::Value;
-use mangle_interpreter::MemStore;
+use crate::engine::EdbStore;
 use serde_json::Value as Json;
 
 use serde::Deserialize;
@@ -203,27 +203,27 @@ fn parse_k8s_json(bytes: &[u8]) -> Result<Vec<(DynamicObject, Option<(String, St
     Ok(objects)
 }
 
-pub fn populate(store: &mut MemStore, source: &mut dyn FactSource) -> Result<()> {
+pub fn populate(store: &mut EdbStore, source: &mut dyn FactSource) -> Result<()> {
     for (obj, type_hint) in source.k8s_objects()? {
         add_object(store, &obj, type_hint.as_ref().map(|(av, k)| (av.as_str(), k.as_str())));
     }
     Ok(())
 }
 
-pub fn load_from_manifests(store: &mut MemStore, paths: Vec<String>) -> Result<()> {
+pub fn load_from_manifests(store: &mut EdbStore, paths: Vec<String>) -> Result<()> {
     populate(store, &mut K8sManifestsSource { paths })
 }
 
-pub async fn load_from_cluster(store: &mut MemStore, client: Client) -> Result<()> {
+pub async fn load_from_cluster(store: &mut EdbStore, client: Client) -> Result<()> {
     let mut source = ClusterSource::fetch(client).await?;
     populate(store, &mut source)
 }
 
-pub fn load_k8s_from_command(store: &mut MemStore, command: &str) -> Result<()> {
+pub fn load_k8s_from_command(store: &mut EdbStore, command: &str) -> Result<()> {
     populate(store, &mut ShellSource { command: command.to_string() })
 }
 
-fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str, &str)>) {
+fn add_object(store: &mut EdbStore, obj: &DynamicObject, type_hint: Option<(&str, &str)>) {
     let (api_version, kind) = type_hint.unwrap_or_else(|| {
         obj.types
             .as_ref()
@@ -293,7 +293,7 @@ fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str
 /// no requirements, so selector_has_requirements is false and it matches nothing —
 /// fail-closed behavior. This is safer for security analysis than the K8s controller
 /// behavior (which treats an empty selector as "match all").
-fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Json) {
+fn extract_clusterrole_agg_selectors(store: &mut EdbStore, name: &str, data: &Json) {
     let selectors = data
         .get("aggregationRule")
         .and_then(|a| a.get("clusterRoleSelectors"))
@@ -314,7 +314,7 @@ fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Js
 /// Build the EDB fact tuples for one selector requirement (a kube `Expression`)
 /// under `owner` (a 4-element [ApiVersion, Kind, Namespace, Name] slice),
 /// returning them rather than writing to a store so the caller can add them to a
-/// MemStore (load path) or assert/retract them on an Engine (REPL `::match`).
+/// EdbStore (load path) or assert/retract them on an Engine (REPL `::match`).
 ///
 /// The fact shapes match those emitted by `emit_selector_requirements`:
 ///   Equal        -> selector_match_label
@@ -360,7 +360,7 @@ pub fn expression_facts(owner: &[Value], expr: &Expression) -> Vec<(&'static str
 /// These feed the selector_matches/8 engine in labels.mg, which implements
 /// AND semantics (all requirements within one selector must hold) via the
 /// *_unsatisfied negation pattern.
-fn emit_selector_requirements(store: &mut MemStore, owner: Vec<Value>, selector: &Json) {
+fn emit_selector_requirements(store: &mut EdbStore, owner: Vec<Value>, selector: &Json) {
     let match_labels = selector.get("matchLabels").and_then(|v| v.as_object());
     let match_exprs = selector.get("matchExpressions").and_then(|v| v.as_array());
 
@@ -435,7 +435,7 @@ fn emit_selector_requirements(store: &mut MemStore, owner: Vec<Value>, selector:
 }
 
 fn extract_labels_and_selectors(
-    store: &mut MemStore,
+    store: &mut EdbStore,
     api_version: &str,
     kind: &str,
     namespace: &str,
@@ -467,7 +467,7 @@ fn extract_labels_and_selectors(
     emit_selector_requirements(store, owner, selector);
 }
 
-fn extract_pod_scheduling(store: &mut MemStore, namespace: &str, name: &str, data: &Json) {
+fn extract_pod_scheduling(store: &mut EdbStore, namespace: &str, name: &str, data: &Json) {
     // spec.nodeSelector → pod_node_selector(Namespace, Name, Key, Value)
     if let Some(sel) = data.get("spec").and_then(|s| s.get("nodeSelector")).and_then(|s| s.as_object()) {
         for (key, val) in sel {
@@ -483,7 +483,7 @@ fn extract_pod_scheduling(store: &mut MemStore, namespace: &str, name: &str, dat
     }
 }
 
-fn extract_pod_anti_affinity(store: &mut MemStore, namespace: &str, name: &str, data: &Json) {
+fn extract_pod_anti_affinity(store: &mut EdbStore, namespace: &str, name: &str, data: &Json) {
     let terms = data
         .get("spec")
         .and_then(|s| s.get("affinity"))
@@ -521,7 +521,7 @@ fn extract_pod_anti_affinity(store: &mut MemStore, namespace: &str, name: &str, 
     }
 }
 
-fn extract_node_data(store: &mut MemStore, name: &str, data: &Json) {
+fn extract_node_data(store: &mut EdbStore, name: &str, data: &Json) {
     // status.allocatable → node_allocatable(Name, Resource, Quantity)
     // node_taint is derived via Mangle rules in base.mg using :list:member + :match_field.
     if let Some(alloc) = data.get("status").and_then(|s| s.get("allocatable")).and_then(|a| a.as_object()) {
@@ -546,14 +546,14 @@ mod tests {
     use serde_json::json;
     use std::path::Path;
 
-    fn engine_from_store(store: MemStore) -> Engine {
+    fn engine_from_store(store: EdbStore) -> Engine {
         Engine::new(store, Path::new("rules"), Box::new(InterpreterBackend))
             .expect("engine")
     }
 
     /// Construct and add a ClusterRole with explicit rules.
     fn add_clusterrole(
-        store: &mut MemStore,
+        store: &mut EdbStore,
         name: &str,
         labels: serde_json::Value,
         rules: serde_json::Value,
@@ -573,7 +573,7 @@ mod tests {
 
     /// Construct and add an aggregating ClusterRole (no direct rules, aggregationRule only).
     fn add_aggregating_clusterrole(
-        store: &mut MemStore,
+        store: &mut EdbStore,
         name: &str,
         selectors: serde_json::Value,
     ) {
@@ -610,7 +610,7 @@ mod tests {
     // AND semantics: all matchLabels within one selector must be satisfied.
     #[test]
     fn aggregation_and_semantics_within_selector() {
-        let mut store = MemStore::new();
+        let mut store = EdbStore::new();
 
         // One selector entry with two requirements: key-a=true AND key-b=true.
         add_aggregating_clusterrole(&mut store, "my-agg", json!([
@@ -640,7 +640,7 @@ mod tests {
     // OR semantics: separate selector entries are independent — either matching is enough.
     #[test]
     fn aggregation_or_semantics_across_selectors() {
-        let mut store = MemStore::new();
+        let mut store = EdbStore::new();
 
         add_aggregating_clusterrole(&mut store, "my-agg", json!([
             {"matchLabels": {"sel-a": "true"}},
@@ -668,7 +668,7 @@ mod tests {
     // matchExpressions / Exists: CR with the key present is aggregated, without is not.
     #[test]
     fn aggregation_match_expressions_exists() {
-        let mut store = MemStore::new();
+        let mut store = EdbStore::new();
 
         add_aggregating_clusterrole(&mut store, "my-agg", json!([
             {"matchExpressions": [{"key": "rbac.io/agg", "operator": "Exists"}]}
@@ -695,7 +695,7 @@ mod tests {
     // matchExpressions / In: only CRs whose label value is in the allowed set are aggregated.
     #[test]
     fn aggregation_match_expressions_in() {
-        let mut store = MemStore::new();
+        let mut store = EdbStore::new();
 
         add_aggregating_clusterrole(&mut store, "my-agg", json!([
             {"matchExpressions": [
@@ -727,7 +727,7 @@ mod tests {
     // has already written resolved rules into .rules.
     #[test]
     fn aggregation_idempotency_double_count() {
-        let mut store = MemStore::new();
+        let mut store = EdbStore::new();
 
         // Aggregator that also has the rule pre-populated (as on a live cluster).
         let obj: DynamicObject = serde_json::from_value(json!({
