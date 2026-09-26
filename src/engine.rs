@@ -786,6 +786,13 @@ mod tests {
 
         let mut failures: Vec<String> = Vec::new();
         for rel in &all_rels {
+            // Skip planner-internal temp relations (e.g. $temp_grp_0).
+            // The interpreter materialises these as a side-effect of GroupBy
+            // planning; the DD backend inlines them and never exposes them.
+            if rel.starts_with('$') {
+                continue;
+            }
+
             let mut interp_tuples = interp.scan(rel).to_vec();
             let mut dd_tuples = dd.scan(rel).to_vec();
             interp_tuples.sort();

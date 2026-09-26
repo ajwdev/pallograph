@@ -19,7 +19,7 @@
 //! to `Slot::Col(pos)` by looking up `pos = schema.index_of(name)`.
 
 use anyhow::{bail, Result};
-use mangle_ir::physical::{Condition, Constant, DataSource, Expr, Op, Operand};
+use mangle_ir::physical::{Aggregate, Condition, Constant, DataSource, Expr, Op, Operand};
 use mangle_ir::Ir;
 
 use crate::dd::value::{OrdF64, Val};
@@ -116,8 +116,24 @@ pub enum Step {
     /// column (0..n output rows per input row).
     IterateList { source_slot: Slot },
 
+    /// GroupBy / aggregation: group the current rows by `key_cols` and compute
+    /// one aggregate per entry.  Output schema = key columns ++ aggregate result
+    /// columns (in `aggregates` order).
+    Reduce { key_cols: Vec<usize>, aggregates: Vec<LoweredAggregate> },
+
     /// Final step: project the specified slots into the head relation's tuple.
     Insert { head_rel: String, proj: Vec<Slot> },
+}
+
+/// One lowered aggregate in a `Step::Reduce`.
+///
+/// The aggregate result column is appended to the output row after all group-key
+/// columns.  `arg_col` is the column index in the **pre-reduce** schema from which
+/// the aggregate argument is read; `None` for `fn:count` (no argument).
+#[derive(Debug, Clone)]
+pub struct LoweredAggregate {
+    pub func: String,
+    pub arg_col: Option<usize>,
 }
 
 /// The fully-lowered representation of one Mangle rule: a linear pipeline of
@@ -177,6 +193,23 @@ fn resolve_operand(operand: &Operand, ir: &Ir, schema: &[String]) -> Result<Slot
     }
 }
 
+/// Resolve a `DataSource` to `(rel_name, var_names)`.
+///
+/// `IndexLookup` is not emitted as a HashJoin source by the planner, so we
+/// `bail!` on it here.
+fn resolve_data_source(source: &DataSource, ir: &Ir) -> Result<(String, Vec<String>)> {
+    match source {
+        DataSource::Scan { relation, vars } | DataSource::ScanDelta { relation, vars } => {
+            let rel = ir.resolve_name(*relation).to_string();
+            let vars: Vec<_> = vars.iter().map(|v| ir.resolve_name(*v).to_string()).collect();
+            Ok((rel, vars))
+        }
+        DataSource::IndexLookup { .. } => {
+            bail!("IndexLookup as a HashJoin source is not supported")
+        }
+    }
+}
+
 /// Emit join steps for a DataSource encountered while `schema` is non-empty.
 fn emit_join(rel_name: String, vars: &[String], schema: &mut Vec<String>, steps: &mut Vec<Step>) {
     let mut left_key_cols = Vec::new();
@@ -196,6 +229,32 @@ fn emit_join(rel_name: String, vars: &[String], schema: &mut Vec<String>, steps:
     steps.push(Step::Join { rel: rel_name, left_key_cols, right_key_cols, right_new_cols });
 }
 
+/// Lower a single `Aggregate` to a `LoweredAggregate`.
+///
+/// The aggregate argument (if any) must reference a variable already in the
+/// pre-reduce schema; we record its column index.
+fn lower_aggregate(agg: &Aggregate, ir: &Ir, schema: &[String]) -> Result<LoweredAggregate> {
+    let func = ir.resolve_name(agg.func).to_string();
+    let arg_col = match agg.args.first() {
+        None => None,
+        Some(Operand::Var(name_id)) => {
+            let name = ir.resolve_name(*name_id);
+            Some(
+                schema
+                    .iter()
+                    .position(|v| v == name)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("aggregate arg `{name}` not in schema {:?}", schema)
+                    })?,
+            )
+        }
+        Some(Operand::Const(_)) => {
+            bail!("constant aggregate arguments are not supported")
+        }
+    };
+    Ok(LoweredAggregate { func, arg_col })
+}
+
 fn lower_inner(
     op: &Op,
     ir: &Ir,
@@ -205,21 +264,32 @@ fn lower_inner(
 ) -> Result<()> {
     match op {
         Op::Iterate { source, body } => {
-            // Resolve the data source into (rel_name, var_names).
-            let (rel_name, var_names): (String, Vec<String>) = match source {
+            match source {
                 DataSource::Scan { relation, vars } | DataSource::ScanDelta { relation, vars } => {
                     // ScanDelta is lowered as Scan — DD's iterate operator handles
                     // the delta bookkeeping internally when we use Variable in Phase 3.
-                    let rel = ir.resolve_name(*relation).to_string();
-                    let vars: Vec<_> = vars.iter().map(|v| ir.resolve_name(*v).to_string()).collect();
-                    (rel, vars)
+                    let rel_name = ir.resolve_name(*relation).to_string();
+                    let var_names: Vec<_> =
+                        vars.iter().map(|v| ir.resolve_name(*v).to_string()).collect();
+
+                    if schema.is_empty() {
+                        let n = var_names.len();
+                        schema.extend(var_names);
+                        steps.push(Step::Scan { rel: rel_name, n_cols: n });
+                    } else {
+                        emit_join(rel_name, &var_names, schema, steps);
+                    }
+
+                    lower_inner(body, ir, schema, steps, head_rel)
                 }
+
                 DataSource::IndexLookup { relation, col_idx: _, key, vars } => {
                     // Lower as a plain join on shared vars, which naturally enforces the
                     // key equality.  If the key is a constant (not already in schema),
                     // add a Cmp Eq filter afterward.
                     let rel = ir.resolve_name(*relation).to_string();
-                    let vars: Vec<_> = vars.iter().map(|v| ir.resolve_name(*v).to_string()).collect();
+                    let vars: Vec<_> =
+                        vars.iter().map(|v| ir.resolve_name(*v).to_string()).collect();
 
                     // Check if key is a Const that won't be covered by shared-var join.
                     // If so, we'll add a Cmp step after the join.
@@ -260,21 +330,9 @@ fn lower_inner(
                         // the extra rows will be filtered by downstream Cmp steps from the rule body.
                     }
 
-                    return Ok(());
+                    Ok(())
                 }
-            };
-
-            if schema.is_empty() {
-                // First scan: seed the pipeline.
-                let n = var_names.len();
-                schema.extend(var_names);
-                steps.push(Step::Scan { rel: rel_name, n_cols: n });
-            } else {
-                // Subsequent scan: join.
-                emit_join(rel_name, &var_names, schema, steps);
             }
-
-            lower_inner(body, ir, schema, steps, head_rel)
         }
 
         Op::Filter { cond, body } => {
@@ -393,13 +451,121 @@ fn lower_inner(
         Op::Nop => Ok(()),
 
         Op::Seq(ops) => {
+            // Each sub-op in a Seq is an independent pipeline (typically the
+            // planner emits Seq only for aggregation rules):
+            //
+            //   op[0]: scan premises, insert into $temp_grp_N  (materialise)
+            //   op[1]: GroupBy { source: $temp_grp_N, ... }    (aggregate)
+            //
+            // In DD we don't need an intermediate relation — we inline op[0]'s
+            // pipeline directly as the source for op[1], replacing op[1]'s
+            // opening Scan{$temp_grp_N} with op[0]'s accumulated steps.
+            //
+            // Each sub-op is lowered with a fresh schema so they don't
+            // cross-contaminate.  After inlining, the combined steps form a
+            // single pipeline: premises → (Insert acting as projection) →
+            // Reduce → Insert{final_head}.
+
+            let mut active_steps: Vec<Step> = Vec::new();
+            let mut active_head: String = String::new();
+
             for op in ops {
-                lower_inner(op, ir, schema, steps, head_rel)?;
+                let mut sub_schema: Vec<String> = Vec::new();
+                let mut sub_steps: Vec<Step> = Vec::new();
+                let mut sub_head: String = String::new();
+                lower_inner(op, ir, &mut sub_schema, &mut sub_steps, &mut sub_head)?;
+
+                if active_steps.is_empty() {
+                    // First sub-op: take its steps as-is.
+                    active_steps = sub_steps;
+                    active_head = sub_head;
+                } else {
+                    // Subsequent sub-op: expect it to start with Scan{prev_head}.
+                    // If so, inline by skipping that Scan and prepending the
+                    // accumulated steps.
+                    match sub_steps.first() {
+                        Some(Step::Scan { rel, .. }) if rel == &active_head => {
+                            active_steps.extend(sub_steps.into_iter().skip(1));
+                            active_head = sub_head;
+                        }
+                        other => bail!(
+                            "Op::Seq: expected Scan{{{active_head}}} as first step of sub-op, \
+                             got {other:?}"
+                        ),
+                    }
+                }
             }
+
+            *schema = Vec::new(); // schema is owned by sub-ops; caller sees empty
+            steps.extend(active_steps);
+            *head_rel = active_head;
             Ok(())
         }
 
-        Op::GroupBy { .. } => bail!("GroupBy not yet implemented in DD backend"),
-        Op::HashJoin { .. } => bail!("HashJoin not yet implemented in DD backend"),
+        // -----------------------------------------------------------------------
+        // HashJoin — a planner optimisation for 2-way equijoins (MANGLE_HASHJOIN=1).
+        // Semantically identical to nested-loop join; lower as Scan + Join.
+        // -----------------------------------------------------------------------
+        Op::HashJoin { build_source, probe_source, join_keys: _, body } => {
+            let (build_rel, build_vars) = resolve_data_source(build_source, ir)?;
+            let (probe_rel, probe_vars) = resolve_data_source(probe_source, ir)?;
+
+            // Seed from the build side.
+            let n = build_vars.len();
+            schema.extend(build_vars.clone());
+            steps.push(Step::Scan { rel: build_rel, n_cols: n });
+
+            // Join on the probe side — shared vars become keys automatically.
+            emit_join(probe_rel, &probe_vars, schema, steps);
+
+            lower_inner(body, ir, schema, steps, head_rel)
+        }
+
+        // -----------------------------------------------------------------------
+        // GroupBy — aggregation: group by keys, compute aggregates, continue body.
+        // -----------------------------------------------------------------------
+        Op::GroupBy { source, vars, keys, aggregates, body } => {
+            // Resolve the source relation and seed the schema.
+            let src_rel = ir.resolve_name(*source).to_string();
+            let var_names: Vec<String> =
+                vars.iter().map(|v| ir.resolve_name(*v).to_string()).collect();
+            let n = var_names.len();
+            schema.extend(var_names.clone());
+            steps.push(Step::Scan { rel: src_rel, n_cols: n });
+
+            // Resolve group-by key positions within the source schema.
+            let key_cols: Vec<usize> = keys
+                .iter()
+                .map(|k| {
+                    let name = ir.resolve_name(*k);
+                    schema
+                        .iter()
+                        .position(|v| v == name)
+                        .ok_or_else(|| anyhow::anyhow!("GroupBy key `{name}` not in schema"))
+                })
+                .collect::<Result<_>>()?;
+
+            // Lower each aggregate.
+            let lowered_aggs: Vec<LoweredAggregate> = aggregates
+                .iter()
+                .map(|agg| lower_aggregate(agg, ir, schema))
+                .collect::<Result<_>>()?;
+
+            // Emit the Reduce step.
+            steps.push(Step::Reduce { key_cols: key_cols.clone(), aggregates: lowered_aggs });
+
+            // Rewrite schema: key columns first, then one column per aggregate result.
+            // The body's Insert/Cmp steps will resolve against this new schema.
+            let mut new_schema: Vec<String> = key_cols
+                .iter()
+                .map(|&i| schema[i].clone())
+                .collect();
+            for agg in aggregates {
+                new_schema.push(ir.resolve_name(agg.var).to_string());
+            }
+            *schema = new_schema;
+
+            lower_inner(body, ir, schema, steps, head_rel)
+        }
     }
 }

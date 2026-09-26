@@ -13,8 +13,8 @@ use anyhow::{bail, Result};
 use differential_dataflow::VecCollection;
 use timely::progress::Timestamp;
 
-use crate::dd::lower::{CmpOp, LoweredRule, OwnedExpr, Slot, Step};
-use crate::dd::value::{CompoundKindMirror, Val, Row};
+use crate::dd::lower::{CmpOp, LoweredAggregate, LoweredRule, OwnedExpr, Slot, Step};
+use crate::dd::value::{CompoundKindMirror, OrdF64, Val, Row};
 
 // ---------------------------------------------------------------------------
 // Slot helper
@@ -101,6 +101,81 @@ fn eval_call_filter(func: &str, args: &[Slot], row: &Row) -> Result<bool> {
 }
 
 // ---------------------------------------------------------------------------
+// Aggregate evaluation (for Step::Reduce)
+// ---------------------------------------------------------------------------
+
+/// Evaluate one aggregate function over a DD reduce group.
+///
+/// `input: &[(&Row, isize)]` — each entry is a full pre-key row with its
+/// accumulated multiplicity (always positive in batch mode).
+///
+/// Mirrors the interpreter's `eval_aggregate` semantics exactly.
+fn eval_aggregate(agg: &LoweredAggregate, input: &[(&Row, isize)]) -> Val {
+    match agg.func.as_str() {
+        "fn:count" => {
+            let n: isize = input.iter().map(|(_, diff)| diff).sum();
+            Val::Number(n as i64)
+        }
+        "fn:sum" => {
+            let col = agg.arg_col.expect("fn:sum requires 1 argument");
+            let mut sum: i64 = 0;
+            for (row, diff) in input {
+                if let Val::Number(n) = row.0[col] {
+                    sum += n * (*diff as i64);
+                }
+            }
+            Val::Number(sum)
+        }
+        "fn:float:sum" => {
+            let col = agg.arg_col.expect("fn:float:sum requires 1 argument");
+            let mut sum: f64 = 0.0;
+            for (row, diff) in input {
+                let v = match row.0[col] {
+                    Val::Float(OrdF64(f)) => f,
+                    Val::Number(n) => n as f64,
+                    _ => 0.0,
+                };
+                sum += v * (*diff as f64);
+            }
+            Val::Float(OrdF64(sum))
+        }
+        "fn:max" => {
+            let col = agg.arg_col.expect("fn:max requires 1 argument");
+            input
+                .iter()
+                .map(|(row, _)| row.0[col].clone())
+                .max()
+                .expect("fn:max on empty group (DD guarantees non-empty)")
+        }
+        "fn:float:max" => {
+            let col = agg.arg_col.expect("fn:float:max requires 1 argument");
+            input
+                .iter()
+                .map(|(row, _)| row.0[col].clone())
+                .max()
+                .expect("fn:float:max on empty group (DD guarantees non-empty)")
+        }
+        "fn:min" => {
+            let col = agg.arg_col.expect("fn:min requires 1 argument");
+            input
+                .iter()
+                .map(|(row, _)| row.0[col].clone())
+                .min()
+                .expect("fn:min on empty group (DD guarantees non-empty)")
+        }
+        "fn:float:min" => {
+            let col = agg.arg_col.expect("fn:float:min requires 1 argument");
+            input
+                .iter()
+                .map(|(row, _)| row.0[col].clone())
+                .min()
+                .expect("fn:float:min on empty group (DD guarantees non-empty)")
+        }
+        other => panic!("unsupported aggregate function: {other}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main entry: build one rule into a Collection
 // ---------------------------------------------------------------------------
 
@@ -120,7 +195,7 @@ pub fn build_rule<'scope, T>(
     unit_coll: &VecCollection<'scope, T, Row>,
 ) -> Result<VecCollection<'scope, T, Row>>
 where
-    T: Timestamp + differential_dataflow::lattice::Lattice + 'static,
+    T: Timestamp + differential_dataflow::lattice::Lattice + Ord + 'static,
 {
     let mut curr: Option<VecCollection<'scope, T, Row>> = None;
 
@@ -305,6 +380,40 @@ where
                             .collect(),
                         _ => vec![],
                     }
+                }));
+            }
+
+            // ---------------------------------------------------------------
+            // Reduce — GroupBy aggregation via DD's `reduce` operator.
+            //
+            // We map the current collection to (key_Row, full_Row) keyed on
+            // `key_cols`, then reduce over each group to compute the aggregates.
+            // The output row is key ++ [agg_result ...] with multiplicity 1.
+            // ---------------------------------------------------------------
+            Step::Reduce { key_cols, aggregates } => {
+                let pipeline =
+                    curr.take().ok_or_else(|| anyhow::anyhow!("Reduce before Scan"))?;
+                let kc = key_cols.clone();
+                let aggs = aggregates.clone();
+
+                // Re-key as (key_Row, full_Row) so reduce can access the arg columns.
+                let keyed: VecCollection<'scope, T, (Row, Row)> = pipeline.map(move |row| {
+                    let key = Row(kc.iter().map(|&i| row.0[i].clone()).collect());
+                    (key, row)
+                });
+
+                // reduce: for each group compute aggregates and push V2 = Row(agg_vals).
+                // DD's reduce output is Collection<T, (K, V2), R2> = (key_Row, agg_Row).
+                let reduced: VecCollection<'scope, T, (Row, Row)> =
+                    keyed.reduce(move |_key, input: &[(&Row, isize)], output: &mut Vec<(Row, isize)>| {
+                        let agg_vals: Vec<Val> =
+                            aggs.iter().map(|a| eval_aggregate(a, input)).collect();
+                        output.push((Row(agg_vals), 1));
+                    });
+
+                // Flatten (key_Row, agg_Row) into a single Row: key ++ aggs.
+                curr = Some(reduced.map(|(key, aggs)| {
+                    Row(key.0.into_iter().chain(aggs.0).collect())
                 }));
             }
 
