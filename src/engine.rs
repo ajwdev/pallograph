@@ -12,7 +12,7 @@ use mangle_interpreter::{Interpreter, MemStore, ProvenanceEntry};
 use mangle_ir::physical::{Condition, Constant, DataSource, Op, Operand};
 use mangle_ir::{Inst, InstId, Ir, NameId};
 
-const EDB_DECLS: &str = include_str!("../rules/00_edb_prelude.mg");
+pub(crate) const EDB_DECLS: &str = include_str!("../rules/00_edb_prelude.mg");
 
 /// Snapshot of all derived facts after an evaluation pass.
 pub struct EvalStore {
