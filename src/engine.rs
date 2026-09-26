@@ -610,6 +610,10 @@ pub struct Engine {
     /// Lengths of edb and rule_sources after initial load — used by reset_session.
     edb_base_len: usize,
     rules_base_len: usize,
+    /// Persistent incremental DD session.  Present only when `enable_incremental`
+    /// has been called (DD backend + REPL mode).  When Some, fact mutations are
+    /// fed directly to the worker rather than waiting for a full recompute.
+    session: Option<crate::dd::session::DdSession>,
 }
 
 impl Engine {
@@ -635,12 +639,43 @@ impl Engine {
             backend,
             edb_base_len,
             rules_base_len,
+            session: None,
         })
+    }
+
+    /// Spawn a persistent DD session seeded with the current EDB + rules.
+    ///
+    /// After this call, fact mutations (`add_fact`/`retract_fact`) feed deltas
+    /// to the worker rather than accumulating for a full recompute.  Rule
+    /// changes still trigger a full worker rebuild.
+    pub fn enable_incremental(&mut self) -> Result<()> {
+        let session =
+            crate::dd::session::DdSession::spawn(&self.edb, &self.rule_sources)?;
+        self.session = Some(session);
+        Ok(())
+    }
+
+    /// Query a relation from the live DD session.
+    ///
+    /// Returns an empty vec if no session is active or the relation is unknown.
+    pub fn query_live(&self, rel: &str) -> Vec<Vec<Value>> {
+        match &self.session {
+            Some(s) => s.query(rel),
+            None => vec![],
+        }
+    }
+
+    /// True if a live incremental session is active.
+    pub fn has_session(&self) -> bool {
+        self.session.is_some()
     }
 
     /// Add a new rule (from the REPL) and mark state as dirty.
     pub fn add_rule(&mut self, rule: String) {
         self.rule_sources.push(rule);
+        if let Some(s) = &mut self.session {
+            let _ = s.rebuild(&self.edb, &self.rule_sources);
+        }
     }
 
     /// Return the arity of an existing EDB relation, or None if no facts exist yet.
@@ -652,6 +687,11 @@ impl Engine {
     pub fn add_fact(&mut self, relation: String, tuple: Vec<Value>) -> bool {
         let entry = (relation, tuple);
         if !self.edb.contains(&entry) {
+            if let Some(s) = &self.session {
+                let row = crate::dd::value::Row::from(entry.1.as_slice());
+                s.insert(entry.0.clone(), row);
+                s.commit();
+            }
             self.edb.push(entry);
             true
         } else {
@@ -662,6 +702,11 @@ impl Engine {
     /// Remove a ground fact from the EDB. Returns true if a matching fact was found and removed.
     pub fn retract_fact(&mut self, relation: &str, tuple: &[Value]) -> bool {
         if let Some(pos) = self.edb.iter().position(|(r, t)| r == relation && t.as_slice() == tuple) {
+            if let Some(s) = &self.session {
+                let row = crate::dd::value::Row::from(tuple);
+                s.retract(relation.to_string(), row);
+                s.commit();
+            }
             self.edb.remove(pos);
             true
         } else {
@@ -683,6 +728,9 @@ impl Engine {
     pub fn reset_session(&mut self) {
         self.edb.truncate(self.edb_base_len);
         self.rule_sources.truncate(self.rules_base_len);
+        if let Some(s) = &mut self.session {
+            let _ = s.rebuild(&self.edb, &self.rule_sources);
+        }
     }
 
     pub fn rules_len(&self) -> usize {
@@ -691,13 +739,18 @@ impl Engine {
 
     pub fn truncate_rules(&mut self, len: usize) {
         self.rule_sources.truncate(len);
+        if let Some(s) = &mut self.session {
+            let _ = s.rebuild(&self.edb, &self.rule_sources);
+        }
     }
-
 
     /// Remove all rules whose head matches `predicate`.
     pub fn remove_rules_for(&mut self, predicate: &str) {
         let prefix = format!("{predicate}(");
         self.rule_sources.retain(|s| !s.trim_start().starts_with(&prefix));
+        if let Some(s) = &mut self.session {
+            let _ = s.rebuild(&self.edb, &self.rule_sources);
+        }
     }
 
     pub fn compile(&self) -> Result<CompiledProgram> {

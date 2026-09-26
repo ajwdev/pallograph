@@ -788,16 +788,16 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                     }
                                     let removed = engine.retract_fact(&old_rel, &old_tuple);
                                     engine.add_fact(new_rel, new_tuple);
-                                    match engine.evaluate() {
-                                        Ok(new_store) => {
-                                            current_store = new_store;
-                                            if removed {
-                                                println!("Replaced.");
-                                            } else {
-                                                println!("Warning: old fact not found; new fact inserted.");
+                                    if engine.has_session() {
+                                        if removed { println!("Replaced."); } else { println!("Warning: old fact not found; new fact inserted."); }
+                                    } else {
+                                        match engine.evaluate() {
+                                            Ok(new_store) => {
+                                                current_store = new_store;
+                                                if removed { println!("Replaced."); } else { println!("Warning: old fact not found; new fact inserted."); }
                                             }
+                                            Err(e) => eprintln!("Error: {e:#}"),
                                         }
-                                        Err(e) => eprintln!("Error: {e:#}"),
                                     }
                                 }
                                 Err(e) => eprintln!("Parse error: {e}"),
@@ -820,12 +820,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 }
                             }
                             if engine.add_fact(rel, tuple) {
-                                match engine.evaluate() {
-                                    Ok(new_store) => {
-                                        current_store = new_store;
-                                        eprintln!("Asserted.");
+                                if engine.has_session() {
+                                    eprintln!("Asserted.");
+                                } else {
+                                    match engine.evaluate() {
+                                        Ok(new_store) => { current_store = new_store; eprintln!("Asserted."); }
+                                        Err(e) => eprintln!("Error: {e:#}"),
                                     }
-                                    Err(e) => eprintln!("Error: {e:#}"),
                                 }
                             } else {
                                 eprintln!("Fact already exists.");
@@ -842,12 +843,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     match parse_ground_tuple(inner) {
                         Ok((rel, tuple)) => {
                             if engine.retract_fact(&rel, &tuple) {
-                                match engine.evaluate() {
-                                    Ok(new_store) => {
-                                        current_store = new_store;
-                                        eprintln!("Retracted.");
+                                if engine.has_session() {
+                                    eprintln!("Retracted.");
+                                } else {
+                                    match engine.evaluate() {
+                                        Ok(new_store) => { current_store = new_store; eprintln!("Retracted."); }
+                                        Err(e) => eprintln!("Error: {e:#}"),
                                     }
-                                    Err(e) => eprintln!("Error: {e:#}"),
                                 }
                             } else {
                                 eprintln!("No matching fact found.");
@@ -885,7 +887,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 if line.contains('(') {
                     match query::parse_query(&line) {
                         Ok(q) => {
-                            let rows = current_store.scan(&q.predicate);
+                            let live: Vec<Vec<mangle_common::Value>>;
+                            let rows: &[Vec<mangle_common::Value>] = if engine.has_session() {
+                                live = engine.query_live(&q.predicate);
+                                &live
+                            } else {
+                                current_store.scan(&q.predicate)
+                            };
                             let matched = query::filter_tuples(rows, &q);
                             let pred = &q.predicate;
                             if matched.is_empty() {
@@ -911,7 +919,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 } else {
                     // Bare predicate name (with optional arity like pred/3 stripped)
                     let pred = line.split('/').next().unwrap_or(&line).trim();
-                    let tuples = current_store.scan(pred);
+                    let live: Vec<Vec<mangle_common::Value>>;
+                    let tuples: &[Vec<mangle_common::Value>] = if engine.has_session() {
+                        live = engine.query_live(pred);
+                        &live
+                    } else {
+                        current_store.scan(pred)
+                    };
                     if tuples.is_empty() {
                         eprintln!("No entries for '{pred}'.");
                     } else {

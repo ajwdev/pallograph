@@ -23,17 +23,20 @@
 //! Send + Sync + 'static` closure bound.  `crossbeam_channel::Receiver` is
 //! `Send + Sync` and its `try_recv` takes `&self`, so it works inside the closure.
 //!
-//! # Milestones
+//! # Query path (Milestone B)
 //!
-//! - **Milestone A** (current): sink is the existing `Arc<Mutex<HashMap<…>>>`.
-//!   The worker's `inspect_batch` callbacks update it incrementally (+diff / -diff).
-//!   REPL reads a relation by acquiring the mutex — no worker round-trip for queries.
-//!   This proves the persistent worker + delta feeding end-to-end.
+//! Output collections are arranged with `arrange_by_self()`, which writes all updates
+//! into a `TraceAgent` (a shared handle on the accumulated ordered log).  On a
+//! `Command::Query`, the worker cursors the relevant trace at the current frontier,
+//! sums the diffs, and returns all rows with a positive total count.
 //!
-//! - **Milestone B** (planned): replace sink with `arrange_by_self` + `TraceAgent`.
-//!   Queries become a `Command::Query` that the worker answers by cursoring the trace.
-//!   `TraceAgent` is `!Send`, so it cannot be moved to the REPL thread; it stays on
-//!   the worker thread and is accessed only via the channel.
+//! `TraceAgent` is `!Send` (it uses `Rc` internally), so it cannot be moved to the
+//! REPL thread.  All cursoring happens on the worker thread; the REPL receives only
+//! the finished `Vec<Vec<Value>>`.
+//!
+//! After each settled `Commit`, both the logical and physical compaction frontiers are
+//! advanced to the new epoch.  This collapses history so that memory stays bounded —
+//! we never need time-travel queries.
 //!
 //! # Shutdown safety
 //!
@@ -43,15 +46,17 @@
 //! sends `Command::Shutdown` first and waits for the ack before releasing the guard.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::Result;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use differential_dataflow::input::{Input, InputSession};
 use differential_dataflow::operators::iterate::VecVariable;
+use differential_dataflow::trace::{Cursor, TraceReader};
 use differential_dataflow::VecCollection;
 use mangle_common::Value;
 use timely::order::Product;
+use timely::progress::frontier::AntichainRef;
 use timely::communication::WorkerGuards;
 
 use super::build::build_rule;
@@ -88,8 +93,6 @@ pub(crate) struct DdSession {
     tx: Sender<Command>,
     /// Worker thread guard — `Some` until drop, when we Shutdown+join.
     guard: Option<WorkerGuards<()>>,
-    /// Milestone A query path: shared sink updated by inspect_batch.
-    sink: Arc<Mutex<HashMap<String, HashMap<Row, isize>>>>,
 }
 
 impl DdSession {
@@ -128,18 +131,9 @@ impl DdSession {
         let input_rels = Arc::new(input_rels);
         let edb_by_rel = Arc::new(edb_by_rel);
 
-        // -----------------------------------------------------------------------
-        // Shared sink (Milestone A query path) and command channel.
-        // -----------------------------------------------------------------------
-        let sink: Arc<Mutex<HashMap<String, HashMap<Row, isize>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
         // Unbounded so that Insert/Remove/Commit commands never block the sender
         // while the worker is busy stepping.
         let (tx, rx): (Sender<Command>, Receiver<Command>) = unbounded();
-
-        let sink_for_worker = Arc::clone(&sink);
-        let sink_for_session = Arc::clone(&sink);
 
         // -----------------------------------------------------------------------
         // Launch the worker.
@@ -162,14 +156,13 @@ impl DdSession {
             let input_rels = Arc::clone(&input_rels);
             let edb_by_rel = Arc::clone(&edb_by_rel);
 
-            let mut handles: HashMap<String, InputSession<u32, Row, isize>> = worker
+            let (mut handles, mut traces) = worker
                 .dataflow::<u32, _, _>({
-                    let sink = Arc::clone(&sink_for_worker);
                     let input_rels = Arc::clone(&input_rels);
                     let strata_work = strata_work;
                     let probe_ref = probe.clone();
 
-                    move |scope| -> HashMap<String, InputSession<u32, Row, isize>> {
+                    move |scope| {
                         let mut handles: HashMap<String, InputSession<u32, Row, isize>> =
                             HashMap::new();
                         let mut rels: HashMap<String, VecCollection<'_, u32, Row>> =
@@ -331,31 +324,20 @@ impl DdSession {
                             }
                         }
 
-                        // Attach incremental inspect_batch sinks.
+                        // Arrange each output collection.
                         //
-                        // Unlike the batch path (which rebuilds the dataflow from scratch
-                        // every time), here the sink is maintained incrementally: each
-                        // batch carries +diff / -diff counts that are applied in-place.
-                        // Entries that reach zero are removed to keep memory bounded.
+                        // `arrange_by_self` writes every update into an ordered, on-worker
+                        // trace (TraceAgent).  Queries cursor the trace at the current
+                        // frontier; compaction keeps memory bounded after each commit.
+                        // probe_with is called before arranging so the ProbeHandle
+                        // registers this edge in the dataflow graph.
+                        let mut traces = HashMap::new();
                         for (rel_name, coll) in rels {
-                            let sink = Arc::clone(&sink);
-                            let probe_ref = probe_ref.clone();
-                            coll.probe_with(&probe_ref)
-                                .inspect_batch(move |_t: &u32, batch: &[(Row, u32, isize)]| {
-                                    let mut s = sink.lock().unwrap();
-                                    let rel_map = s.entry(rel_name.clone()).or_default();
-                                    for (row, _t, diff) in batch {
-                                        let counter =
-                                            rel_map.entry(row.clone()).or_insert(0);
-                                        *counter += diff;
-                                        if *counter == 0 {
-                                            rel_map.remove(row);
-                                        }
-                                    }
-                                });
+                            let arranged = coll.probe_with(&probe_ref).arrange_by_self();
+                            traces.insert(rel_name, arranged.trace);
                         }
 
-                        handles
+                        (handles, traces)
                     }
                 });
 
@@ -405,21 +387,40 @@ impl DdSession {
                                 h.flush();
                             }
                             worker.step_or_park_while(None, || probe.less_than(&epoch));
+                            // Compact traces to the new frontier so history collapses
+                            // and memory stays bounded (we never do time-travel queries).
+                            let frontier_elems = [epoch];
+                            let frontier = AntichainRef::new(&frontier_elems);
+                            for trace in traces.values_mut() {
+                                trace.set_logical_compaction(frontier);
+                                trace.set_physical_compaction(frontier);
+                            }
                             let _ = ack.send(());
                         }
                         Command::Query { rel, resp } => {
-                            // Milestone A: read from the Arc<Mutex> sink directly.
-                            // Milestone B will cursor a TraceAgent here instead.
-                            let s = sink_for_worker.lock().unwrap();
-                            let rows: Vec<Vec<Value>> = s
-                                .get(&rel)
-                                .map(|map| {
-                                    map.iter()
-                                        .filter(|(_, count)| **count > 0)
-                                        .map(|(row, _)| row.clone().into_values())
-                                        .collect()
-                                })
-                                .unwrap_or_default();
+                            let rows: Vec<Vec<Value>> =
+                                if let Some(trace) = traces.get_mut(&rel) {
+                                    let (mut cursor, storage) = trace.cursor();
+                                    let mut result = Vec::new();
+                                    while cursor.key_valid(&storage) {
+                                        while cursor.val_valid(&storage) {
+                                            let mut count: isize = 0;
+                                            cursor.map_times(&storage, |_t, diff| {
+                                                count += diff;
+                                            });
+                                            if count > 0 {
+                                                result.push(
+                                                    cursor.key(&storage).clone().into_values(),
+                                                );
+                                            }
+                                            cursor.step_val(&storage);
+                                        }
+                                        cursor.step_key(&storage);
+                                    }
+                                    result
+                                } else {
+                                    vec![]
+                                };
                             let _ = resp.send(rows);
                         }
                         Command::Shutdown { ack } => {
@@ -442,7 +443,6 @@ impl DdSession {
         Ok(DdSession {
             tx,
             guard: Some(guard),
-            sink: sink_for_session,
         })
     }
 
