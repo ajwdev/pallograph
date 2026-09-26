@@ -34,8 +34,10 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use differential_dataflow::input::{Input, InputSession};
+use differential_dataflow::operators::iterate::VecVariable;
 use differential_dataflow::VecCollection;
 use mangle_ast::Arena;
+use timely::order::Product;
 use mangle_common::Value;
 use mangle_ir::Inst;
 
@@ -198,41 +200,159 @@ pub(crate) fn evaluate(
                             continue;
                         }
 
-                        // Collect rule outputs grouped by head relation.
-                        let mut by_head: HashMap<String, Vec<VecCollection<'_, u32, Row>>> =
-                            HashMap::new();
+                        if stratum.is_recursive {
+                            // Phase 3: recursive fixpoint via Variable / iterative scope.
+                            //
+                            // For each in-stratum head predicate, create a VecVariable
+                            // seeded with whatever base facts already exist (usually none),
+                            // build every rule (base + recursive) inside the iterative scope
+                            // using the live variable collections, bind each variable to
+                            // (current ∪ new_facts).distinct(), then leave results back to
+                            // the outer scope.
+                            //
+                            // `scope` is Copy, so it can be captured by the closure for
+                            // the .leave(scope) calls while also being the receiver of
+                            // .iterative().
+                            let head_preds: std::collections::HashSet<String> = stratum
+                                .rules
+                                .iter()
+                                .map(|r| r.head_rel.clone())
+                                .collect();
 
-                        for rule in &stratum.rules {
-                            match build_rule(rule, &rels, &unit_coll) {
-                                Ok(coll) => {
-                                    by_head
-                                        .entry(rule.head_rel.clone())
-                                        .or_default()
-                                        .push(coll);
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "dd: skipping rule for `{}`: {e}",
-                                        rule.head_rel
-                                    );
+                            let results: HashMap<String, VecCollection<'_, u32, Row>> =
+                                scope.iterative::<u64, _, _>(|nested| {
+                                    let summary = Product::new(Default::default(), 1u64);
+
+                                    // Enter all outer relations into the nested scope.
+                                    let mut inner_rels: HashMap<
+                                        String,
+                                        VecCollection<'_, Product<u32, u64>, Row>,
+                                    > = rels
+                                        .iter()
+                                        .map(|(k, v)| (k.clone(), v.clone().enter(nested)))
+                                        .collect();
+                                    let inner_unit = unit_coll.clone().enter(nested);
+
+                                    // Create a Variable for each in-stratum head predicate.
+                                    let mut vars: HashMap<
+                                        String,
+                                        VecVariable<'_, Product<u32, u64>, Row, isize>,
+                                    > = HashMap::new();
+                                    let mut var_colls: HashMap<
+                                        String,
+                                        VecCollection<'_, Product<u32, u64>, Row>,
+                                    > = HashMap::new();
+                                    for pred in &head_preds {
+                                        if let Some(seed) = inner_rels.remove(pred) {
+                                            // Pre-existing base in rels (unusual but handled).
+                                            let (var, coll) = VecVariable::new_from(seed, summary);
+                                            vars.insert(pred.clone(), var);
+                                            var_colls.insert(pred.clone(), coll);
+                                        } else {
+                                            // Fresh recursive predicate — start empty.
+                                            let (var, coll) = VecVariable::new(nested, summary);
+                                            vars.insert(pred.clone(), var);
+                                            var_colls.insert(pred.clone(), coll);
+                                        }
+                                    }
+                                    // Expose the live variable collections for rules to scan.
+                                    for (pred, coll) in &var_colls {
+                                        inner_rels.insert(pred.clone(), coll.clone());
+                                    }
+
+                                    // Build all rules (base + recursive) against inner_rels.
+                                    let mut by_head: HashMap<
+                                        String,
+                                        Vec<VecCollection<'_, Product<u32, u64>, Row>>,
+                                    > = HashMap::new();
+                                    for rule in &stratum.rules {
+                                        match build_rule(rule, &inner_rels, &inner_unit) {
+                                            Ok(coll) => {
+                                                by_head
+                                                    .entry(rule.head_rel.clone())
+                                                    .or_default()
+                                                    .push(coll);
+                                            }
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "dd(recursive): skipping rule for `{}`: {e}",
+                                                    rule.head_rel
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    // Bind each Variable to (current ∪ new_facts).distinct()
+                                    // and leave results back to the outer scope.
+                                    let mut out: HashMap<String, VecCollection<'_, u32, Row>> =
+                                        HashMap::new();
+                                    for (pred, var) in vars {
+                                        let curr = var_colls.remove(&pred).unwrap();
+                                        let full = match by_head.remove(&pred) {
+                                            Some(colls) => {
+                                                let new_facts = colls
+                                                    .into_iter()
+                                                    .reduce(|a, b| a.concat(b))
+                                                    .unwrap();
+                                                curr.concat(new_facts).distinct()
+                                            }
+                                            None => curr.distinct(),
+                                        };
+                                        var.set(full.clone());
+                                        out.insert(pred, full.leave(scope));
+                                    }
+                                    out
+                                });
+
+                            // Merge recursive results into rels.
+                            for (pred, coll) in results {
+                                match rels.entry(pred) {
+                                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                                        let old = e.get().clone();
+                                        *e.get_mut() = old.concat(coll).distinct();
+                                    }
+                                    std::collections::hash_map::Entry::Vacant(e) => {
+                                        e.insert(coll);
+                                    }
                                 }
                             }
-                        }
+                        } else {
+                            // Phase 1/2: non-recursive strata — single pass.
+                            let mut by_head: HashMap<String, Vec<VecCollection<'_, u32, Row>>> =
+                                HashMap::new();
 
-                        // Concat + distinct per head relation, merge into rels.
-                        for (head_rel, colls) in by_head {
-                            let idb = colls
-                                .into_iter()
-                                .reduce(|a, b| a.concat(b))
-                                .unwrap()
-                                .distinct();
-                            match rels.entry(head_rel) {
-                                std::collections::hash_map::Entry::Occupied(mut e) => {
-                                    let old = e.get().clone();
-                                    *e.get_mut() = old.concat(idb).distinct();
+                            for rule in &stratum.rules {
+                                match build_rule(rule, &rels, &unit_coll) {
+                                    Ok(coll) => {
+                                        by_head
+                                            .entry(rule.head_rel.clone())
+                                            .or_default()
+                                            .push(coll);
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "dd: skipping rule for `{}`: {e}",
+                                            rule.head_rel
+                                        );
+                                    }
                                 }
-                                std::collections::hash_map::Entry::Vacant(e) => {
-                                    e.insert(idb);
+                            }
+
+                            // Concat + distinct per head relation, merge into rels.
+                            for (head_rel, colls) in by_head {
+                                let idb = colls
+                                    .into_iter()
+                                    .reduce(|a, b| a.concat(b))
+                                    .unwrap()
+                                    .distinct();
+                                match rels.entry(head_rel) {
+                                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                                        let old = e.get().clone();
+                                        *e.get_mut() = old.concat(idb).distinct();
+                                    }
+                                    std::collections::hash_map::Entry::Vacant(e) => {
+                                        e.insert(idb);
+                                    }
                                 }
                             }
                         }
