@@ -33,6 +33,7 @@ tokio       = { version = "1", features = ["rt-multi-thread", "macros"] }
 self_cell = "1.2.2"
 differential-dataflow = "0.23.0"
 timely = "0.29.0"
+crossbeam-channel = "0.5"
 z3 = "0.12"
 
 [features]
