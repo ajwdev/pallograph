@@ -4,6 +4,7 @@
 #![feature(iter_intersperse)]
 
 mod config;
+mod dd;
 mod edb;
 mod engine;
 mod load;

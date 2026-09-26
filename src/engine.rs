@@ -417,12 +417,9 @@ pub trait Backend {
 pub struct DdBackend;
 
 impl Backend for DdBackend {
-    fn evaluate(
-        &self,
-        _edb: &[(String, Vec<Value>)],
-        _rule_sources: &[String],
-    ) -> Result<EvalStore> {
-        bail!("DD backend not yet implemented")
+    fn evaluate(&self, edb: &[(String, Vec<Value>)], rule_sources: &[String]) -> Result<EvalStore> {
+        let facts = crate::dd::evaluate(edb, rule_sources)?;
+        Ok(EvalStore { facts, provenance: vec![] })
     }
 }
 
