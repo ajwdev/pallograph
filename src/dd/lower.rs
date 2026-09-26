@@ -129,12 +129,13 @@ pub enum Step {
 /// One lowered aggregate in a `Step::Reduce`.
 ///
 /// The aggregate result column is appended to the output row after all group-key
-/// columns.  `arg_col` is the column index in the **pre-reduce** schema from which
-/// the aggregate argument is read; `None` for `fn:count` (no argument).
+/// columns.  `arg_slot` is the pre-reduce source of the aggregate argument:
+/// `Slot::Col(i)` for a variable, `Slot::Const(v)` for a literal, `None` for
+/// zero-argument aggregates like `fn:count`.
 #[derive(Debug, Clone)]
 pub struct LoweredAggregate {
     pub func: String,
-    pub arg_col: Option<usize>,
+    pub arg_slot: Option<Slot>,
 }
 
 /// The fully-lowered representation of one Mangle rule: a linear pipeline of
@@ -171,6 +172,17 @@ pub fn lower_op(op: &Op, ir: &Ir) -> Result<LoweredRule> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+fn resolve_constant(c: &Constant, ir: &Ir) -> Val {
+    match c {
+        Constant::Number(n) => Val::Number(*n),
+        Constant::Float(f) => Val::Float(OrdF64(*f)),
+        Constant::String(sid) => Val::String(ir.resolve_string(*sid).to_string()),
+        Constant::Name(nid) => Val::Name(ir.resolve_name(*nid).to_string()),
+        Constant::Time(t) => Val::Time(*t),
+        Constant::Duration(d) => Val::Duration(*d),
+    }
+}
+
 fn resolve_operand(operand: &Operand, ir: &Ir, schema: &[String]) -> Result<Slot> {
     match operand {
         Operand::Var(name_id) => {
@@ -180,17 +192,7 @@ fn resolve_operand(operand: &Operand, ir: &Ir, schema: &[String]) -> Result<Slot
                 None => bail!("variable `{}` not in schema {:?}", name, schema),
             }
         }
-        Operand::Const(c) => {
-            let val = match c {
-                Constant::Number(n) => Val::Number(*n),
-                Constant::Float(f) => Val::Float(OrdF64(*f)),
-                Constant::String(sid) => Val::String(ir.resolve_string(*sid).to_string()),
-                Constant::Name(nid) => Val::Name(ir.resolve_name(*nid).to_string()),
-                Constant::Time(t) => Val::Time(*t),
-                Constant::Duration(d) => Val::Duration(*d),
-            };
-            Ok(Slot::Const(val))
-        }
+        Operand::Const(c) => Ok(Slot::Const(resolve_constant(c, ir))),
     }
 }
 
@@ -230,30 +232,21 @@ fn emit_join(rel_name: String, vars: &[String], schema: &mut Vec<String>, steps:
     steps.push(Step::Join { rel: rel_name, left_key_cols, right_key_cols, right_new_cols });
 }
 
-/// Lower a single `Aggregate` to a `LoweredAggregate`.
-///
-/// The aggregate argument (if any) must reference a variable already in the
-/// pre-reduce schema; we record its column index.
 fn lower_aggregate(agg: &Aggregate, ir: &Ir, schema: &[String]) -> Result<LoweredAggregate> {
     let func = ir.resolve_name(agg.func).to_string();
-    let arg_col = match agg.args.first() {
+    let arg_slot = match agg.args.first() {
         None => None,
         Some(Operand::Var(name_id)) => {
             let name = ir.resolve_name(*name_id);
-            Some(
-                schema
-                    .iter()
-                    .position(|v| v == name)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("aggregate arg `{name}` not in schema {:?}", schema)
-                    })?,
-            )
+            let col = schema
+                .iter()
+                .position(|v| v == name)
+                .ok_or_else(|| anyhow::anyhow!("aggregate arg `{name}` not in schema {schema:?}"))?;
+            Some(Slot::Col(col))
         }
-        Some(Operand::Const(_)) => {
-            bail!("constant aggregate arguments are not supported")
-        }
+        Some(Operand::Const(c)) => Some(Slot::Const(resolve_constant(c, ir))),
     };
-    Ok(LoweredAggregate { func, arg_col })
+    Ok(LoweredAggregate { func, arg_slot })
 }
 
 fn lower_inner(
@@ -370,15 +363,7 @@ fn lower_inner(
                                 // Anonymous/wildcard var (not in schema) → no constraint.
                             }
                             Operand::Const(c) => {
-                                let val = match c {
-                                    mangle_ir::physical::Constant::Number(n) => Val::Number(*n),
-                                    mangle_ir::physical::Constant::Float(f) => Val::Float(crate::dd::value::OrdF64(*f)),
-                                    mangle_ir::physical::Constant::String(sid) => Val::String(ir.resolve_string(*sid).to_string()),
-                                    mangle_ir::physical::Constant::Name(nid) => Val::Name(ir.resolve_name(*nid).to_string()),
-                                    mangle_ir::physical::Constant::Time(t) => Val::Time(*t),
-                                    mangle_ir::physical::Constant::Duration(d) => Val::Duration(*d),
-                                };
-                                const_filters.push((right_col, val));
+                                const_filters.push((right_col, resolve_constant(c, ir)));
                             }
                         }
                     }
@@ -476,9 +461,10 @@ fn lower_inner(
                     active_steps = sub_steps;
                     active_head = sub_head;
                 } else {
-                    // Subsequent sub-op: expect it to start with Scan{prev_head}.
-                    // If so, inline by skipping that Scan and prepending the
-                    // accumulated steps.
+                    // Subsequent sub-op must start with Scan{prev_head} — that's
+                    // the temp-relation read we're inlining away.  If the planner
+                    // ever emits a different Seq shape (e.g. a future optimisation),
+                    // we want a loud failure rather than silently wrong results.
                     match sub_steps.first() {
                         Some(Step::Scan { rel, .. }) if rel == &active_head => {
                             active_steps.extend(sub_steps.into_iter().skip(1));

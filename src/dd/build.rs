@@ -108,26 +108,28 @@ fn eval_call_filter(func: &str, args: &[Slot], row: &Row) -> Result<bool> {
 ///
 /// Mirrors the interpreter's `eval_aggregate` semantics exactly.
 fn eval_aggregate(agg: &LoweredAggregate, input: &[(&Row, isize)]) -> Val {
+    // Helper: read the aggregate argument from a row (Col index or Const value).
+    let arg = |row: &Row| -> Val {
+        slot_val(agg.arg_slot.as_ref().expect("aggregate requires 1 argument"), row)
+    };
     match agg.func.as_str() {
         "fn:count" => {
             let n: isize = input.iter().map(|(_, diff)| diff).sum();
             Val::Number(n as i64)
         }
         "fn:sum" => {
-            let col = agg.arg_col.expect("fn:sum requires 1 argument");
             let mut sum: i64 = 0;
             for (row, diff) in input {
-                if let Val::Number(n) = row.0[col] {
+                if let Val::Number(n) = arg(row) {
                     sum += n * (*diff as i64);
                 }
             }
             Val::Number(sum)
         }
         "fn:float:sum" => {
-            let col = agg.arg_col.expect("fn:float:sum requires 1 argument");
             let mut sum: f64 = 0.0;
             for (row, diff) in input {
-                let v = match row.0[col] {
+                let v = match arg(row) {
                     Val::Float(OrdF64(f)) => f,
                     Val::Number(n) => n as f64,
                     _ => 0.0,
@@ -136,44 +138,31 @@ fn eval_aggregate(agg: &LoweredAggregate, input: &[(&Row, isize)]) -> Val {
             }
             Val::Float(OrdF64(sum))
         }
-        "fn:max" => {
-            let col = agg.arg_col.expect("fn:max requires 1 argument");
-            input
-                .iter()
-                .map(|(row, _)| row.0[col].clone())
-                .max()
-                .expect("fn:max on empty group (DD guarantees non-empty)")
-        }
-        "fn:float:max" => {
-            let col = agg.arg_col.expect("fn:float:max requires 1 argument");
-            input
-                .iter()
-                .map(|(row, _)| row.0[col].clone())
-                .max()
-                .expect("fn:float:max on empty group (DD guarantees non-empty)")
-        }
-        "fn:min" => {
-            let col = agg.arg_col.expect("fn:min requires 1 argument");
-            input
-                .iter()
-                .map(|(row, _)| row.0[col].clone())
-                .min()
-                .expect("fn:min on empty group (DD guarantees non-empty)")
-        }
-        "fn:float:min" => {
-            let col = agg.arg_col.expect("fn:float:min requires 1 argument");
-            input
-                .iter()
-                .map(|(row, _)| row.0[col].clone())
-                .min()
-                .expect("fn:float:min on empty group (DD guarantees non-empty)")
-        }
+        "fn:max" => input
+            .iter()
+            .map(|(row, _)| arg(row))
+            .max()
+            .expect("fn:max on empty group (DD guarantees non-empty)"),
+        "fn:float:max" => input
+            .iter()
+            .map(|(row, _)| arg(row))
+            .max()
+            .expect("fn:float:max on empty group (DD guarantees non-empty)"),
+        "fn:min" => input
+            .iter()
+            .map(|(row, _)| arg(row))
+            .min()
+            .expect("fn:min on empty group (DD guarantees non-empty)"),
+        "fn:float:min" => input
+            .iter()
+            .map(|(row, _)| arg(row))
+            .min()
+            .expect("fn:float:min on empty group (DD guarantees non-empty)"),
         "fn:collect" | "fn:collect_distinct" => {
-            let col = agg.arg_col.expect("{func} requires 1 argument");
             let distinct = agg.func == "fn:collect_distinct";
             let mut out: Vec<Val> = Vec::new();
             for (row, diff) in input {
-                let val = row.0[col].clone();
+                let val = arg(row);
                 if distinct {
                     if !out.contains(&val) {
                         out.push(val);
