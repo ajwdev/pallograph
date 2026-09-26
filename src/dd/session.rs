@@ -79,8 +79,29 @@ pub(crate) enum Command {
     /// Milestone A: the worker reads the mutex on behalf of the caller so
     /// the API is uniform; Milestone B will cursor the trace instead.
     Query { rel: String, resp: Sender<Vec<Vec<Value>>> },
+    /// Attempt to add new IDB rules by layering a fresh dataflow.
+    ///
+    /// The worker checks whether the new rule's head predicate (`new_head`) is
+    /// already materialized.  If it is, or if any new stratum is recursive,
+    /// acks `NeedsRebuild`; otherwise builds the layered dataflow and acks
+    /// `Layered`.
+    AddRules {
+        all_rule_sources: Vec<String>,
+        /// Head predicate of the newly added rule(s), pre-extracted by the caller.
+        new_head: Option<String>,
+        ack: Sender<AddOutcome>,
+    },
     /// Terminate the worker loop.  Must be sent (and acked) before dropping the guard.
     Shutdown { ack: Sender<()> },
+}
+
+/// Result of a `Command::AddRules` request.
+#[derive(Debug)]
+pub(crate) enum AddOutcome {
+    /// A new dataflow was layered; no EDB rehydration was needed.
+    Layered,
+    /// The rule extends an existing predicate or is recursive; caller must rebuild.
+    NeedsRebuild,
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +444,122 @@ impl DdSession {
                                 };
                             let _ = resp.send(rows);
                         }
+                        Command::AddRules { all_rule_sources, new_head, ack } => {
+                            // Check if the new rule extends an already-materialized predicate.
+                            // If so the existing trace is stale and only a full rebuild is correct.
+                            let extends_existing = new_head.as_deref()
+                                .map(|h| traces.contains_key(h))
+                                .unwrap_or(true); // conservative: unknown head → rebuild
+
+                            if extends_existing {
+                                let _ = ack.send(AddOutcome::NeedsRebuild);
+                                continue;
+                            }
+
+                            // Compile the full accumulated rule set to find strata for new preds.
+                            let (all_strata, _edb_rels) = match build_strata(&all_rule_sources) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    eprintln!("dd(session/layer): compile error: {e:#}");
+                                    let _ = ack.send(AddOutcome::NeedsRebuild);
+                                    continue;
+                                }
+                            };
+
+                            // Select strata whose head predicates are all new (not yet materialized).
+                            // Strata with existing head preds are already correctly materialized — skip.
+                            let to_layer: Vec<super::StratumWork> = all_strata
+                                .into_iter()
+                                .filter(|s| {
+                                    !s.rules.is_empty()
+                                        && s.rules.iter().all(|r| !traces.contains_key(&r.head_rel))
+                                })
+                                .collect();
+
+                            // Recursive new predicates need the iterative/VecVariable import path.
+                            // Fall back to rebuild for now (worse-is-better: correct and rare).
+                            if to_layer.iter().any(|s| s.is_recursive) || to_layer.is_empty() {
+                                let _ = ack.send(AddOutcome::NeedsRebuild);
+                                continue;
+                            }
+
+                            // Layer a new dataflow that imports all current traces.
+                            // This runs synchronously on the worker thread, so TraceAgent (!Send)
+                            // is fine as a captured variable in the FnOnce closure.
+                            let imported_traces: HashMap<String, _> =
+                                traces.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            let probe_ref = probe.clone();
+
+                            let mut new_traces = worker.dataflow::<u32, _, _>(move |scope| {
+                                // Import each existing trace as a VecCollection.
+                                let mut rels: HashMap<String, VecCollection<'_, u32, Row>> =
+                                    imported_traces
+                                        .into_iter()
+                                        .map(|(name, mut trace)| {
+                                            let coll = trace
+                                                .import(scope)
+                                                .as_collection(|row, _| row.clone());
+                                            (name, coll)
+                                        })
+                                        .collect();
+
+                                let unit_coll =
+                                    scope.new_collection_from(vec![Row(vec![])]).1;
+                                let mut new_inner: HashMap<String, _> = HashMap::new();
+
+                                for stratum in &to_layer {
+                                    let mut by_head: HashMap<
+                                        String,
+                                        Vec<VecCollection<'_, u32, Row>>,
+                                    > = HashMap::new();
+                                    for rule in &stratum.rules {
+                                        match build_rule(rule, &rels, &unit_coll) {
+                                            Ok(coll) => {
+                                                by_head
+                                                    .entry(rule.head_rel.clone())
+                                                    .or_default()
+                                                    .push(coll);
+                                            }
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "dd(session/layer): skipping rule \
+                                                     for `{}`: {e}",
+                                                    rule.head_rel
+                                                );
+                                            }
+                                        }
+                                    }
+                                    for (head_rel, colls) in by_head {
+                                        let idb = colls
+                                            .into_iter()
+                                            .reduce(|a, b| a.concat(b))
+                                            .unwrap()
+                                            .distinct();
+                                        // Expose to subsequent strata in this batch (linear chain).
+                                        rels.insert(head_rel.clone(), idb.clone());
+                                        let arranged = idb.probe_with(&probe_ref).arrange_by_self();
+                                        new_inner.insert(head_rel, arranged.trace);
+                                    }
+                                }
+
+                                new_inner
+                            });
+
+                            // Settle the new dataflow to the current epoch.
+                            worker.step_or_park_while(None, || probe.less_than(&epoch));
+
+                            // Compact to the current frontier so history stays bounded.
+                            let frontier_elems = [epoch];
+                            let frontier = AntichainRef::new(&frontier_elems);
+                            for trace in new_traces.values_mut() {
+                                trace.set_logical_compaction(frontier);
+                                trace.set_physical_compaction(frontier);
+                            }
+
+                            // Merge new relation traces into the session.
+                            traces.extend(new_traces);
+                            let _ = ack.send(AddOutcome::Layered);
+                        }
                         Command::Shutdown { ack } => {
                             // Advance all handles to a sentinel epoch so timely knows
                             // no more data is coming, then ack before returning.
@@ -478,6 +615,31 @@ impl DdSession {
             resp: resp_tx,
         });
         resp_rx.recv().unwrap_or_default()
+    }
+
+    /// Attempt to add a new IDB rule by layering a fresh dataflow on top of the
+    /// current one.  If the rule extends an existing materialized predicate or is
+    /// recursive, falls back to a full `rebuild` automatically.
+    ///
+    /// `new_head` is the head predicate of the newly added rule, pre-extracted
+    /// by the caller (see `engine::extract_head_pred`).  `all_rule_sources` is the
+    /// full accumulated rule set including the new rule.
+    pub(crate) fn add_idb(
+        &mut self,
+        new_head: Option<&str>,
+        edb: &[(String, Vec<Value>)],
+        all_rule_sources: &[String],
+    ) -> Result<()> {
+        let (ack_tx, ack_rx) = bounded(1);
+        let _ = self.tx.send(Command::AddRules {
+            all_rule_sources: all_rule_sources.to_vec(),
+            new_head: new_head.map(|s| s.to_string()),
+            ack: ack_tx,
+        });
+        match ack_rx.recv()? {
+            AddOutcome::Layered => Ok(()),
+            AddOutcome::NeedsRebuild => self.rebuild(edb, all_rule_sources),
+        }
     }
 
     /// Clone the sender so a concurrent feeder (e.g. a K8s watcher) can
@@ -636,5 +798,139 @@ mod tests {
         ];
         let session = DdSession::spawn(&edb, &rules).expect("spawn");
         drop(session); // Must not block
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6: layered dataflow tests
+    // -----------------------------------------------------------------------
+
+    /// Add a new view IDB by layering; results match a fresh batch evaluate.
+    #[test]
+    fn layer_view_matches_batch() {
+        let edb: Vec<(String, Vec<Value>)> = vec![
+            ("edge".to_string(), vec![v_str("a"), v_str("b")]),
+            ("edge".to_string(), vec![v_str("b"), v_str("c")]),
+        ];
+
+        let base_rules = vec![
+            "Decl edge(Src, Dst).\nDecl path(Src, Dst).\npath(X, Y) :- edge(X, Y)."
+                .to_string(),
+        ];
+
+        let mut session = DdSession::spawn(&edb, &base_rules).expect("spawn");
+
+        // Layer a view: view(X) :- path(X, _).
+        let mut all_rules = base_rules.clone();
+        all_rules.push("Decl view(Src).\nview(X) :- path(X, _).".to_string());
+        session
+            .add_idb(Some("view"), &edb, &all_rules)
+            .expect("add_idb");
+
+        let mut results = session.query("view");
+        results.sort();
+        // view should contain the source nodes of every path edge: a and b
+        assert_eq!(results, vec![vec![v_str("a")], vec![v_str("b")]]);
+    }
+
+    /// After layering a view, inserting a new fact propagates to the view.
+    #[test]
+    fn layer_view_tracks_fact_deltas() {
+        let edb: Vec<(String, Vec<Value>)> = vec![
+            ("edge".to_string(), vec![v_str("a"), v_str("b")]),
+        ];
+
+        let base_rules = vec![
+            "Decl edge(Src, Dst).\nDecl path(Src, Dst).\npath(X, Y) :- edge(X, Y)."
+                .to_string(),
+        ];
+
+        let mut session = DdSession::spawn(&edb, &base_rules).expect("spawn");
+
+        let mut all_rules = base_rules.clone();
+        all_rules.push("Decl view(Src).\nview(X) :- path(X, _).".to_string());
+        session
+            .add_idb(Some("view"), &edb, &all_rules)
+            .expect("add_idb");
+
+        // Before insert: only a
+        let before = session.query("view");
+        assert_eq!(before, vec![vec![v_str("a")]]);
+
+        // Insert b→c, commit — view should now also contain b.
+        session.insert("edge".to_string(), Row::from(&[v_str("b"), v_str("c")][..]));
+        session.commit();
+
+        let mut after = session.query("view");
+        after.sort();
+        assert_eq!(after, vec![vec![v_str("a")], vec![v_str("b")]]);
+    }
+
+    /// Layer two views in sequence; the second references the first (linear chain).
+    #[test]
+    fn layer_chain() {
+        let edb: Vec<(String, Vec<Value>)> = vec![
+            ("edge".to_string(), vec![v_str("a"), v_str("b")]),
+            ("edge".to_string(), vec![v_str("b"), v_str("c")]),
+        ];
+
+        let base_rules = vec![
+            "Decl edge(Src, Dst).\nDecl path(Src, Dst).\npath(X, Y) :- edge(X, Y)."
+                .to_string(),
+        ];
+
+        let mut session = DdSession::spawn(&edb, &base_rules).expect("spawn");
+
+        // Layer view1: view1(X) :- path(X, _).
+        let mut rules_v1 = base_rules.clone();
+        rules_v1.push("Decl view1(Src).\nview1(X) :- path(X, _).".to_string());
+        session
+            .add_idb(Some("view1"), &edb, &rules_v1)
+            .expect("add_idb view1");
+
+        // Layer view2: view2(X) :- view1(X).
+        let mut rules_v2 = rules_v1.clone();
+        rules_v2.push("Decl view2(Src).\nview2(X) :- view1(X).".to_string());
+        session
+            .add_idb(Some("view2"), &edb, &rules_v2)
+            .expect("add_idb view2");
+
+        let mut results = session.query("view2");
+        results.sort();
+        assert_eq!(results, vec![vec![v_str("a")], vec![v_str("b")]]);
+    }
+
+    /// Adding a rule for an existing predicate falls back to rebuild; results are correct.
+    #[test]
+    fn layer_fallback_on_extend() {
+        let edb: Vec<(String, Vec<Value>)> = vec![
+            ("edge".to_string(), vec![v_str("a"), v_str("b")]),
+        ];
+
+        let base_rules = vec![
+            "Decl edge(Src, Dst).\nDecl path(Src, Dst).\npath(X, Y) :- edge(X, Y)."
+                .to_string(),
+        ];
+
+        let mut session = DdSession::spawn(&edb, &base_rules).expect("spawn");
+
+        // Add a second rule for the existing `path` predicate.
+        // This should trigger NeedsRebuild internally.
+        let mut all_rules = base_rules.clone();
+        all_rules.push("path(X, X) :- edge(X, _).".to_string());
+        session
+            .add_idb(Some("path"), &edb, &all_rules)
+            .expect("add_idb fallback");
+
+        // After rebuild, path should include both original edges and the reflexive pairs.
+        let mut results = session.query("path");
+        results.sort();
+        assert!(
+            results.contains(&vec![v_str("a"), v_str("b")]),
+            "original edge missing: {results:?}"
+        );
+        assert!(
+            results.contains(&vec![v_str("a"), v_str("a")]),
+            "reflexive pair missing: {results:?}"
+        );
     }
 }

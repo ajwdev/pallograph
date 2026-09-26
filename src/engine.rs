@@ -672,9 +672,10 @@ impl Engine {
 
     /// Add a new rule (from the REPL) and mark state as dirty.
     pub fn add_rule(&mut self, rule: String) {
+        let new_head = extract_head_pred(&rule);
         self.rule_sources.push(rule);
         if let Some(s) = &mut self.session {
-            let _ = s.rebuild(&self.edb, &self.rule_sources);
+            let _ = s.add_idb(new_head.as_deref(), &self.edb, &self.rule_sources);
         }
     }
 
@@ -874,6 +875,27 @@ mod tests {
 
         assert!(failures.is_empty(), "parity failures:\n{}", failures.join("\n"));
     }
+}
+
+/// Extract the head predicate name from a Mangle rule source string.
+///
+/// Scans for the first non-empty, non-`Decl`, non-comment line and returns
+/// the identifier before the opening `(`.  Returns `None` if the source
+/// contains only declarations (or cannot be parsed).
+fn extract_head_pred(rule_src: &str) -> Option<String> {
+    for line in rule_src.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("Decl") || line.starts_with("//") {
+            continue;
+        }
+        if let Some(pred) = line.split('(').next() {
+            let pred = pred.trim();
+            if !pred.is_empty() {
+                return Some(pred.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Drain all facts from a MemStore into a Vec for later replay.
