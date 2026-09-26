@@ -198,8 +198,11 @@ fn resolve_operand(operand: &Operand, ir: &Ir, schema: &[String]) -> Result<Slot
 
 /// Resolve a `DataSource` to `(rel_name, var_names)`.
 ///
-/// `IndexLookup` is not emitted as a HashJoin source by the planner, so we
-/// `bail!` on it here.
+/// Used only for HashJoin sources.  `DataSource` is a shared enum used in
+/// both `Op::Iterate` and `Op::HashJoin`, but `try_plan_hash_join` always
+/// constructs both sides as `DataSource::Scan` — it never emits `IndexLookup`
+/// inside a `HashJoin`.  The `IndexLookup` arm is unreachable in practice;
+/// `bail!` is a trip-wire in case the planner changes.
 fn resolve_data_source(source: &DataSource, ir: &Ir) -> Result<(String, Vec<String>)> {
     match source {
         DataSource::Scan { relation, vars } | DataSource::ScanDelta { relation, vars } => {
