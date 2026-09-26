@@ -51,8 +51,9 @@ pub enum CmpOp {
 #[derive(Debug, Clone)]
 pub enum OwnedExpr {
     Value(Slot),
-    /// `fn:string:concat` — only function used in Let across the real ruleset.
-    Concat(Vec<Slot>),
+    /// Any `fn:*` scalar function call.  Delegated at build time to the
+    /// interpreter's `eval_function` via `Val→Value→Val` round-trip.
+    Call { func: String, args: Vec<Slot> },
 }
 
 /// A single step in the lowered pipeline for one rule.
@@ -403,14 +404,9 @@ fn lower_inner(
                 Expr::Value(operand) => OwnedExpr::Value(resolve_operand(operand, ir, schema)?),
                 Expr::Call { function, args } => {
                     let func_name = ir.resolve_name(*function).to_string();
-                    match func_name.as_str() {
-                        "fn:string:concat" => {
-                            let slots: Result<Vec<_>> =
-                                args.iter().map(|a| resolve_operand(a, ir, schema)).collect();
-                            OwnedExpr::Concat(slots?)
-                        }
-                        other => bail!("unsupported Let function: {other}"),
-                    }
+                    let slots: Result<Vec<_>> =
+                        args.iter().map(|a| resolve_operand(a, ir, schema)).collect();
+                    OwnedExpr::Call { func: func_name, args: slots? }
                 }
             };
             schema.push(ir.resolve_name(*var).to_string());

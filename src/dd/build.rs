@@ -13,6 +13,9 @@ use anyhow::{bail, Result};
 use differential_dataflow::VecCollection;
 use timely::progress::Timestamp;
 
+use mangle_common::Value;
+use mangle_interpreter::eval_function;
+
 use crate::dd::lower::{CmpOp, LoweredAggregate, LoweredRule, OwnedExpr, Slot, Step};
 use crate::dd::value::{CompoundKindMirror, OrdF64, Val, Row};
 
@@ -50,17 +53,11 @@ fn eval_cmp(op: CmpOp, left: &Val, right: &Val) -> bool {
 fn eval_expr(expr: &OwnedExpr, row: &Row) -> Val {
     match expr {
         OwnedExpr::Value(slot) => slot_val(slot, row),
-        OwnedExpr::Concat(slots) => {
-            let mut s = String::new();
-            for slot in slots {
-                match slot_val(slot, row) {
-                    Val::String(part) => s.push_str(&part),
-                    Val::Name(part) => s.push_str(&part),
-                    Val::Number(n) => s.push_str(&n.to_string()),
-                    other => s.push_str(&format!("{other:?}")),
-                }
-            }
-            Val::String(s)
+        OwnedExpr::Call { func, args } => {
+            let vals: Vec<Value> = args.iter().map(|s| slot_val(s, row).into()).collect();
+            let result = eval_function(func, &vals)
+                .unwrap_or_else(|e| panic!("Let fn:{func} failed: {e}"));
+            Val::from(&result)
         }
     }
 }
@@ -170,6 +167,24 @@ fn eval_aggregate(agg: &LoweredAggregate, input: &[(&Row, isize)]) -> Val {
                 .map(|(row, _)| row.0[col].clone())
                 .min()
                 .expect("fn:float:min on empty group (DD guarantees non-empty)")
+        }
+        "fn:collect" | "fn:collect_distinct" => {
+            let col = agg.arg_col.expect("{func} requires 1 argument");
+            let distinct = agg.func == "fn:collect_distinct";
+            let mut out: Vec<Val> = Vec::new();
+            for (row, diff) in input {
+                let val = row.0[col].clone();
+                if distinct {
+                    if !out.contains(&val) {
+                        out.push(val);
+                    }
+                } else {
+                    for _ in 0..*diff {
+                        out.push(val.clone());
+                    }
+                }
+            }
+            Val::Compound(CompoundKindMirror::List, out)
         }
         other => panic!("unsupported aggregate function: {other}"),
     }
