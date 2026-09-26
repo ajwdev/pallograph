@@ -720,6 +720,102 @@ impl Engine {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Load the testdata/ manifests + rules/*.mg files and return the raw
+    /// (edb, rule_sources) pair that both backends consume.
+    fn load_fixtures() -> Result<(Vec<(String, Vec<Value>)>, Vec<String>)> {
+        let mut edb_store = MemStore::new();
+        crate::edb::load_from_manifests(&mut edb_store, vec!["testdata".to_string()])
+            .context("load testdata")?;
+        let edb = drain_store(edb_store);
+
+        let rule_files = glob::glob("rules/*.mg")
+            .context("glob rules")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("glob entries")?;
+        let mut rules: Vec<String> = rule_files
+            .iter()
+            .map(|p| std::fs::read_to_string(p).with_context(|| format!("read {}", p.display())))
+            .collect::<Result<Vec<_>>>()?;
+        rules.sort(); // deterministic order
+        Ok((edb, rules))
+    }
+
+    #[test]
+    fn bench_evaluate_compare() {
+        let (edb, rules) = load_fixtures().expect("load fixtures");
+        let n = 10;
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
+            InterpreterBackend.evaluate(&edb, &rules).unwrap();
+        }
+        let interp_avg = t0.elapsed() / n;
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
+            DdBackend.evaluate(&edb, &rules).unwrap();
+        }
+        let dd_avg = t0.elapsed() / n;
+
+        println!("interpreter avg: {:?}", interp_avg);
+        println!("dd          avg: {:?}", dd_avg);
+        println!("ratio dd/interp: {:.1}x", dd_avg.as_secs_f64() / interp_avg.as_secs_f64());
+    }
+
+    /// Assert that every relation produced by the two backends contains the
+    /// exact same set of tuples (order-independent).
+    #[test]
+    fn dd_matches_interpreter() {
+        let (edb, rules) = load_fixtures().expect("load fixtures");
+
+        let interp = InterpreterBackend
+            .evaluate(&edb, &rules)
+            .expect("interpreter failed");
+        let dd = DdBackend
+            .evaluate(&edb, &rules)
+            .expect("dd failed");
+
+        let all_rels: std::collections::HashSet<&str> = interp
+            .relation_names()
+            .chain(dd.relation_names())
+            .collect();
+
+        let mut failures: Vec<String> = Vec::new();
+        for rel in &all_rels {
+            let mut interp_tuples = interp.scan(rel).to_vec();
+            let mut dd_tuples = dd.scan(rel).to_vec();
+            interp_tuples.sort();
+            dd_tuples.sort();
+            if interp_tuples != dd_tuples {
+                failures.push(format!(
+                    "{rel}: interpreter={}, dd={}",
+                    interp_tuples.len(),
+                    dd_tuples.len()
+                ));
+                // Show first differing tuple for quick diagnosis.
+                for t in &interp_tuples {
+                    if !dd_tuples.contains(t) {
+                        failures.push(format!("  missing from dd:   {t:?}"));
+                        break;
+                    }
+                }
+                for t in &dd_tuples {
+                    if !interp_tuples.contains(t) {
+                        failures.push(format!("  extra in dd:       {t:?}"));
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert!(failures.is_empty(), "parity failures:\n{}", failures.join("\n"));
+    }
+}
+
 /// Drain all facts from a MemStore into a Vec for later replay.
 fn drain_store(store: MemStore) -> Vec<(String, Vec<Value>)> {
     let mut out = Vec::new();
