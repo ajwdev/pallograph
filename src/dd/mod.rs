@@ -76,6 +76,18 @@ pub(crate) fn build_strata(
     let (mut ir, stratified) =
         mangle_driver::compile_units(&sources, &arena).context("compile rules")?;
 
+    if !ir.temporal_predicates.is_empty() {
+        let names: Vec<&str> = ir
+            .temporal_predicates
+            .iter()
+            .map(|id| ir.resolve_name(*id))
+            .collect();
+        anyhow::bail!(
+            "DD backend does not support temporal predicates ({})",
+            names.join(", ")
+        );
+    }
+
     let edb_rels: Vec<String> = stratified
         .extensional_preds()
         .iter()

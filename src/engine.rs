@@ -616,6 +616,38 @@ pub struct Engine {
     session: Option<crate::dd::session::DdSession>,
 }
 
+/// Load `testdata/` manifests and `rules/*.mg` files into the raw
+/// `(edb, rule_sources)` pair consumed by `Backend::evaluate`.
+///
+/// Intended for benchmarks and integration tests; not used in the binary.
+pub fn load_bench_fixtures() -> Result<(Vec<(String, Vec<Value>)>, Vec<String>)> {
+    let mut store = MemStore::new();
+    crate::edb::load_from_manifests(&mut store, vec!["testdata".to_string()])
+        .context("load testdata")?;
+
+    let mut edb: Vec<(String, Vec<Value>)> = Vec::new();
+    for rel in store.relation_names() {
+        let rel: String = rel;
+        for tuple in store.get_facts(&rel) {
+            edb.push((rel.clone(), tuple));
+        }
+    }
+
+    let rule_files = glob::glob("rules/*.mg")
+        .context("glob rules")?
+        .collect::<Result<Vec<_>, _>>()
+        .context("glob entries")?;
+    let mut rules: Vec<String> = rule_files
+        .iter()
+        .map(|p| {
+            std::fs::read_to_string(p)
+                .with_context(|| format!("reading {}", p.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    rules.sort();
+    Ok((edb, rules))
+}
+
 impl Engine {
     pub fn new(edb_store: MemStore, rules_dir: &Path, backend: Box<dyn Backend>) -> Result<Self> {
         let rule_files =
@@ -641,6 +673,28 @@ impl Engine {
             rules_base_len,
             session: None,
         })
+    }
+
+    /// Construct an Engine directly from pre-loaded data, bypassing all file I/O.
+    ///
+    /// Use in benchmarks to isolate Datalog evaluation cost from data-source
+    /// loading.  Call `load_bench_fixtures()` once to get `(edb, rules)`, then
+    /// pass clones into this constructor per iteration.
+    pub fn from_parts(
+        edb: Vec<(String, Vec<Value>)>,
+        rule_sources: Vec<String>,
+        backend: Box<dyn Backend>,
+    ) -> Self {
+        let edb_base_len = edb.len();
+        let rules_base_len = rule_sources.len();
+        Self {
+            edb,
+            rule_sources,
+            backend,
+            edb_base_len,
+            rules_base_len,
+            session: None,
+        }
     }
 
     /// Spawn a persistent DD session seeded with the current EDB + rules.
