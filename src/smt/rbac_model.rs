@@ -100,7 +100,7 @@ impl<'ctx> SmtEncoder<'ctx> {
 }
 
 /// Returns `base` when suffix is empty, `base_suffix` otherwise.
-pub(crate) fn fn_name(base: &str, suffix: &str) -> String {
+pub fn fn_name(base: &str, suffix: &str) -> String {
     if suffix.is_empty() {
         base.to_string()
     } else {
@@ -267,7 +267,7 @@ fn parse_perm_tuples_6(rows: &[Vec<Value>]) -> Vec<(String, String, String, Stri
 // ---- Subject-table helpers (used by assert_rbac_axioms_impl) ----
 
 /// Build `subject_in_rb(principal, binding_ns, binding_name)` tuples.
-pub(crate) fn compute_subject_in_rb(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+pub fn compute_subject_in_rb(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Vec<Vec<Value>> {
     let mut result: HashSet<(String, String, String)> = HashSet::new();
 
     for t in scan("rolebinding_subject_sa") {
@@ -323,7 +323,7 @@ pub(crate) fn compute_subject_in_rb(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> V
 }
 
 /// Build `subject_in_crb(principal, binding_name)` tuples.
-pub(crate) fn compute_subject_in_crb(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+pub fn compute_subject_in_crb(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Vec<Vec<Value>> {
     let mut result: HashSet<(String, String)> = HashSet::new();
 
     for t in scan("clusterrolebinding_subject_sa") {

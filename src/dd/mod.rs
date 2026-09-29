@@ -15,32 +15,23 @@
 //! graph in a `worker.dataflow(|scope| {...})` call, feeds EDB data through
 //! `InputSession` handles, steps the worker to completion, and returns results
 //! collected via `inspect_batch` into `Arc<Mutex<...>>` sinks.
-//!
-//! # Phases
-//!
-//! - **Phase 0**: wiring + `Val`/`Row` wrapper.
-//! - **Phase 1** (current): non-recursive strata — `Scan`, `Join`, `Cmp`, `Insert`.
-//! - **Phase 2**: `Antijoin` / `CallFilter` (negation + string builtins).
-//! - **Phase 3**: `iterate`/`Variable` for recursive strata.
-//! - **Phase 4**: `Let` / `MatchField` / `IterateList`. Full parity milestone.
-//! - **Phase 5** (deferred): persistent `InputSession`s for true incremental eval.
 
-pub(crate) mod build;
-pub(crate) mod lower;
-pub(crate) mod value;
-pub(crate) mod session;
+pub mod build;
+pub mod lower;
+pub mod session;
+pub mod value;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use differential_dataflow::VecCollection;
 use differential_dataflow::input::{Input, InputSession};
 use differential_dataflow::operators::iterate::VecVariable;
-use differential_dataflow::VecCollection;
 use mangle_ast::Arena;
-use timely::order::Product;
 use mangle_common::Value;
 use mangle_ir::Inst;
+use timely::order::Product;
 
 use crate::engine::EDB_DECLS;
 use build::build_rule;
@@ -52,20 +43,18 @@ use value::Row;
 // ---------------------------------------------------------------------------
 
 /// A single compiled stratum: a set of rules and whether they form a recursive SCC.
-pub(crate) struct StratumWork {
-    pub(crate) is_recursive: bool,
-    pub(crate) rules: Vec<LoweredRule>,
+pub struct StratumWork {
+    pub is_recursive: bool,
+    pub rules: Vec<LoweredRule>,
 }
 
 /// Compile `rule_sources` into lowered, stratum-ordered rules.
 ///
 /// Returns `(strata, edb_relation_names)`.  All Ir/Arena lifetimes are resolved
 /// to owned data before returning; the caller does not need to hold Ir alive.
-pub(crate) fn build_strata(
-    rule_sources: &[String],
-) -> Result<(Vec<StratumWork>, Vec<String>)> {
-    use std::collections::HashSet;
+pub fn build_strata(rule_sources: &[String]) -> Result<(Vec<StratumWork>, Vec<String>)> {
     use mangle_ir::InstId;
+    use std::collections::HashSet;
 
     let mut sources: Vec<&str> = vec![EDB_DECLS];
     for s in rule_sources {
@@ -117,7 +106,10 @@ pub(crate) fn build_strata(
         }
 
         if rule_ids.is_empty() {
-            strata.push(StratumWork { is_recursive: false, rules: vec![] });
+            strata.push(StratumWork {
+                is_recursive: false,
+                rules: vec![],
+            });
             continue;
         }
 
@@ -142,7 +134,10 @@ pub(crate) fn build_strata(
             lowered.push(lower_op(&op, &ir).context("lower rule")?);
         }
 
-        strata.push(StratumWork { is_recursive, rules: lowered });
+        strata.push(StratumWork {
+            is_recursive,
+            rules: lowered,
+        });
     }
 
     Ok((strata, edb_rels))
@@ -157,7 +152,7 @@ pub(crate) fn build_strata(
 ///
 /// Returns a map from relation name to the fully-derived set of tuples (EDB + IDB),
 /// equivalent to `InterpreterBackend::evaluate`.
-pub(crate) fn evaluate(
+pub fn evaluate(
     edb: &[(String, Vec<Value>)],
     rule_sources: &[String],
 ) -> Result<HashMap<String, Vec<Vec<Value>>>> {
@@ -179,8 +174,7 @@ pub(crate) fn evaluate(
     }
 
     // Union of declared EDB relations + any relations present in the facts slice.
-    let mut input_rels: std::collections::HashSet<String> =
-        all_edb_rels.into_iter().collect();
+    let mut input_rels: std::collections::HashSet<String> = all_edb_rels.into_iter().collect();
     input_rels.extend(edb_by_rel.keys().cloned());
     let input_rels: Vec<String> = input_rels.into_iter().collect();
 
@@ -239,14 +233,11 @@ pub(crate) fn evaluate(
                             // `scope` is Copy, so it can be captured by the closure for
                             // the .leave(scope) calls while also being the receiver of
                             // .iterative().
-                            let head_preds: std::collections::HashSet<String> = stratum
-                                .rules
-                                .iter()
-                                .map(|r| r.head_rel.clone())
-                                .collect();
+                            let head_preds: std::collections::HashSet<String> =
+                                stratum.rules.iter().map(|r| r.head_rel.clone()).collect();
 
-                            let results: HashMap<String, VecCollection<'_, u32, Row>> =
-                                scope.iterative::<u64, _, _>(|nested| {
+                            let results: HashMap<String, VecCollection<'_, u32, Row>> = scope
+                                .iterative::<u64, _, _>(|nested| {
                                     let summary = Product::new(Default::default(), 1u64);
 
                                     // Enter all outer relations into the nested scope.
@@ -356,10 +347,7 @@ pub(crate) fn evaluate(
                                             .push(coll);
                                     }
                                     Err(e) => {
-                                        eprintln!(
-                                            "dd: skipping rule for `{}`: {e}",
-                                            rule.head_rel
-                                        );
+                                        eprintln!("dd: skipping rule for `{}`: {e}", rule.head_rel);
                                     }
                                 }
                             }

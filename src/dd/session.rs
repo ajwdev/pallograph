@@ -67,7 +67,7 @@ use super::build_strata;
 // Command protocol
 // ---------------------------------------------------------------------------
 
-pub(crate) enum Command {
+pub enum Command {
     /// Insert one row into a relation (not visible until next Commit).
     Insert { rel: String, row: Row },
     /// Retract one row from a relation (not visible until next Commit).
@@ -97,7 +97,7 @@ pub(crate) enum Command {
 
 /// Result of a `Command::AddRules` request.
 #[derive(Debug)]
-pub(crate) enum AddOutcome {
+pub enum AddOutcome {
     /// A new dataflow was layered; no EDB rehydration was needed.
     Layered,
     /// The rule extends an existing predicate or is recursive; caller must rebuild.
@@ -109,7 +109,7 @@ pub(crate) enum AddOutcome {
 // ---------------------------------------------------------------------------
 
 /// A running differential-dataflow session backed by a persistent worker thread.
-pub(crate) struct DdSession {
+pub struct DdSession {
     /// Command sender — cheap to clone for concurrent feeders.
     tx: Sender<Command>,
     /// Worker thread guard — `Some` until drop, when we Shutdown+join.
@@ -121,7 +121,7 @@ impl DdSession {
     ///
     /// After this returns the worker is fully settled at epoch 1 with the initial
     /// EDB visible.
-    pub(crate) fn spawn(
+    pub fn spawn(
         edb: &[(String, Vec<Value>)],
         rule_sources: &[String],
     ) -> Result<Self> {
@@ -608,17 +608,17 @@ impl DdSession {
     // -------------------------------------------------------------------------
 
     /// Buffer an insert delta.  Not visible until `commit()`.
-    pub(crate) fn insert(&self, rel: String, row: Row) {
+    pub fn insert(&self, rel: String, row: Row) {
         let _ = self.tx.send(Command::Insert { rel, row });
     }
 
     /// Buffer a retract delta.  Not visible until `commit()`.
-    pub(crate) fn retract(&self, rel: String, row: Row) {
+    pub fn retract(&self, rel: String, row: Row) {
         let _ = self.tx.send(Command::Remove { rel, row });
     }
 
     /// Flush buffered deltas and block until the worker has settled.
-    pub(crate) fn commit(&self) {
+    pub fn commit(&self) {
         let (ack_tx, ack_rx) = bounded(1);
         let _ = self.tx.send(Command::Commit { ack: ack_tx });
         let _ = ack_rx.recv();
@@ -628,7 +628,7 @@ impl DdSession {
     ///
     /// Milestone A: reads the `Arc<Mutex>` sink via the worker (uniform API).
     /// Milestone B: will cursor a TraceAgent on the worker thread instead.
-    pub(crate) fn query(&self, rel: &str) -> Vec<Vec<Value>> {
+    pub fn query(&self, rel: &str) -> Vec<Vec<Value>> {
         let (resp_tx, resp_rx) = bounded(1);
         let _ = self.tx.send(Command::Query {
             rel: rel.to_string(),
@@ -644,7 +644,7 @@ impl DdSession {
     /// `new_head` is the head predicate of the newly added rule, pre-extracted
     /// by the caller (see `engine::extract_head_pred`).  `all_rule_sources` is the
     /// full accumulated rule set including the new rule.
-    pub(crate) fn add_idb(
+    pub fn add_idb(
         &mut self,
         new_head: Option<&str>,
         edb: &[(String, Vec<Value>)],
@@ -664,7 +664,7 @@ impl DdSession {
 
     /// Clone the sender so a concurrent feeder (e.g. a K8s watcher) can
     /// push `Insert`/`Remove`/`Commit` commands from another thread.
-    pub(crate) fn sender(&self) -> Sender<Command> {
+    pub fn sender(&self) -> Sender<Command> {
         self.tx.clone()
     }
 
@@ -672,7 +672,7 @@ impl DdSession {
     ///
     /// Shuts down the existing worker, spawns a new one with the updated
     /// `rule_sources`, and re-seeds it with `edb`.
-    pub(crate) fn rebuild(
+    pub fn rebuild(
         &mut self,
         edb: &[(String, Vec<Value>)],
         rule_sources: &[String],

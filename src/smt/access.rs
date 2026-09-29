@@ -359,7 +359,7 @@ impl<'ctx> SmtEncoder<'ctx> {
     ///
     /// Pass `None` for direct-grant queries (`check_access_invariant`) where
     /// escalation paths are out of scope.
-    pub(crate) fn paths_for_principal(
+    pub fn paths_for_principal(
         &self,
         principal: &str,
         suffix: &str,
