@@ -156,6 +156,14 @@ impl DdSession {
         // while the worker is busy stepping.
         let (tx, rx): (Sender<Command>, Receiver<Command>) = unbounded();
 
+        // `timely::execute` spawns the worker onto a background thread and returns
+        // as soon as the thread is launched — it does NOT wait for the closure body
+        // to run.  Without this rendezvous, `spawn()` would return before the initial
+        // EDB seed/settle below has actually happened, racing the caller against the
+        // worker thread.  `ready_tx` is signalled once settle completes; `spawn()`
+        // blocks on `ready_rx` before returning.
+        let (ready_tx, ready_rx): (Sender<()>, Receiver<()>) = bounded(1);
+
         // -----------------------------------------------------------------------
         // Launch the worker.
         //
@@ -166,6 +174,7 @@ impl DdSession {
         //     captured `&mut`s (Fn, not FnMut)
         // -----------------------------------------------------------------------
         let guard = timely::execute(timely::Config::thread(), move |worker| {
+            let ready_tx = ready_tx.clone();
             // ------------------------------------------------------------------
             // Build the dataflow once and collect InputSession handles + probe.
             // ------------------------------------------------------------------
@@ -379,6 +388,10 @@ impl DdSession {
             // Step until the initial EDB is fully propagated.
             worker.step_or_park_while(None, || probe.less_than(&1u32));
 
+            // Tell `spawn()` the initial seed/settle is done and it's safe to
+            // hand the session to the caller.
+            let _ = ready_tx.send(());
+
             // ------------------------------------------------------------------
             // Command loop.
             // ------------------------------------------------------------------
@@ -576,6 +589,13 @@ impl DdSession {
             }
         })
         .map_err(|e| anyhow::anyhow!("timely::execute failed: {e}"))?;
+
+        // Block until the worker thread has finished the initial seed/settle
+        // (see `ready_tx` above) so callers can rely on the documented
+        // "settled at epoch 1" invariant.
+        ready_rx
+            .recv()
+            .map_err(|e| anyhow::anyhow!("worker exited before settling: {e}"))?;
 
         Ok(DdSession {
             tx,
