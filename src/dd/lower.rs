@@ -280,54 +280,60 @@ fn lower_inner(
                     lower_inner(body, ir, schema, steps, head_rel)
                 }
 
-                DataSource::IndexLookup { relation, col_idx: _, key, vars } => {
-                    // Lower as a plain join on shared vars, which naturally enforces the
-                    // key equality.  If the key is a constant (not already in schema),
-                    // add a Cmp Eq filter afterward.
+                DataSource::IndexLookup { relation, col_idx, key, vars } => {
+                    // The planner emits an indexed join: `relation` looked up with
+                    // `col_idx` keyed on `key`, naming the looked-up columns as fresh
+                    // vars ($scan_N) and expressing the key equality as a *separate*
+                    // downstream Filter (`Compare $scan_N = key`).
+                    //
+                    // Lower it as a real keyed Join, NOT a cross product: key the
+                    // current schema column holding `key` against `relation`'s
+                    // `col_idx` column. Append ALL of `relation`'s columns (including
+                    // col_idx) so the output schema is byte-identical to the old
+                    // plain-join path — that keeps the $scan_N column present for the
+                    // planner's follow-up Filter, which then holds trivially (a no-op
+                    // on already-equal rows). Any *other* shared columns are still
+                    // enforced by their own downstream Filters, exactly as before.
                     let rel = ir.resolve_name(*relation).to_string();
-                    let vars: Vec<_> =
+                    let var_names: Vec<String> =
                         vars.iter().map(|v| ir.resolve_name(*v).to_string()).collect();
 
-                    // Check if key is a Const that won't be covered by shared-var join.
-                    // If so, we'll add a Cmp step after the join.
-                    let const_key_slot = if let Operand::Const(_) = key {
-                        // After the join, the key column's var will be in the schema.
-                        // We'll emit the Cmp after returning — capture what we need.
-                        Some(resolve_operand(key, ir, schema)?)
-                    } else {
-                        None
+                    // Column position of the key variable in the current schema, if
+                    // `key` is a Var already bound. `None` for a constant key or an
+                    // as-yet-unbound var.
+                    let key_pos = match key {
+                        Operand::Var(name_id) => {
+                            let name = ir.resolve_name(*name_id);
+                            schema.iter().position(|v| v == name)
+                        }
+                        Operand::Const(_) => None,
                     };
 
-                    // Emit Scan or Join.
                     if schema.is_empty() {
-                        let n = vars.len();
-                        schema.extend(vars.clone());
+                        // First atom of the body: seed with a plain scan.
+                        let n = var_names.len();
+                        schema.extend(var_names);
                         steps.push(Step::Scan { rel, n_cols: n });
+                    } else if let Some(kpos) = key_pos {
+                        // Keyed (indexed) join on `key == relation[col_idx]`.
+                        let arity = var_names.len();
+                        schema.extend(var_names);
+                        steps.push(Step::Join {
+                            rel,
+                            left_key_cols: vec![kpos],
+                            right_key_cols: vec![*col_idx],
+                            // Append every column (col_idx included) so the schema —
+                            // and the planner's redundant equality Filter — is unchanged.
+                            right_new_cols: (0..arity).collect(),
+                        });
                     } else {
-                        emit_join(rel, &vars, schema, steps);
-                    }
-                    lower_inner(body, ir, schema, steps, head_rel)?;
-
-                    // Emit the const-key equality filter if needed.
-                    // The key column var is now in schema at some position.
-                    if let (Some(key_const_slot), Some(Operand::Var(key_var_id))) =
-                        (const_key_slot, Some(key))
-                    {
-                        // key_var is the var that should equal the constant.
-                        // It was added to schema during the join above.
-                        // Actually: key was Const, and vars[col_idx] is the column bound by the lookup.
-                        // Since we lowered as plain join, vars[col_idx] was either shared (already
-                        // constrained) or new (added to schema). For the Const case: the key constant
-                        // equals vars[col_idx]'s value. We need a Cmp filter.
-                        // But we already recursed into body above — the filter needs to go BEFORE the
-                        // body recursion. This path returns early to avoid double recursion.
-                        let _ = key_var_id; // suppress unused warning
-                        let _ = key_const_slot;
-                        // TODO: emit Cmp here; for Phase 1 the const-key case is uncommon and
-                        // the extra rows will be filtered by downstream Cmp steps from the rule body.
+                        // Constant key, or key var not yet in schema: fall back to a
+                        // shared-var join; the downstream Filter enforces the key.
+                        // Uncommon in practice.
+                        emit_join(rel, &var_names, schema, steps);
                     }
 
-                    Ok(())
+                    lower_inner(body, ir, schema, steps, head_rel)
                 }
             }
         }

@@ -795,6 +795,37 @@ mod tests {
         Value::String(s.to_string())
     }
 
+    /// Regression: an `IndexLookup` join must lower to a KEYED `Step::Join`
+    /// (non-empty key columns), not a cross product. The mangle planner lowers
+    /// `reachable(X,Z) :- reachable(X,Y), link(Y,Z)` as an IndexLookup keyed on
+    /// Y; the DD backend must honor `col_idx` rather than cross-producting and
+    /// leaning on the downstream equality Filter.
+    #[test]
+    fn indexlookup_lowers_to_keyed_join() {
+        use crate::dd::lower::Step;
+        let rules = vec!["Decl link(Src, Dst).\nDecl reachable(Src, Dst).\n\
+             reachable(X, Y) :- link(X, Y).\n\
+             reachable(X, Z) :- reachable(X, Y), link(Y, Z)."
+            .to_string()];
+        let (strata, _edb) = crate::dd::build_strata(&rules).expect("build_strata");
+
+        let mut saw_join = false;
+        for stratum in &strata {
+            for rule in &stratum.rules {
+                for step in &rule.steps {
+                    if let Step::Join { left_key_cols, right_key_cols, .. } = step {
+                        saw_join = true;
+                        assert!(
+                            !left_key_cols.is_empty() && !right_key_cols.is_empty(),
+                            "IndexLookup join lowered to a cross product (empty key cols): {step:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(saw_join, "expected a Join in the lowered transitive-closure rules");
+    }
+
     /// Spin up a session with a trivial rule and verify query results.
     #[test]
     fn session_basic_query() {
