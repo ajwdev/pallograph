@@ -204,7 +204,7 @@ fn eval_aggregate(agg: &LoweredAggregate, input: &[(&Row, isize)]) -> Val {
 /// computed IDB) relations.
 ///
 /// `T` is the timestamp used by the enclosing timely dataflow scope.  Typically
-/// `T = u32` for the top-level batch scope; `T = Product<u32, u32>` for the
+/// `T = u64` for the top-level batch scope; `T = Product<u64, u32>` for the
 /// recursive inner scope in Phase 3.
 ///
 /// Returns the output `VecCollection<Row>` — its rows are the tuples to be
