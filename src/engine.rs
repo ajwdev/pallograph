@@ -412,6 +412,13 @@ impl CompiledProgram {
 
 pub trait Backend {
     fn evaluate(&self, edb: &[(String, Vec<Value>)], rule_sources: &[String]) -> Result<EvalStore>;
+
+    /// Whether this backend populates `EvalStore::provenance`. The experimental
+    /// DD backend does not yet, so provenance-dependent commands (`::why`) must
+    /// refuse rather than silently return nothing.
+    fn supports_provenance(&self) -> bool {
+        false
+    }
 }
 
 pub struct DdBackend;
@@ -431,6 +438,10 @@ impl Backend for DdBackend {
 pub struct InterpreterBackend;
 
 impl Backend for InterpreterBackend {
+    fn supports_provenance(&self) -> bool {
+        true
+    }
+
     fn evaluate(&self, edb: &[(String, Vec<Value>)], rule_sources: &[String]) -> Result<EvalStore> {
         let mut sources: Vec<&str> = vec![EDB_DECLS];
         for s in rule_sources {
@@ -727,6 +738,11 @@ impl Engine {
     /// True if a live incremental session is active.
     pub fn has_session(&self) -> bool {
         self.session.is_some()
+    }
+
+    /// Whether the active backend populates provenance (drives `::why`).
+    pub fn supports_provenance(&self) -> bool {
+        self.backend.supports_provenance()
     }
 
     /// Add a new rule (from the REPL) and mark state as dirty.

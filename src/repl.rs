@@ -544,6 +544,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
 
                 if let Some(rest) = line.strip_prefix("::why ") {
+                    if !engine.supports_provenance() {
+                        eprintln!(
+                            "::why is unavailable with the experimental DD backend \
+                             (no provenance yet). Re-run with --backend interpreter."
+                        );
+                        continue;
+                    }
                     let rest = rest.trim();
                     match query::parse_query(rest) {
                         Ok(q) => {

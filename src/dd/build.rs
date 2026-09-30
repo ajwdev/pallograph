@@ -66,6 +66,23 @@ fn eval_expr(expr: &OwnedExpr, row: &Row) -> Val {
 // String builtin filters (Condition::Call)
 // ---------------------------------------------------------------------------
 
+/// The set of `CallFilter` builtins the DD backend supports.
+///
+/// Single source of truth shared by [`is_supported_call_filter`] (build-time
+/// validation) and [`eval_call_filter`] (runtime evaluation) so the two cannot
+/// drift apart.
+const SUPPORTED_CALL_FILTERS: &[&str] = &[
+    ":string:starts_with",
+    ":string:ends_with",
+    ":string:contains",
+    ":match_prefix",
+];
+
+/// True if `func` is a `CallFilter` builtin the DD backend can evaluate.
+pub(crate) fn is_supported_call_filter(func: &str) -> bool {
+    SUPPORTED_CALL_FILTERS.contains(&func)
+}
+
 fn eval_call_filter(func: &str, args: &[Slot], row: &Row) -> Result<bool> {
     let vals: Vec<Val> = args.iter().map(|s| slot_val(s, row)).collect();
     match func {
@@ -316,6 +333,12 @@ where
             // ---------------------------------------------------------------
             Step::CallFilter { func, args } => {
                 let pipeline = curr.take().ok_or_else(|| anyhow::anyhow!("CallFilter before Scan"))?;
+                // Validate at build time: an unsupported/typo'd builtin would
+                // otherwise be swallowed by `.unwrap_or(false)` in the filter
+                // closure, silently dropping every row. Fail loudly instead.
+                if !is_supported_call_filter(func) {
+                    bail!("unsupported CallFilter function (DD backend limitation): {func}");
+                }
                 let func = func.clone();
                 let args = args.clone();
                 curr = Some(pipeline.filter(move |row| {

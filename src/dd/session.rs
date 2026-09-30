@@ -1027,4 +1027,51 @@ mod tests {
             "reflexive pair missing: {results:?}"
         );
     }
+
+    /// The DD backend's build-time guard for `Step::CallFilter` must reject any
+    /// function name it doesn't implement, sourced from the single
+    /// `is_supported_call_filter` list.
+    ///
+    /// NOTE: this is a direct unit test of the guard predicate rather than an
+    /// end-to-end spawn test, because a typo'd `:string:` name never reaches the
+    /// DD backend as a `Step::CallFilter`. The mangle planner has a hardcoded
+    /// allowlist of builtin predicate names (`:string:starts_with`,
+    /// `:string:ends_with`, `:string:contains`, `:match_prefix`, `:match_field`,
+    /// ...); only those become a `Condition::Call`. Any other `:`-prefixed atom
+    /// (e.g. the typo `:string:startswith`) falls through to the default arm and
+    /// is planned as an ordinary relation join instead. So the guard fires only
+    /// when the mangle allowlist grows to include a builtin the DD backend has
+    /// not yet implemented, keeping the two lists from drifting apart silently.
+    #[test]
+    fn dd_call_filter_guard_rejects_unsupported() {
+        use crate::dd::build::is_supported_call_filter;
+        // Every name the mangle planner turns into a Condition::Call today.
+        assert!(is_supported_call_filter(":string:starts_with"));
+        assert!(is_supported_call_filter(":string:ends_with"));
+        assert!(is_supported_call_filter(":string:contains"));
+        assert!(is_supported_call_filter(":match_prefix"));
+        // A typo / not-yet-implemented builtin must be rejected.
+        assert!(!is_supported_call_filter(":string:startswith"));
+        assert!(!is_supported_call_filter(":string:matches"));
+    }
+
+    /// A rule with a VALID string builtin must spawn successfully and produce
+    /// the expected filtered results (the guard must not break valid rules).
+    #[test]
+    fn session_supported_call_filter_ok() {
+        let edb: Vec<(String, Vec<Value>)> = vec![
+            ("name".to_string(), vec![v_str("alpha")]),
+            ("name".to_string(), vec![v_str("beta")]),
+        ];
+
+        let rules = vec![
+            "Decl name(N).\nDecl hit(N).\nhit(N) :- name(N), :string:starts_with(N, \"al\")."
+                .to_string(),
+        ];
+
+        let session = DdSession::spawn(&edb, &rules).expect("spawn with valid builtin");
+        let mut results = session.query("hit");
+        results.sort();
+        assert_eq!(results, vec![vec![v_str("alpha")]]);
+    }
 }
