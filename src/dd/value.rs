@@ -106,8 +106,8 @@ impl Ord for OrdF64 {
 pub enum Val {
     Number(i64),
     Float(OrdF64),
-    String(String),
-    Name(String),
+    String(std::sync::Arc<str>),
+    Name(std::sync::Arc<str>),
     Time(i64),
     Duration(i64),
     Compound(CompoundKindMirror, Vec<Val>),
@@ -201,8 +201,8 @@ impl From<&Value> for Val {
         match v {
             Value::Number(n) => Val::Number(*n),
             Value::Float(f) => Val::Float(OrdF64(*f)),
-            Value::String(s) => Val::String(s.clone()),
-            Value::Name(s) => Val::Name(s.clone()),
+            Value::String(s) => Val::String(s.as_str().into()),
+            Value::Name(s) => Val::Name(s.as_str().into()),
             Value::Time(t) => Val::Time(*t),
             Value::Duration(d) => Val::Duration(*d),
             Value::Compound(k, elems) => Val::Compound(
@@ -219,8 +219,8 @@ impl From<Val> for Value {
         match v {
             Val::Number(n) => Value::Number(n),
             Val::Float(OrdF64(f)) => Value::Float(f),
-            Val::String(s) => Value::String(s),
-            Val::Name(s) => Value::Name(s),
+            Val::String(s) => Value::String(s.to_string()),
+            Val::Name(s) => Value::Name(s.to_string()),
             Val::Time(t) => Value::Time(t),
             Val::Duration(d) => Value::Duration(d),
             Val::Compound(k, elems) => {
@@ -240,11 +240,21 @@ impl From<Val> for Value {
 /// Derives all the traits DD needs, including `Serialize`/`Deserialize` for
 /// `ExchangeData`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Row(pub Vec<Val>);
+pub struct Row(pub std::sync::Arc<[Val]>);
 
 impl Row {
+    pub fn empty() -> Row {
+        Row(Vec::new().into())
+    }
+
+    /// A new row with `extra` appended. Rows are immutable and shared, so
+    /// this allocates a fresh `Arc<[Val]>` rather than mutating in place.
+    pub fn appended(&self, extra: impl IntoIterator<Item = Val>) -> Row {
+        Row(self.0.iter().cloned().chain(extra).collect())
+    }
+
     pub fn into_values(self) -> Vec<Value> {
-        self.0.into_iter().map(Value::from).collect()
+        self.0.iter().cloned().map(Value::from).collect()
     }
 }
 

@@ -253,7 +253,7 @@ impl DdSession {
                             handles.insert(rel.clone(), handle);
                         }
 
-                        let unit_coll = scope.new_collection_from(vec![Row(vec![])]).1;
+                        let unit_coll = scope.new_collection_from(vec![Row::empty()]).1;
 
                         for stratum in strata_work.iter() {
                             if stratum.rules.is_empty() {
@@ -561,7 +561,7 @@ impl DdSession {
                                         .collect();
 
                                 let unit_coll =
-                                    scope.new_collection_from(vec![Row(vec![])]).1;
+                                    scope.new_collection_from(vec![Row::empty()]).1;
                                 let mut new_inner: HashMap<String, _> = HashMap::new();
                                 let mut layer_errors: Vec<String> = Vec::new();
 

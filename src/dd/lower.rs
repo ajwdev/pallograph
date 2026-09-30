@@ -176,8 +176,8 @@ fn resolve_constant(c: &Constant, ir: &Ir) -> Val {
     match c {
         Constant::Number(n) => Val::Number(*n),
         Constant::Float(f) => Val::Float(OrdF64(*f)),
-        Constant::String(sid) => Val::String(ir.resolve_string(*sid).to_string()),
-        Constant::Name(nid) => Val::Name(ir.resolve_name(*nid).to_string()),
+        Constant::String(sid) => Val::String(ir.resolve_string(*sid).into()),
+        Constant::Name(nid) => Val::Name(ir.resolve_name(*nid).into()),
         Constant::Time(t) => Val::Time(*t),
         Constant::Duration(d) => Val::Duration(*d),
     }
