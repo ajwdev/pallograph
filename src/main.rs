@@ -6,12 +6,12 @@
 mod config;
 mod dd;
 mod edb;
+mod selector;
 mod engine;
 mod load;
 // mod op_printer;
 mod query;
 mod repl;
-mod selector;
 mod smt;
 pub mod snapshot;
 mod value;

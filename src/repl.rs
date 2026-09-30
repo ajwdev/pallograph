@@ -173,6 +173,7 @@ fn print_help() {
     println!("  \\smt cluster-admin [p...]              — shorthand for reaches \"\" \"*\" \"*\" \"*\"");
     println!("  \\smt node_selector                     — find pods whose nodeSelector no node satisfies");
     println!("  \\smt anti_affinity                     — find a valid pod placement or prove none exists");
+    println!("  \\smt karpenter                         — find nodeSelector gaps in Karpenter NodePool coverage");
     println!("  \\smtlib <rel> [rel...]                 — dump SMT-LIB 2 encoding of relations");
     println!();
     println!("Session");
@@ -1410,9 +1411,21 @@ fn smt_command(input: &str, store: &EvalStore) {
                 }
             }
         }
+        "karpenter" => {
+            let gaps = smt::scheduling::find_karpenter_coverage_gaps(store, 5);
+            if gaps.is_empty() {
+                println!("PASS  full coverage — no nodeSelector gap found (Z3 UNSAT)");
+            } else {
+                println!("FAIL  {} coverage gap(s) found - nodeSelectors no NodePool can satisfy:", gaps.len());
+                for (i, gap) in gaps.iter().enumerate() {
+                    let labels: Vec<String> = gap.labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                    println!("  GAP {}  {}", i + 1, labels.join(", "));
+                }
+            }
+        }
         _ => {
             eprintln!("Unknown SMT subcommand: {subcommand:?}");
-            eprintln!("Available: check_access, check_isolation, reaches, cluster-admin, node_selector, anti_affinity");
+            eprintln!("Available: check_access, reaches, cluster-admin, node_selector, anti_affinity, karpenter");
         }
     }
 }

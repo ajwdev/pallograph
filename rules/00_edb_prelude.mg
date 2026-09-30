@@ -125,3 +125,32 @@ Decl selector_expr_notexists(ApiVersion, Kind, Namespace, Name, LabelKey)
     arg(LabelKey, "label key that must not exist")
   ]
   bound [/string, /string, /string, /string, /string].
+
+Decl nodepool_requirement(Pool, Key, Operator, Value)
+  descr [
+    doc("Karpenter NodePool requirements, one row per operator/value."),
+    arg(Pool, "NodePool name"),
+    arg(Key, "label key, e.g. kubernetes.io/arch"),
+    arg(Operator, "In, NotIn, Exists, or DoesNotExist"),
+    arg(Value, "allowed/excluded value; empty for Exists/DoesNotExist")
+  ]
+  bound [/string, /string, /string, /string].
+
+Decl nodepool_label(Pool, Key, Value)
+  descr [
+    doc("Labels guaranteed on nodes provisioned by a Karpenter NodePool."),
+    arg(Pool, "NodePool name"),
+    arg(Key, "label key"),
+    arg(Value, "label value")
+  ]
+  bound [/string, /string, /string].
+
+Decl nodepool_taint(Pool, Key, Value, Effect)
+  descr [
+    doc("Taints applied to nodes provisioned by a Karpenter NodePool."),
+    arg(Pool, "NodePool name"),
+    arg(Key, "taint key"),
+    arg(Value, "taint value"),
+    arg(Effect, "NoSchedule, NoExecute, or PreferNoSchedule")
+  ]
+  bound [/string, /string, /string, /string].

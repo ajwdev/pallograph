@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use mangle_common::Value;
-use z3::ast::{Ast, Bool, BV};
+use z3::ast::{Ast, Bool, BV, String as Z3String};
 use z3::SatResult;
 
 use crate::engine::EvalStore;
@@ -232,4 +232,266 @@ pub fn check_anti_affinity_placement(store: &EvalStore) -> PlacementResult {
         }
         _ => PlacementResult::Unsat,
     }
+}
+
+pub struct CoverageGap {
+    /// The synthesized nodeSelector that no pool can satisfy.
+    pub labels: Vec<(String, String)>,
+}
+
+/// Search for gaps in Karpenter NodePool coverage. Z3 synthesizes a concrete
+/// nodeSelector (a set of label key=value pairs drawn from the pools' own
+/// vocabularies) such that NO NodePool can provision a matching node. Each
+/// value individually appears in some pool, but the combination falls through
+/// every pool's constraints.
+///
+/// Returns up to `max_gaps` witnesses. An empty vec means full coverage
+/// (Z3 UNSAT proof).
+pub fn find_karpenter_coverage_gaps(store: &EvalStore, max_gaps: usize) -> Vec<CoverageGap> {
+    struct PoolReq {
+        in_values: HashSet<String>,
+        notin_values: HashSet<String>,
+        exists: bool,
+        does_not_exist: bool,
+    }
+
+    let mut pool_reqs: HashMap<String, HashMap<String, PoolReq>> = HashMap::new();
+    for tuple in store.scan("nodepool_requirement") {
+        if let [Value::String(pool), Value::String(key), Value::String(op), Value::String(val)] =
+            tuple.as_slice()
+        {
+            let entry = pool_reqs
+                .entry(pool.clone())
+                .or_default()
+                .entry(key.clone())
+                .or_insert_with(|| PoolReq {
+                    in_values: HashSet::new(),
+                    notin_values: HashSet::new(),
+                    exists: false,
+                    does_not_exist: false,
+                });
+            match op.as_str() {
+                "In" => { entry.in_values.insert(val.clone()); }
+                "NotIn" => { entry.notin_values.insert(val.clone()); }
+                "Exists" => { entry.exists = true; }
+                "DoesNotExist" => { entry.does_not_exist = true; }
+                _ => {}
+            }
+        }
+    }
+
+    let mut pool_labels: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for tuple in store.scan("nodepool_label") {
+        if let [Value::String(pool), Value::String(key), Value::String(val)] = tuple.as_slice() {
+            pool_labels
+                .entry(pool.clone())
+                .or_default()
+                .push((key.clone(), val.clone()));
+        }
+    }
+
+    let all_pools: Vec<String> = {
+        let mut s: HashSet<String> = pool_reqs.keys().cloned().collect();
+        for k in pool_labels.keys() {
+            s.insert(k.clone());
+        }
+        let mut v: Vec<_> = s.into_iter().collect();
+        v.sort();
+        v
+    };
+
+    if all_pools.is_empty() {
+        return vec![];
+    }
+
+    // Build the universe of values per label key across all pools.
+    let mut key_values: HashMap<String, Vec<String>> = HashMap::new();
+    for reqs in pool_reqs.values() {
+        for (key, req) in reqs {
+            let entry = key_values.entry(key.clone()).or_default();
+            for v in &req.in_values {
+                if !entry.contains(v) {
+                    entry.push(v.clone());
+                }
+            }
+        }
+    }
+    for labels in pool_labels.values() {
+        for (key, val) in labels {
+            let entry = key_values.entry(key.clone()).or_default();
+            if !entry.contains(val) {
+                entry.push(val.clone());
+            }
+        }
+    }
+
+    // Only consider keys with at least one known value.
+    let keys: Vec<(String, Vec<String>)> = {
+        let mut v: Vec<_> = key_values
+            .into_iter()
+            .filter(|(_, vs)| !vs.is_empty())
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    };
+
+    if keys.is_empty() {
+        return vec![];
+    }
+
+    let cfg = z3::Config::new();
+    let ctx = z3::Context::new(&cfg);
+    let solver = z3::Solver::new(&ctx);
+
+    // Per label key: a Z3 string var (the value) and a bool var (is this key
+    // part of the synthesized nodeSelector?).
+    let vars: Vec<(Z3String, Bool)> = keys
+        .iter()
+        .map(|(key, _)| {
+            (
+                Z3String::new_const(&ctx, format!("val_{key}").as_str()),
+                Bool::new_const(&ctx, format!("req_{key}").as_str()),
+            )
+        })
+        .collect();
+
+    // Constrain each value to its known universe when selected.
+    for (i, (_key, values)) in keys.iter().enumerate() {
+        let (ref val_var, ref req_var) = vars[i];
+        let in_universe: Vec<Bool> = values
+            .iter()
+            .map(|v| val_var._eq(&Z3String::from_str(&ctx, v).unwrap()))
+            .collect();
+        let refs: Vec<&Bool> = in_universe.iter().collect();
+        // req_var → val_var ∈ universe
+        solver.assert(&Bool::or(&ctx, &[&req_var.not(), &Bool::or(&ctx, &refs)]));
+    }
+
+    // At least two keys must be selected so the gap is combinatorial, not
+    // trivially "key X only exists in pool A."
+    // Fall back to one if there's only one key.
+    if keys.len() >= 2 {
+        let mut at_least_two: Vec<Bool> = Vec::new();
+        for i in 0..vars.len() {
+            for j in (i + 1)..vars.len() {
+                at_least_two.push(Bool::and(&ctx, &[&vars[i].1, &vars[j].1]));
+            }
+        }
+        let refs: Vec<&Bool> = at_least_two.iter().collect();
+        solver.assert(&Bool::or(&ctx, &refs));
+    } else {
+        let req_refs: Vec<&Bool> = vars.iter().map(|(_, r)| r).collect();
+        solver.assert(&Bool::or(&ctx, &req_refs));
+    }
+
+    // For each pool: assert the pool is blocked by at least one selected key.
+    let empty_reqs = HashMap::new();
+    let empty_labels: Vec<(String, String)> = Vec::new();
+    for pool_name in &all_pools {
+        let p_reqs = pool_reqs.get(pool_name).unwrap_or(&empty_reqs);
+        let p_labels = pool_labels.get(pool_name).unwrap_or(&empty_labels);
+        let guaranteed: HashMap<&str, &str> = p_labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        let mut blocking_clauses: Vec<Bool> = Vec::new();
+
+        for (i, (key, _values)) in keys.iter().enumerate() {
+            let (ref val_var, ref req_var) = vars[i];
+
+            // Can this pool provide key=val_var?
+            let can_provide = if let Some(req) = p_reqs.get(key) {
+                if req.does_not_exist {
+                    Bool::from_bool(&ctx, false)
+                } else {
+                    let mut conditions: Vec<Bool> = Vec::new();
+                    if !req.in_values.is_empty() {
+                        let clauses: Vec<Bool> = req
+                            .in_values
+                            .iter()
+                            .map(|v| val_var._eq(&Z3String::from_str(&ctx, v).unwrap()))
+                            .collect();
+                        let refs: Vec<&Bool> = clauses.iter().collect();
+                        conditions.push(Bool::or(&ctx, &refs));
+                    }
+                    for excluded in &req.notin_values {
+                        conditions.push(
+                            val_var
+                                ._eq(&Z3String::from_str(&ctx, excluded).unwrap())
+                                .not(),
+                        );
+                    }
+                    if let Some(&gv) = guaranteed.get(key.as_str()) {
+                        conditions.push(
+                            val_var._eq(&Z3String::from_str(&ctx, gv).unwrap()),
+                        );
+                    }
+                    if conditions.is_empty() {
+                        Bool::from_bool(&ctx, true)
+                    } else {
+                        let refs: Vec<&Bool> = conditions.iter().collect();
+                        Bool::and(&ctx, &refs)
+                    }
+                }
+            } else if let Some(&gv) = guaranteed.get(key.as_str()) {
+                val_var._eq(&Z3String::from_str(&ctx, gv).unwrap())
+            } else {
+                // Pool doesn't constrain this key at all - can provide any value.
+                Bool::from_bool(&ctx, true)
+            };
+
+            // This key blocks the pool if: key is selected AND pool can't provide the value.
+            blocking_clauses.push(Bool::and(&ctx, &[req_var, &can_provide.not()]));
+        }
+
+        // Pool must be blocked by at least one selected key.
+        let refs: Vec<&Bool> = blocking_clauses.iter().collect();
+        solver.assert(&Bool::or(&ctx, &refs));
+    }
+
+    // Extract witnesses, adding blocking clauses to find distinct gaps.
+    let mut gaps = Vec::new();
+    while gaps.len() < max_gaps {
+        if solver.check() != SatResult::Sat {
+            break;
+        }
+        let model = match solver.get_model() {
+            Some(m) => m,
+            None => break,
+        };
+
+        let mut labels = Vec::new();
+        let mut blocking: Vec<Bool> = Vec::new();
+        for (i, (key, _)) in keys.iter().enumerate() {
+            let (ref val_var, ref req_var) = vars[i];
+            let selected = model
+                .eval(req_var, true)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if selected {
+                if let Some(val) = model.eval(val_var, true).and_then(|v| v.as_string()) {
+                    blocking.push(
+                        Bool::and(&ctx, &[
+                            req_var,
+                            &val_var._eq(&Z3String::from_str(&ctx, &val).unwrap()),
+                        ])
+                        .not(),
+                    );
+                    labels.push((key.clone(), val));
+                }
+            }
+        }
+
+        if labels.is_empty() {
+            break;
+        }
+
+        let refs: Vec<&Bool> = blocking.iter().collect();
+        solver.assert(&Bool::or(&ctx, &refs));
+
+        gaps.push(CoverageGap { labels });
+    }
+
+    gaps
 }
