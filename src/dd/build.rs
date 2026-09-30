@@ -90,25 +90,25 @@ fn eval_call_filter(func: &str, args: &[Slot], row: &Row) -> Result<bool> {
             let (Val::String(s), Val::String(prefix)) = (&vals[0], &vals[1]) else {
                 return Ok(false);
             };
-            Ok(s.starts_with(prefix.as_str()))
+            Ok(s.starts_with(&**prefix))
         }
         ":string:ends_with" => {
             let (Val::String(s), Val::String(suffix)) = (&vals[0], &vals[1]) else {
                 return Ok(false);
             };
-            Ok(s.ends_with(suffix.as_str()))
+            Ok(s.ends_with(&**suffix))
         }
         ":string:contains" => {
             let (Val::String(s), Val::String(needle)) = (&vals[0], &vals[1]) else {
                 return Ok(false);
             };
-            Ok(s.contains(needle.as_str()))
+            Ok(s.contains(&**needle))
         }
         ":match_prefix" => {
             let (Val::Name(name), Val::Name(prefix)) = (&vals[0], &vals[1]) else {
                 return Ok(false);
             };
-            Ok(name.starts_with(prefix.as_str()))
+            Ok(name.starts_with(&**prefix))
         }
         other => bail!("unsupported CallFilter function: {other}"),
     }
@@ -373,7 +373,7 @@ where
                             // Struct layout: [k1, v1, k2, v2, ...]
                             let mut i = 0;
                             while i + 1 < kvs.len() {
-                                if kvs[i] == Val::Name(field.clone()) {
+                                if kvs[i] == Val::Name(field.as_str().into()) {
                                     let mut r = row;
                                     r.0.push(kvs[i + 1].clone());
                                     return vec![r];

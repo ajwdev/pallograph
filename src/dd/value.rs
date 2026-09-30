@@ -106,8 +106,8 @@ impl Ord for OrdF64 {
 pub enum Val {
     Number(i64),
     Float(OrdF64),
-    String(String),
-    Name(String),
+    String(std::sync::Arc<str>),
+    Name(std::sync::Arc<str>),
     Time(i64),
     Duration(i64),
     Compound(CompoundKindMirror, Vec<Val>),
@@ -201,8 +201,8 @@ impl From<&Value> for Val {
         match v {
             Value::Number(n) => Val::Number(*n),
             Value::Float(f) => Val::Float(OrdF64(*f)),
-            Value::String(s) => Val::String(s.clone()),
-            Value::Name(s) => Val::Name(s.clone()),
+            Value::String(s) => Val::String(s.as_str().into()),
+            Value::Name(s) => Val::Name(s.as_str().into()),
             Value::Time(t) => Val::Time(*t),
             Value::Duration(d) => Val::Duration(*d),
             Value::Compound(k, elems) => Val::Compound(
@@ -219,8 +219,8 @@ impl From<Val> for Value {
         match v {
             Val::Number(n) => Value::Number(n),
             Val::Float(OrdF64(f)) => Value::Float(f),
-            Val::String(s) => Value::String(s),
-            Val::Name(s) => Value::Name(s),
+            Val::String(s) => Value::String(s.to_string()),
+            Val::Name(s) => Value::Name(s.to_string()),
             Val::Time(t) => Value::Time(t),
             Val::Duration(d) => Value::Duration(d),
             Val::Compound(k, elems) => {
