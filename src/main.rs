@@ -142,7 +142,9 @@ async fn main() -> Result<()> {
         }
     }
 
+    // --explain only compiles, so skip starting a DD session for it.
     let backend: Box<dyn Backend> = match cli.backend {
+        _ if cli.explain => Box::new(InterpreterBackend),
         BackendKind::Interpreter => Box::new(InterpreterBackend),
         BackendKind::Dd => Box::new(DdBackend),
     };
@@ -152,15 +154,6 @@ async fn main() -> Result<()> {
     if cli.explain {
         let mut cp = engine.compile()?;
         return cp.dump_plan();
-    }
-
-    // Spawn a persistent DD session for incremental evaluation.
-    // The initial evaluate() below seeds current_store for non-session queries
-    // (::show, ::why, etc.); subsequent fact mutations bypass full recomputes.
-    if cli.backend == BackendKind::Dd {
-        if let Err(e) = engine.enable_incremental() {
-            eprintln!("Warning: incremental session unavailable ({e:#}); falling back to batch mode");
-        }
     }
 
     let store = engine.evaluate()?;

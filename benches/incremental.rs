@@ -62,7 +62,7 @@ fn interpreter_add_fact(c: &mut Criterion) {
         b.iter_custom(|iters| {
             // Build a fresh engine once per sample — not per iteration.
             let mut engine =
-                Engine::from_parts(edb.clone(), rules.clone(), Box::new(InterpreterBackend));
+                Engine::from_parts(edb.clone(), rules.clone(), Box::new(InterpreterBackend)).expect("engine");
             let start = Instant::now();
             for i in 0..iters {
                 let (rel, tuple) = bench_fact(i);
@@ -80,8 +80,7 @@ fn dd_add_fact(c: &mut Criterion) {
         b.iter_custom(|iters| {
             // Session startup is setup, not measurement.
             let mut engine =
-                Engine::from_parts(edb.clone(), rules.clone(), Box::new(DdBackend));
-            engine.enable_incremental().expect("enable_incremental");
+                Engine::from_parts(edb.clone(), rules.clone(), Box::new(DdBackend)).expect("engine");
             let start = Instant::now();
             for i in 0..iters {
                 let (rel, tuple) = bench_fact(i);
@@ -102,7 +101,7 @@ fn interpreter_retract_fact(c: &mut Criterion) {
         b.iter_custom(|iters| {
             // Pre-insert the facts during setup (not timed), then retract them.
             let mut engine =
-                Engine::from_parts(edb.clone(), rules.clone(), Box::new(InterpreterBackend));
+                Engine::from_parts(edb.clone(), rules.clone(), Box::new(InterpreterBackend)).expect("engine");
             for i in 0..iters {
                 let (rel, tuple) = bench_fact(i);
                 engine.add_fact(rel, tuple);
@@ -124,8 +123,7 @@ fn dd_retract_fact(c: &mut Criterion) {
         b.iter_custom(|iters| {
             // Pre-insert the facts during setup (not timed), then retract them.
             let mut engine =
-                Engine::from_parts(edb.clone(), rules.clone(), Box::new(DdBackend));
-            engine.enable_incremental().expect("enable_incremental");
+                Engine::from_parts(edb.clone(), rules.clone(), Box::new(DdBackend)).expect("engine");
             for i in 0..iters {
                 let (rel, tuple) = bench_fact(i);
                 engine.add_fact(rel, tuple);

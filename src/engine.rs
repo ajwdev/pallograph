@@ -419,11 +419,30 @@ pub trait Backend {
     fn supports_provenance(&self) -> bool {
         false
     }
+
+    /// Start a persistent incremental session seeded with `edb` + `rule_sources`,
+    /// if this backend has one. `Engine` owns it and keeps it in sync with every
+    /// mutation; the default (interpreter) has none and recomputes on demand.
+    fn spawn_session(
+        &self,
+        _edb: &[(String, Vec<Value>)],
+        _rule_sources: &[String],
+    ) -> Result<Option<crate::dd::session::DdSession>> {
+        Ok(None)
+    }
 }
 
 pub struct DdBackend;
 
 impl Backend for DdBackend {
+    fn spawn_session(
+        &self,
+        edb: &[(String, Vec<Value>)],
+        rule_sources: &[String],
+    ) -> Result<Option<crate::dd::session::DdSession>> {
+        crate::dd::session::DdSession::spawn(edb, rule_sources).map(Some)
+    }
+
     fn evaluate(&self, edb: &[(String, Vec<Value>)], rule_sources: &[String]) -> Result<EvalStore> {
         // Batch mode = spawn a persistent session, snapshot every relation, drop.
         // spawn() blocks until the worker is settled at epoch 1, so snapshot_all()
@@ -626,9 +645,10 @@ pub struct Engine {
     /// Lengths of edb and rule_sources after initial load — used by reset_session.
     edb_base_len: usize,
     rules_base_len: usize,
-    /// Persistent incremental DD session.  Present only when `enable_incremental`
-    /// has been called (DD backend + REPL mode).  When Some, fact mutations are
-    /// fed directly to the worker rather than waiting for a full recompute.
+    /// Persistent incremental DD session, started by `Backend::spawn_session`
+    /// (present for the DD backend, absent for the interpreter).  When Some, fact
+    /// mutations are fed directly to the worker rather than waiting for a full
+    /// recompute.
     session: Option<crate::dd::session::DdSession>,
 }
 
@@ -677,18 +697,7 @@ impl Engine {
             rule_sources.push(src);
         }
 
-        let edb = drain_store(edb_store);
-        let edb_base_len = edb.len();
-        let rules_base_len = rule_sources.len();
-
-        Ok(Self {
-            edb,
-            rule_sources,
-            backend,
-            edb_base_len,
-            rules_base_len,
-            session: None,
-        })
+        Self::from_parts(drain_store(edb_store), rule_sources, backend)
     }
 
     /// Construct an Engine directly from pre-loaded data, bypassing all file I/O.
@@ -700,29 +709,21 @@ impl Engine {
         edb: Vec<(String, Vec<Value>)>,
         rule_sources: Vec<String>,
         backend: Box<dyn Backend>,
-    ) -> Self {
+    ) -> Result<Self> {
         let edb_base_len = edb.len();
         let rules_base_len = rule_sources.len();
-        Self {
+        // Backends with a persistent session (DD) start it here, so fact
+        // mutations feed deltas to the worker rather than forcing a full
+        // recompute. Rule changes still trigger a full worker rebuild.
+        let session = backend.spawn_session(&edb, &rule_sources)?;
+        Ok(Self {
             edb,
             rule_sources,
             backend,
             edb_base_len,
             rules_base_len,
-            session: None,
-        }
-    }
-
-    /// Spawn a persistent DD session seeded with the current EDB + rules.
-    ///
-    /// After this call, fact mutations (`add_fact`/`retract_fact`) feed deltas
-    /// to the worker rather than accumulating for a full recompute.  Rule
-    /// changes still trigger a full worker rebuild.
-    pub fn enable_incremental(&mut self) -> Result<()> {
-        let session =
-            crate::dd::session::DdSession::spawn(&self.edb, &self.rule_sources)?;
-        self.session = Some(session);
-        Ok(())
+            session,
+        })
     }
 
     /// Query a relation from the live DD session.

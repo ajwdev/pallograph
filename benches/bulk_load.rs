@@ -11,7 +11,7 @@
 //! Two variants:
 //!
 //! - `interpreter`  — `InterpreterBackend::evaluate`, the baseline
-//! - `dd_session`   — `enable_incremental()`, which builds the dataflow graph,
+//! - `dd_session`   — `Engine::from_parts`, which builds the dataflow graph,
 //!                    spawns the persistent worker, and feeds + settles the
 //!                    initial EDB; this is the real DD startup cost
 //!
@@ -40,9 +40,8 @@ fn dd_session_spawn(c: &mut Criterion) {
             // settle the full initial EDB.  Worker shutdown happens at drop,
             // outside the timed window.
             |(edb_c, rules_c)| {
-                let mut engine =
-                    Engine::from_parts(edb_c, rules_c, Box::new(DdBackend));
-                engine.enable_incremental().expect("enable_incremental");
+                let engine =
+                    Engine::from_parts(edb_c, rules_c, Box::new(DdBackend)).expect("engine");
                 engine
             },
             BatchSize::SmallInput,
