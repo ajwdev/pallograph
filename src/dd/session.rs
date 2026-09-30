@@ -51,7 +51,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use differential_dataflow::input::{Input, InputSession};
+use differential_dataflow::operators::arrange::TraceAgent;
 use differential_dataflow::operators::iterate::VecVariable;
+use differential_dataflow::trace::implementations::KeySpine;
 use differential_dataflow::trace::{Cursor, TraceReader};
 use differential_dataflow::VecCollection;
 use mangle_common::Value;
@@ -79,6 +81,9 @@ pub enum Command {
     /// Milestone A: the worker reads the mutex on behalf of the caller so
     /// the API is uniform; Milestone B will cursor the trace instead.
     Query { rel: String, resp: Sender<Vec<Vec<Value>>> },
+    /// Snapshot EVERY relation's current contents (EDB + IDB) and send them back.
+    /// Used by the batch `DdBackend::evaluate` path.
+    SnapshotAll { resp: Sender<HashMap<String, Vec<Vec<Value>>>> },
     /// Attempt to add new IDB rules by layering a fresh dataflow.
     ///
     /// The worker checks whether the new rule's head predicate (`new_head`) is
@@ -102,6 +107,39 @@ pub enum AddOutcome {
     Layered,
     /// The rule extends an existing predicate or is recursive; caller must rebuild.
     NeedsRebuild,
+}
+
+// ---------------------------------------------------------------------------
+// Trace draining
+// ---------------------------------------------------------------------------
+
+/// Concrete trace type produced by `arrange_by_self()` on a `Row` collection.
+/// Spelled out so `drain_trace` can be a plain (non-generic) function — the
+/// `Key`/`Diff` GATs resist a generic signature.
+type RowTrace = TraceAgent<KeySpine<Row, u32, isize>>;
+
+/// Drain all rows with a positive accumulated count from a single trace.
+///
+/// Shared by `Command::Query` (one relation) and `Command::SnapshotAll` (every
+/// relation).  Cursoring requires `&mut` on the trace; the returned `Vec` is
+/// owned, so the caller can iterate `traces` mutably without borrow conflicts.
+fn drain_trace(trace: &mut RowTrace) -> Vec<Vec<Value>> {
+    let (mut cursor, storage) = trace.cursor();
+    let mut result = Vec::new();
+    while cursor.key_valid(&storage) {
+        while cursor.val_valid(&storage) {
+            let mut count: isize = 0;
+            cursor.map_times(&storage, |_t, diff| {
+                count += diff;
+            });
+            if count > 0 {
+                result.push(cursor.key(&storage).to_owned().into_values());
+            }
+            cursor.step_val(&storage);
+        }
+        cursor.step_key(&storage);
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -432,30 +470,16 @@ impl DdSession {
                             let _ = ack.send(());
                         }
                         Command::Query { rel, resp } => {
-                            let rows: Vec<Vec<Value>> =
-                                if let Some(trace) = traces.get_mut(&rel) {
-                                    let (mut cursor, storage) = trace.cursor();
-                                    let mut result = Vec::new();
-                                    while cursor.key_valid(&storage) {
-                                        while cursor.val_valid(&storage) {
-                                            let mut count: isize = 0;
-                                            cursor.map_times(&storage, |_t, diff| {
-                                                count += diff;
-                                            });
-                                            if count > 0 {
-                                                result.push(
-                                                    cursor.key(&storage).clone().into_values(),
-                                                );
-                                            }
-                                            cursor.step_val(&storage);
-                                        }
-                                        cursor.step_key(&storage);
-                                    }
-                                    result
-                                } else {
-                                    vec![]
-                                };
+                            let rows =
+                                traces.get_mut(&rel).map(drain_trace).unwrap_or_default();
                             let _ = resp.send(rows);
+                        }
+                        Command::SnapshotAll { resp } => {
+                            let mut out: HashMap<String, Vec<Vec<Value>>> = HashMap::new();
+                            for (rel, trace) in traces.iter_mut() {
+                                out.insert(rel.clone(), drain_trace(trace));
+                            }
+                            let _ = resp.send(out);
                         }
                         Command::AddRules { all_rule_sources, new_head, ack } => {
                             // Check if the new rule extends an already-materialized predicate.
@@ -634,6 +658,16 @@ impl DdSession {
             rel: rel.to_string(),
             resp: resp_tx,
         });
+        resp_rx.recv().unwrap_or_default()
+    }
+
+    /// Snapshot every relation (EDB + all derived IDB) at the current frontier.
+    ///
+    /// Used by the batch `DdBackend::evaluate` path: spawn a session, snapshot,
+    /// then drop.  Mirrors `query()` but returns all relations at once.
+    pub fn snapshot_all(&self) -> HashMap<String, Vec<Vec<Value>>> {
+        let (resp_tx, resp_rx) = bounded(1);
+        let _ = self.tx.send(Command::SnapshotAll { resp: resp_tx });
         resp_rx.recv().unwrap_or_default()
     }
 

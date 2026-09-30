@@ -8,13 +8,15 @@
 //! is called once before the benchmark loop and the results are cloned into
 //! each iteration's setup.
 //!
-//! Three variants:
+//! Two variants:
 //!
 //! - `interpreter`  — `InterpreterBackend::evaluate`, the baseline
-//! - `dd_batch`     — `DdBackend::evaluate` (stateless, full recompute each call)
 //! - `dd_session`   — `enable_incremental()`, which builds the dataflow graph,
 //!                    spawns the persistent worker, and feeds + settles the
 //!                    initial EDB; this is the real DD startup cost
+//!
+//! (`DdBackend::evaluate` now just spawns + snapshots + drops a session, so a
+//! separate batch bench would duplicate `dd_session`.)
 //!
 //! Run:  cargo bench --bench bulk_load
 
@@ -25,13 +27,6 @@ fn interpreter_evaluate(c: &mut Criterion) {
     let (edb, rules) = load_bench_fixtures().expect("load fixtures");
     c.bench_function("bulk_load/interpreter", |b| {
         b.iter(|| InterpreterBackend.evaluate(&edb, &rules).unwrap())
-    });
-}
-
-fn dd_evaluate_batch(c: &mut Criterion) {
-    let (edb, rules) = load_bench_fixtures().expect("load fixtures");
-    c.bench_function("bulk_load/dd_batch", |b| {
-        b.iter(|| DdBackend.evaluate(&edb, &rules).unwrap())
     });
 }
 
@@ -55,5 +50,5 @@ fn dd_session_spawn(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, interpreter_evaluate, dd_evaluate_batch, dd_session_spawn);
+criterion_group!(benches, interpreter_evaluate, dd_session_spawn);
 criterion_main!(benches);

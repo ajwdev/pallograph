@@ -418,7 +418,12 @@ pub struct DdBackend;
 
 impl Backend for DdBackend {
     fn evaluate(&self, edb: &[(String, Vec<Value>)], rule_sources: &[String]) -> Result<EvalStore> {
-        let facts = crate::dd::evaluate(edb, rule_sources)?;
+        // Batch mode = spawn a persistent session, snapshot every relation, drop.
+        // spawn() blocks until the worker is settled at epoch 1, so snapshot_all()
+        // sees fully-derived state.  Dropping the session shuts the worker down.
+        let session = crate::dd::session::DdSession::spawn(edb, rule_sources)
+            .context("spawn dd session")?;
+        let facts = session.snapshot_all();
         Ok(EvalStore { facts, provenance: vec![] })
     }
 }
