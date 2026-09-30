@@ -41,6 +41,8 @@ z3 = "0.12"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+# Used by integration tests (tests/) to construct `Value` fixtures.
+mangle-common = { git = "https://codeberg.org/ajwdev/mangle-rs.git", branch = "indexed-store" }
 
 [[bench]]
 name = "bulk_load"
