@@ -730,12 +730,17 @@ impl Engine {
     }
 
     /// Add a new rule (from the REPL) and mark state as dirty.
-    pub fn add_rule(&mut self, rule: String) {
+    ///
+    /// When an incremental session is live, the rule is layered into it; a rule
+    /// the DD backend cannot translate is reported as an error (and left in
+    /// `rule_sources` for the caller to roll back) rather than silently dropped.
+    pub fn add_rule(&mut self, rule: String) -> Result<()> {
         let new_head = extract_head_pred(&rule);
         self.rule_sources.push(rule);
         if let Some(s) = &mut self.session {
-            let _ = s.add_idb(new_head.as_deref(), &self.edb, &self.rule_sources);
+            s.add_idb(new_head.as_deref(), &self.edb, &self.rule_sources)?;
         }
+        Ok(())
     }
 
     /// Return the arity of an existing EDB relation, or None if no facts exist yet.

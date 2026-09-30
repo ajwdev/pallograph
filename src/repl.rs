@@ -481,7 +481,11 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     let body = body.as_str();
                     let result_name = format!("_{query_counter}");
                     let rule = format!("{result_name}({}) :- {body}.", vars.join(", "));
-                    engine.add_rule(rule);
+                    if let Err(e) = engine.add_rule(rule) {
+                        eprintln!("Error: {e:#}");
+                        engine.remove_rules_for(&result_name);
+                        continue;
+                    }
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
@@ -684,7 +688,11 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
                 if let Some(rule) = line.strip_prefix("::define ") {
                     let checkpoint = engine.rules_len();
-                    engine.add_rule(format!("{}.", rule.trim_end_matches('.').trim()));
+                    if let Err(e) = engine.add_rule(format!("{}.", rule.trim_end_matches('.').trim())) {
+                        engine.truncate_rules(checkpoint);
+                        eprintln!("Error: {e:#}");
+                        continue;
+                    }
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
@@ -704,7 +712,11 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         Ok(bytes) => match std::str::from_utf8(&bytes) {
                             Ok(text) => {
                                 let checkpoint = engine.rules_len();
-                                engine.add_rule(text.to_string());
+                                if let Err(e) = engine.add_rule(text.to_string()) {
+                                    engine.truncate_rules(checkpoint);
+                                    eprintln!("Error: {e:#}");
+                                    continue;
+                                }
                                 match engine.evaluate() {
                                     Ok(new_store) => {
                                         current_store = new_store;

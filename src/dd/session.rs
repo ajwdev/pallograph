@@ -107,6 +107,9 @@ pub enum AddOutcome {
     Layered,
     /// The rule extends an existing predicate or is recursive; caller must rebuild.
     NeedsRebuild,
+    /// The rule set is invalid (compile error, or a rule the DD builder cannot
+    /// translate).  The caller should reject it and keep the existing session.
+    Error(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -198,9 +201,13 @@ impl DdSession {
         // as soon as the thread is launched — it does NOT wait for the closure body
         // to run.  Without this rendezvous, `spawn()` would return before the initial
         // EDB seed/settle below has actually happened, racing the caller against the
-        // worker thread.  `ready_tx` is signalled once settle completes; `spawn()`
-        // blocks on `ready_rx` before returning.
-        let (ready_tx, ready_rx): (Sender<()>, Receiver<()>) = bounded(1);
+        // worker thread.  `ready_tx` carries `Ok(())` once settle completes, or
+        // `Err(msg)` if any rule failed to translate; `spawn()` blocks on
+        // `ready_rx` before returning and propagates that result.
+        let (ready_tx, ready_rx): (
+            Sender<Result<(), String>>,
+            Receiver<Result<(), String>>,
+        ) = bounded(1);
 
         // -----------------------------------------------------------------------
         // Launch the worker.
@@ -224,7 +231,7 @@ impl DdSession {
             let input_rels = Arc::clone(&input_rels);
             let edb_by_rel = Arc::clone(&edb_by_rel);
 
-            let (mut handles, mut traces) = worker
+            let (mut handles, mut traces, build_errors) = worker
                 .dataflow::<u32, _, _>({
                     let input_rels = Arc::clone(&input_rels);
                     let strata_work = strata_work;
@@ -235,6 +242,10 @@ impl DdSession {
                             HashMap::new();
                         let mut rels: HashMap<String, VecCollection<'_, u32, Row>> =
                             HashMap::new();
+                        // Any rule the DD builder can't translate is collected here and
+                        // reported back to spawn() so it fails loudly rather than
+                        // silently dropping the rule (which would yield wrong results).
+                        let mut build_errors: Vec<String> = Vec::new();
 
                         for rel in input_rels.iter() {
                             let (handle, coll) = scope.new_collection::<Row, isize>();
@@ -308,11 +319,10 @@ impl DdSession {
                                                         .push(coll);
                                                 }
                                                 Err(e) => {
-                                                    eprintln!(
-                                                        "dd(session/recursive): skipping \
-                                                         rule for `{}`: {e}",
+                                                    build_errors.push(format!(
+                                                        "rule for `{}`: {e}",
                                                         rule.head_rel
-                                                    );
+                                                    ));
                                                 }
                                             }
                                         }
@@ -365,10 +375,10 @@ impl DdSession {
                                                 .push(coll);
                                         }
                                         Err(e) => {
-                                            eprintln!(
-                                                "dd(session): skipping rule for `{}`: {e}",
+                                            build_errors.push(format!(
+                                                "rule for `{}`: {e}",
                                                 rule.head_rel
-                                            );
+                                            ));
                                         }
                                     }
                                 }
@@ -405,9 +415,17 @@ impl DdSession {
                             traces.insert(rel_name, arranged.trace);
                         }
 
-                        (handles, traces)
+                        (handles, traces, build_errors)
                     }
                 });
+
+            // If any rule failed to translate, abandon the (unrun) dataflow and
+            // report the failure to spawn() instead of silently proceeding with
+            // an incomplete rule set.
+            if !build_errors.is_empty() {
+                let _ = ready_tx.send(Err(build_errors.join("\n")));
+                return;
+            }
 
             // ------------------------------------------------------------------
             // Seed the worker with the initial EDB at epoch 1, then settle.
@@ -428,7 +446,7 @@ impl DdSession {
 
             // Tell `spawn()` the initial seed/settle is done and it's safe to
             // hand the session to the caller.
-            let _ = ready_tx.send(());
+            let _ = ready_tx.send(Ok(()));
 
             // ------------------------------------------------------------------
             // Command loop.
@@ -497,8 +515,9 @@ impl DdSession {
                             let (all_strata, _edb_rels) = match build_strata(&all_rule_sources) {
                                 Ok(r) => r,
                                 Err(e) => {
-                                    eprintln!("dd(session/layer): compile error: {e:#}");
-                                    let _ = ack.send(AddOutcome::NeedsRebuild);
+                                    let _ = ack.send(AddOutcome::Error(format!(
+                                        "compile error: {e:#}"
+                                    )));
                                     continue;
                                 }
                             };
@@ -527,7 +546,8 @@ impl DdSession {
                                 traces.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                             let probe_ref = probe.clone();
 
-                            let mut new_traces = worker.dataflow::<u32, _, _>(move |scope| {
+                            let (mut new_traces, layer_errors) =
+                                worker.dataflow::<u32, _, _>(move |scope| {
                                 // Import each existing trace as a VecCollection.
                                 let mut rels: HashMap<String, VecCollection<'_, u32, Row>> =
                                     imported_traces
@@ -543,6 +563,7 @@ impl DdSession {
                                 let unit_coll =
                                     scope.new_collection_from(vec![Row(vec![])]).1;
                                 let mut new_inner: HashMap<String, _> = HashMap::new();
+                                let mut layer_errors: Vec<String> = Vec::new();
 
                                 for stratum in &to_layer {
                                     let mut by_head: HashMap<
@@ -558,11 +579,10 @@ impl DdSession {
                                                     .push(coll);
                                             }
                                             Err(e) => {
-                                                eprintln!(
-                                                    "dd(session/layer): skipping rule \
-                                                     for `{}`: {e}",
+                                                layer_errors.push(format!(
+                                                    "rule for `{}`: {e}",
                                                     rule.head_rel
-                                                );
+                                                ));
                                             }
                                         }
                                     }
@@ -579,8 +599,16 @@ impl DdSession {
                                     }
                                 }
 
-                                new_inner
+                                (new_inner, layer_errors)
                             });
+
+                            // A rule failed to translate: reject the addition and keep
+                            // the existing session intact (the just-built dataflow is
+                            // abandoned, unsettled).
+                            if !layer_errors.is_empty() {
+                                let _ = ack.send(AddOutcome::Error(layer_errors.join("\n")));
+                                continue;
+                            }
 
                             // Settle the new dataflow to the current epoch.
                             worker.step_or_park_while(None, || probe.less_than(&epoch));
@@ -616,10 +644,19 @@ impl DdSession {
 
         // Block until the worker thread has finished the initial seed/settle
         // (see `ready_tx` above) so callers can rely on the documented
-        // "settled at epoch 1" invariant.
-        ready_rx
-            .recv()
-            .map_err(|e| anyhow::anyhow!("worker exited before settling: {e}"))?;
+        // "settled at epoch 1" invariant.  A build failure surfaces here.
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(msg)) => {
+                // The worker has already returned; dropping the guard joins it.
+                return Err(anyhow::anyhow!(
+                    "dd backend cannot evaluate these rules:\n{msg}"
+                ));
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("worker exited before settling: {e}"));
+            }
+        }
 
         Ok(DdSession {
             tx,
@@ -693,6 +730,9 @@ impl DdSession {
         match ack_rx.recv()? {
             AddOutcome::Layered => Ok(()),
             AddOutcome::NeedsRebuild => self.rebuild(edb, all_rule_sources),
+            AddOutcome::Error(msg) => Err(anyhow::anyhow!(
+                "dd backend cannot evaluate this rule:\n{msg}"
+            )),
         }
     }
 
