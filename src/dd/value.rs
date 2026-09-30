@@ -240,11 +240,21 @@ impl From<Val> for Value {
 /// Derives all the traits DD needs, including `Serialize`/`Deserialize` for
 /// `ExchangeData`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Row(pub Vec<Val>);
+pub struct Row(pub std::sync::Arc<[Val]>);
 
 impl Row {
+    pub fn empty() -> Row {
+        Row(Vec::new().into())
+    }
+
+    /// A new row with `extra` appended. Rows are immutable and shared, so
+    /// this allocates a fresh `Arc<[Val]>` rather than mutating in place.
+    pub fn appended(&self, extra: impl IntoIterator<Item = Val>) -> Row {
+        Row(self.0.iter().cloned().chain(extra).collect())
+    }
+
     pub fn into_values(self) -> Vec<Value> {
-        self.0.into_iter().map(Value::from).collect()
+        self.0.iter().cloned().map(Value::from).collect()
     }
 }
 

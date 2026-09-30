@@ -271,9 +271,7 @@ where
                 });
 
                 curr = Some(left_keyed.join_map(right_keyed, |_key, left_full: &Row, right_new: &Row| {
-                    let mut result = left_full.clone();
-                    result.0.extend(right_new.0.iter().cloned());
-                    result
+                    left_full.appended(right_new.0.iter().cloned())
                 }));
             }
 
@@ -352,10 +350,9 @@ where
             Step::Let { expr } => {
                 let pipeline = curr.take().ok_or_else(|| anyhow::anyhow!("Let before Scan"))?;
                 let expr = expr.clone();
-                curr = Some(pipeline.map(move |mut row| {
+                curr = Some(pipeline.map(move |row| {
                     let v = eval_expr(&expr, &row);
-                    row.0.push(v);
-                    row
+                    row.appended(std::iter::once(v))
                 }));
             }
 
@@ -374,9 +371,7 @@ where
                             let mut i = 0;
                             while i + 1 < kvs.len() {
                                 if kvs[i] == Val::Name(field.as_str().into()) {
-                                    let mut r = row;
-                                    r.0.push(kvs[i + 1].clone());
-                                    return vec![r];
+                                    return vec![row.appended(std::iter::once(kvs[i + 1].clone()))];
                                 }
                                 i += 2;
                             }
@@ -399,11 +394,7 @@ where
                         Val::Compound(CompoundKindMirror::List, elems)
                         | Val::Compound(CompoundKindMirror::Pair, elems) => elems
                             .into_iter()
-                            .map(|elem| {
-                                let mut r = row.clone();
-                                r.0.push(elem);
-                                r
-                            })
+                            .map(|elem| row.appended(std::iter::once(elem)))
                             .collect(),
                         _ => vec![],
                     }
@@ -435,12 +426,12 @@ where
                     keyed.reduce(move |_key, input: &[(&Row, isize)], output: &mut Vec<(Row, isize)>| {
                         let agg_vals: Vec<Val> =
                             aggs.iter().map(|a| eval_aggregate(a, input)).collect();
-                        output.push((Row(agg_vals), 1));
+                        output.push((Row(agg_vals.into()), 1));
                     });
 
                 // Flatten (key_Row, agg_Row) into a single Row: key ++ aggs.
                 curr = Some(reduced.map(|(key, aggs)| {
-                    Row(key.0.into_iter().chain(aggs.0).collect())
+                    Row(key.0.iter().chain(aggs.0.iter()).cloned().collect())
                 }));
             }
 
