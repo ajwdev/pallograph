@@ -800,6 +800,9 @@ impl Engine {
         let mut tmp = mangle_interpreter::MemStore::new();
         crate::edb::populate(&mut tmp, source)?;
         self.edb.extend(drain_store(tmp));
+        if let Some(s) = &mut self.session {
+            s.rebuild(&self.edb, &self.rule_sources)?;
+        }
         Ok(())
     }
 
@@ -844,6 +847,11 @@ impl Engine {
     }
 
     pub fn evaluate(&self) -> Result<EvalStore> {
+        // A live session is kept in sync by every mutator, so snapshot it
+        // rather than spawning (and settling) a second dataflow.
+        if let Some(s) = &self.session {
+            return Ok(EvalStore { facts: s.snapshot_all(), provenance: vec![] });
+        }
         self.backend.evaluate(&self.edb, &self.rule_sources)
     }
 
