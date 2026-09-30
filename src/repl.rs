@@ -481,7 +481,11 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     let body = body.as_str();
                     let result_name = format!("_{query_counter}");
                     let rule = format!("{result_name}({}) :- {body}.", vars.join(", "));
-                    engine.add_rule(rule);
+                    if let Err(e) = engine.add_rule(rule) {
+                        eprintln!("Error: {e:#}");
+                        engine.remove_rules_for(&result_name);
+                        continue;
+                    }
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
@@ -540,6 +544,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
 
                 if let Some(rest) = line.strip_prefix("::why ") {
+                    if !engine.supports_provenance() {
+                        eprintln!(
+                            "::why is unavailable with the experimental DD backend \
+                             (no provenance yet). Re-run with --backend interpreter."
+                        );
+                        continue;
+                    }
                     let rest = rest.trim();
                     match query::parse_query(rest) {
                         Ok(q) => {
@@ -684,7 +695,11 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
                 if let Some(rule) = line.strip_prefix("::define ") {
                     let checkpoint = engine.rules_len();
-                    engine.add_rule(format!("{}.", rule.trim_end_matches('.').trim()));
+                    if let Err(e) = engine.add_rule(format!("{}.", rule.trim_end_matches('.').trim())) {
+                        engine.truncate_rules(checkpoint);
+                        eprintln!("Error: {e:#}");
+                        continue;
+                    }
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
@@ -704,7 +719,11 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         Ok(bytes) => match std::str::from_utf8(&bytes) {
                             Ok(text) => {
                                 let checkpoint = engine.rules_len();
-                                engine.add_rule(text.to_string());
+                                if let Err(e) = engine.add_rule(text.to_string()) {
+                                    engine.truncate_rules(checkpoint);
+                                    eprintln!("Error: {e:#}");
+                                    continue;
+                                }
                                 match engine.evaluate() {
                                     Ok(new_store) => {
                                         current_store = new_store;
@@ -788,16 +807,16 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                     }
                                     let removed = engine.retract_fact(&old_rel, &old_tuple);
                                     engine.add_fact(new_rel, new_tuple);
-                                    match engine.evaluate() {
-                                        Ok(new_store) => {
-                                            current_store = new_store;
-                                            if removed {
-                                                println!("Replaced.");
-                                            } else {
-                                                println!("Warning: old fact not found; new fact inserted.");
+                                    if engine.has_session() {
+                                        if removed { println!("Replaced."); } else { println!("Warning: old fact not found; new fact inserted."); }
+                                    } else {
+                                        match engine.evaluate() {
+                                            Ok(new_store) => {
+                                                current_store = new_store;
+                                                if removed { println!("Replaced."); } else { println!("Warning: old fact not found; new fact inserted."); }
                                             }
+                                            Err(e) => eprintln!("Error: {e:#}"),
                                         }
-                                        Err(e) => eprintln!("Error: {e:#}"),
                                     }
                                 }
                                 Err(e) => eprintln!("Parse error: {e}"),
@@ -820,12 +839,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 }
                             }
                             if engine.add_fact(rel, tuple) {
-                                match engine.evaluate() {
-                                    Ok(new_store) => {
-                                        current_store = new_store;
-                                        eprintln!("Asserted.");
+                                if engine.has_session() {
+                                    eprintln!("Asserted.");
+                                } else {
+                                    match engine.evaluate() {
+                                        Ok(new_store) => { current_store = new_store; eprintln!("Asserted."); }
+                                        Err(e) => eprintln!("Error: {e:#}"),
                                     }
-                                    Err(e) => eprintln!("Error: {e:#}"),
                                 }
                             } else {
                                 eprintln!("Fact already exists.");
@@ -842,12 +862,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     match parse_ground_tuple(inner) {
                         Ok((rel, tuple)) => {
                             if engine.retract_fact(&rel, &tuple) {
-                                match engine.evaluate() {
-                                    Ok(new_store) => {
-                                        current_store = new_store;
-                                        eprintln!("Retracted.");
+                                if engine.has_session() {
+                                    eprintln!("Retracted.");
+                                } else {
+                                    match engine.evaluate() {
+                                        Ok(new_store) => { current_store = new_store; eprintln!("Retracted."); }
+                                        Err(e) => eprintln!("Error: {e:#}"),
                                     }
-                                    Err(e) => eprintln!("Error: {e:#}"),
                                 }
                             } else {
                                 eprintln!("No matching fact found.");
@@ -885,7 +906,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 if line.contains('(') {
                     match query::parse_query(&line) {
                         Ok(q) => {
-                            let rows = current_store.scan(&q.predicate);
+                            let live: Vec<Vec<mangle_common::Value>>;
+                            let rows: &[Vec<mangle_common::Value>] = if engine.has_session() {
+                                live = engine.query_live(&q.predicate);
+                                &live
+                            } else {
+                                current_store.scan(&q.predicate)
+                            };
                             let matched = query::filter_tuples(rows, &q);
                             let pred = &q.predicate;
                             if matched.is_empty() {
@@ -911,7 +938,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 } else {
                     // Bare predicate name (with optional arity like pred/3 stripped)
                     let pred = line.split('/').next().unwrap_or(&line).trim();
-                    let tuples = current_store.scan(pred);
+                    let live: Vec<Vec<mangle_common::Value>>;
+                    let tuples: &[Vec<mangle_common::Value>] = if engine.has_session() {
+                        live = engine.query_live(pred);
+                        &live
+                    } else {
+                        current_store.scan(pred)
+                    };
                     if tuples.is_empty() {
                         eprintln!("No entries for '{pred}'.");
                     } else {

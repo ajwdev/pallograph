@@ -4,6 +4,7 @@
 #![feature(iter_intersperse)]
 
 mod config;
+mod dd;
 mod edb;
 mod engine;
 mod load;
@@ -24,7 +25,7 @@ use mangle_interpreter::MemStore;
 use engine::{Backend, DdBackend, Engine, InterpreterBackend};
 use repl::OutputFormat;
 
-#[derive(clap::ValueEnum, Clone)]
+#[derive(clap::ValueEnum, Clone, PartialEq)]
 enum BackendKind {
     Interpreter,
     Dd,
@@ -144,6 +145,15 @@ async fn main() -> Result<()> {
     if cli.explain {
         let mut cp = engine.compile()?;
         return cp.dump_plan();
+    }
+
+    // Spawn a persistent DD session for incremental evaluation.
+    // The initial evaluate() below seeds current_store for non-session queries
+    // (::show, ::why, etc.); subsequent fact mutations bypass full recomputes.
+    if cli.backend == BackendKind::Dd {
+        if let Err(e) = engine.enable_incremental() {
+            eprintln!("Warning: incremental session unavailable ({e:#}); falling back to batch mode");
+        }
     }
 
     let store = engine.evaluate()?;

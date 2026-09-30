@@ -38,18 +38,18 @@ pub struct Violation {
 /// Encodes Mangle ground facts as Z3 assertions and exposes the solver for
 /// constraint checking.
 pub struct SmtEncoder<'ctx> {
-    pub(crate) ctx: &'ctx z3::Context,
-    pub(crate) solver: Solver<'ctx>,
-    pub(crate) decls: HashMap<String, FuncDecl<'ctx>>,
+    pub ctx: &'ctx z3::Context,
+    pub solver: Solver<'ctx>,
+    pub decls: HashMap<String, FuncDecl<'ctx>>,
     /// Recursively-defined functions (used for can, effective_can axioms).
     /// RecFuncDecl derefs to FuncDecl; use `get_decl` for a unified lookup.
-    pub(crate) rec_decls: HashMap<String, RecFuncDecl<'ctx>>,
-    pub(crate) facts: HashMap<String, Vec<Vec<Value>>>,
+    pub rec_decls: HashMap<String, RecFuncDecl<'ctx>>,
+    pub facts: HashMap<String, Vec<Vec<Value>>>,
     /// (principal, namespace, apigroup, resource, verb) entries per named suffix.
     /// Key is the suffix passed to assert_rbac_axioms_as (empty string = bare "can").
-    pub(crate) can_entries: HashMap<String, Vec<(String, String, String, String, String)>>,
+    pub can_entries: HashMap<String, Vec<(String, String, String, String, String)>>,
     /// (principal, namespace, apigroup, resource, verb) entries for effective_can, same keying.
-    pub(crate) eff_entries: HashMap<String, Vec<(String, String, String, String, String)>>,
+    pub eff_entries: HashMap<String, Vec<(String, String, String, String, String)>>,
 }
 
 impl<'ctx> SmtEncoder<'ctx> {
@@ -67,7 +67,7 @@ impl<'ctx> SmtEncoder<'ctx> {
 
     /// Return a reference to the named decl, checking `rec_decls` (closed
     /// recursive definitions) before `decls` (ground-fact uninterpreted fns).
-    pub(crate) fn get_decl(&self, name: &str) -> Option<&FuncDecl<'ctx>> {
+    pub fn get_decl(&self, name: &str) -> Option<&FuncDecl<'ctx>> {
         if let Some(rd) = self.rec_decls.get(name) {
             Some(rd)  // RecFuncDecl derefs to &FuncDecl<'ctx>
         } else {
@@ -107,14 +107,14 @@ impl<'ctx> SmtEncoder<'ctx> {
         self.solver.to_string()
     }
 
-    pub(crate) fn sort_of(&self, v: &Value) -> Sort<'ctx> {
+    pub fn sort_of(&self, v: &Value) -> Sort<'ctx> {
         match v {
             Value::Number(_) => Sort::int(self.ctx),
             _ => Sort::string(self.ctx),
         }
     }
 
-    pub(crate) fn ast_of(&self, v: &Value) -> Dynamic<'ctx> {
+    pub fn ast_of(&self, v: &Value) -> Dynamic<'ctx> {
         match v {
             Value::Number(n) => Int::from_i64(self.ctx, *n).into(),
             Value::String(s) | Value::Name(s) => {

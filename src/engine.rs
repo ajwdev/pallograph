@@ -12,7 +12,7 @@ use mangle_interpreter::{Interpreter, MemStore, ProvenanceEntry};
 use mangle_ir::physical::{Condition, Constant, DataSource, Op, Operand};
 use mangle_ir::{Inst, InstId, Ir, NameId};
 
-const EDB_DECLS: &str = include_str!("../rules/00_edb_prelude.mg");
+pub(crate) const EDB_DECLS: &str = include_str!("../rules/00_edb_prelude.mg");
 
 /// Snapshot of all derived facts after an evaluation pass.
 pub struct EvalStore {
@@ -412,23 +412,36 @@ impl CompiledProgram {
 
 pub trait Backend {
     fn evaluate(&self, edb: &[(String, Vec<Value>)], rule_sources: &[String]) -> Result<EvalStore>;
+
+    /// Whether this backend populates `EvalStore::provenance`. The experimental
+    /// DD backend does not yet, so provenance-dependent commands (`::why`) must
+    /// refuse rather than silently return nothing.
+    fn supports_provenance(&self) -> bool {
+        false
+    }
 }
 
 pub struct DdBackend;
 
 impl Backend for DdBackend {
-    fn evaluate(
-        &self,
-        _edb: &[(String, Vec<Value>)],
-        _rule_sources: &[String],
-    ) -> Result<EvalStore> {
-        bail!("DD backend not yet implemented")
+    fn evaluate(&self, edb: &[(String, Vec<Value>)], rule_sources: &[String]) -> Result<EvalStore> {
+        // Batch mode = spawn a persistent session, snapshot every relation, drop.
+        // spawn() blocks until the worker is settled at epoch 1, so snapshot_all()
+        // sees fully-derived state.  Dropping the session shuts the worker down.
+        let session = crate::dd::session::DdSession::spawn(edb, rule_sources)
+            .context("spawn dd session")?;
+        let facts = session.snapshot_all();
+        Ok(EvalStore { facts, provenance: vec![] })
     }
 }
 
 pub struct InterpreterBackend;
 
 impl Backend for InterpreterBackend {
+    fn supports_provenance(&self) -> bool {
+        true
+    }
+
     fn evaluate(&self, edb: &[(String, Vec<Value>)], rule_sources: &[String]) -> Result<EvalStore> {
         let mut sources: Vec<&str> = vec![EDB_DECLS];
         for s in rule_sources {
@@ -613,6 +626,42 @@ pub struct Engine {
     /// Lengths of edb and rule_sources after initial load — used by reset_session.
     edb_base_len: usize,
     rules_base_len: usize,
+    /// Persistent incremental DD session.  Present only when `enable_incremental`
+    /// has been called (DD backend + REPL mode).  When Some, fact mutations are
+    /// fed directly to the worker rather than waiting for a full recompute.
+    session: Option<crate::dd::session::DdSession>,
+}
+
+/// Load `testdata/` manifests and `rules/*.mg` files into the raw
+/// `(edb, rule_sources)` pair consumed by `Backend::evaluate`.
+///
+/// Intended for benchmarks and integration tests; not used in the binary.
+pub fn load_bench_fixtures() -> Result<(Vec<(String, Vec<Value>)>, Vec<String>)> {
+    let mut store = MemStore::new();
+    crate::edb::load_from_manifests(&mut store, vec!["testdata".to_string()])
+        .context("load testdata")?;
+
+    let mut edb: Vec<(String, Vec<Value>)> = Vec::new();
+    for rel in store.relation_names() {
+        let rel: String = rel;
+        for tuple in store.get_facts(&rel) {
+            edb.push((rel.clone(), tuple));
+        }
+    }
+
+    let rule_files = glob::glob("rules/*.mg")
+        .context("glob rules")?
+        .collect::<Result<Vec<_>, _>>()
+        .context("glob entries")?;
+    let mut rules: Vec<String> = rule_files
+        .iter()
+        .map(|p| {
+            std::fs::read_to_string(p)
+                .with_context(|| format!("reading {}", p.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    rules.sort();
+    Ok((edb, rules))
 }
 
 impl Engine {
@@ -638,12 +687,76 @@ impl Engine {
             backend,
             edb_base_len,
             rules_base_len,
+            session: None,
         })
     }
 
+    /// Construct an Engine directly from pre-loaded data, bypassing all file I/O.
+    ///
+    /// Use in benchmarks to isolate Datalog evaluation cost from data-source
+    /// loading.  Call `load_bench_fixtures()` once to get `(edb, rules)`, then
+    /// pass clones into this constructor per iteration.
+    pub fn from_parts(
+        edb: Vec<(String, Vec<Value>)>,
+        rule_sources: Vec<String>,
+        backend: Box<dyn Backend>,
+    ) -> Self {
+        let edb_base_len = edb.len();
+        let rules_base_len = rule_sources.len();
+        Self {
+            edb,
+            rule_sources,
+            backend,
+            edb_base_len,
+            rules_base_len,
+            session: None,
+        }
+    }
+
+    /// Spawn a persistent DD session seeded with the current EDB + rules.
+    ///
+    /// After this call, fact mutations (`add_fact`/`retract_fact`) feed deltas
+    /// to the worker rather than accumulating for a full recompute.  Rule
+    /// changes still trigger a full worker rebuild.
+    pub fn enable_incremental(&mut self) -> Result<()> {
+        let session =
+            crate::dd::session::DdSession::spawn(&self.edb, &self.rule_sources)?;
+        self.session = Some(session);
+        Ok(())
+    }
+
+    /// Query a relation from the live DD session.
+    ///
+    /// Returns an empty vec if no session is active or the relation is unknown.
+    pub fn query_live(&self, rel: &str) -> Vec<Vec<Value>> {
+        match &self.session {
+            Some(s) => s.query(rel),
+            None => vec![],
+        }
+    }
+
+    /// True if a live incremental session is active.
+    pub fn has_session(&self) -> bool {
+        self.session.is_some()
+    }
+
+    /// Whether the active backend populates provenance (drives `::why`).
+    pub fn supports_provenance(&self) -> bool {
+        self.backend.supports_provenance()
+    }
+
     /// Add a new rule (from the REPL) and mark state as dirty.
-    pub fn add_rule(&mut self, rule: String) {
+    ///
+    /// When an incremental session is live, the rule is layered into it; a rule
+    /// the DD backend cannot translate is reported as an error (and left in
+    /// `rule_sources` for the caller to roll back) rather than silently dropped.
+    pub fn add_rule(&mut self, rule: String) -> Result<()> {
+        let new_head = extract_head_pred(&rule);
         self.rule_sources.push(rule);
+        if let Some(s) = &mut self.session {
+            s.add_idb(new_head.as_deref(), &self.edb, &self.rule_sources)?;
+        }
+        Ok(())
     }
 
     /// Return the arity of an existing EDB relation, or None if no facts exist yet.
@@ -655,6 +768,11 @@ impl Engine {
     pub fn add_fact(&mut self, relation: String, tuple: Vec<Value>) -> bool {
         let entry = (relation, tuple);
         if !self.edb.contains(&entry) {
+            if let Some(s) = &self.session {
+                let row = crate::dd::value::Row::from(entry.1.as_slice());
+                s.insert(entry.0.clone(), row);
+                s.commit();
+            }
             self.edb.push(entry);
             true
         } else {
@@ -665,6 +783,11 @@ impl Engine {
     /// Remove a ground fact from the EDB. Returns true if a matching fact was found and removed.
     pub fn retract_fact(&mut self, relation: &str, tuple: &[Value]) -> bool {
         if let Some(pos) = self.edb.iter().position(|(r, t)| r == relation && t.as_slice() == tuple) {
+            if let Some(s) = &self.session {
+                let row = crate::dd::value::Row::from(tuple);
+                s.retract(relation.to_string(), row);
+                s.commit();
+            }
             self.edb.remove(pos);
             true
         } else {
@@ -686,6 +809,9 @@ impl Engine {
     pub fn reset_session(&mut self) {
         self.edb.truncate(self.edb_base_len);
         self.rule_sources.truncate(self.rules_base_len);
+        if let Some(s) = &mut self.session {
+            let _ = s.rebuild(&self.edb, &self.rule_sources);
+        }
     }
 
     pub fn rules_len(&self) -> usize {
@@ -694,13 +820,18 @@ impl Engine {
 
     pub fn truncate_rules(&mut self, len: usize) {
         self.rule_sources.truncate(len);
+        if let Some(s) = &mut self.session {
+            let _ = s.rebuild(&self.edb, &self.rule_sources);
+        }
     }
-
 
     /// Remove all rules whose head matches `predicate`.
     pub fn remove_rules_for(&mut self, predicate: &str) {
         let prefix = format!("{predicate}(");
         self.rule_sources.retain(|s| !s.trim_start().starts_with(&prefix));
+        if let Some(s) = &mut self.session {
+            let _ = s.rebuild(&self.edb, &self.rule_sources);
+        }
     }
 
     pub fn compile(&self) -> Result<CompiledProgram> {
@@ -721,6 +852,130 @@ impl Engine {
     pub fn relation_docs(&self) -> Result<HashMap<String, RelationDoc>> {
         Ok(self.compile()?.relation_docs())
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Load the testdata/ manifests + rules/*.mg files and return the raw
+    /// (edb, rule_sources) pair that both backends consume.
+    fn load_fixtures() -> Result<(Vec<(String, Vec<Value>)>, Vec<String>)> {
+        let mut edb_store = MemStore::new();
+        crate::edb::load_from_manifests(&mut edb_store, vec!["testdata".to_string()])
+            .context("load testdata")?;
+        let edb = drain_store(edb_store);
+
+        let rule_files = glob::glob("rules/*.mg")
+            .context("glob rules")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("glob entries")?;
+        let mut rules: Vec<String> = rule_files
+            .iter()
+            .map(|p| std::fs::read_to_string(p).with_context(|| format!("read {}", p.display())))
+            .collect::<Result<Vec<_>>>()?;
+        rules.sort(); // deterministic order
+        Ok((edb, rules))
+    }
+
+    #[test]
+    fn bench_evaluate_compare() {
+        let (edb, rules) = load_fixtures().expect("load fixtures");
+        let n = 10;
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
+            InterpreterBackend.evaluate(&edb, &rules).unwrap();
+        }
+        let interp_avg = t0.elapsed() / n;
+
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
+            DdBackend.evaluate(&edb, &rules).unwrap();
+        }
+        let dd_avg = t0.elapsed() / n;
+
+        println!("interpreter avg: {:?}", interp_avg);
+        println!("dd          avg: {:?}", dd_avg);
+        println!("ratio dd/interp: {:.1}x", dd_avg.as_secs_f64() / interp_avg.as_secs_f64());
+    }
+
+    /// Assert that every relation produced by the two backends contains the
+    /// exact same set of tuples (order-independent).
+    #[test]
+    fn dd_matches_interpreter() {
+        let (edb, rules) = load_fixtures().expect("load fixtures");
+
+        let interp = InterpreterBackend
+            .evaluate(&edb, &rules)
+            .expect("interpreter failed");
+        let dd = DdBackend
+            .evaluate(&edb, &rules)
+            .expect("dd failed");
+
+        let all_rels: std::collections::HashSet<&str> = interp
+            .relation_names()
+            .chain(dd.relation_names())
+            .collect();
+
+        let mut failures: Vec<String> = Vec::new();
+        for rel in &all_rels {
+            // Skip planner-internal temp relations (e.g. $temp_grp_0).
+            // The interpreter materialises these as a side-effect of GroupBy
+            // planning; the DD backend inlines them and never exposes them.
+            if rel.starts_with('$') {
+                continue;
+            }
+
+            let mut interp_tuples = interp.scan(rel).to_vec();
+            let mut dd_tuples = dd.scan(rel).to_vec();
+            interp_tuples.sort();
+            dd_tuples.sort();
+            if interp_tuples != dd_tuples {
+                failures.push(format!(
+                    "{rel}: interpreter={}, dd={}",
+                    interp_tuples.len(),
+                    dd_tuples.len()
+                ));
+                // Show first differing tuple for quick diagnosis.
+                for t in &interp_tuples {
+                    if !dd_tuples.contains(t) {
+                        failures.push(format!("  missing from dd:   {t:?}"));
+                        break;
+                    }
+                }
+                for t in &dd_tuples {
+                    if !interp_tuples.contains(t) {
+                        failures.push(format!("  extra in dd:       {t:?}"));
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert!(failures.is_empty(), "parity failures:\n{}", failures.join("\n"));
+    }
+}
+
+/// Extract the head predicate name from a Mangle rule source string.
+///
+/// Scans for the first non-empty, non-`Decl`, non-comment line and returns
+/// the identifier before the opening `(`.  Returns `None` if the source
+/// contains only declarations (or cannot be parsed).
+fn extract_head_pred(rule_src: &str) -> Option<String> {
+    for line in rule_src.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("Decl") || line.starts_with("//") {
+            continue;
+        }
+        if let Some(pred) = line.split('(').next() {
+            let pred = pred.trim();
+            if !pred.is_empty() {
+                return Some(pred.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Drain all facts from a MemStore into a Vec for later replay.
