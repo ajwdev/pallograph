@@ -62,7 +62,14 @@ async fn load_datasource(edb: &mut MemStore, name: &str, ds: &config::Datasource
     match ds.source {
         SourceKind::K8s => {
             eprintln!("  {name}: cluster (live)");
-            let client = kube::Client::try_default().await?;
+            let mut config = kube::Config::infer().await?;
+            // Profilers (samply) inject DYLD_INSERT_LIBRARIES; keep it out of the
+            // exec auth plugin or dyld aborts on arm64e binaries.
+            if let Some(exec) = config.auth_info.exec.as_mut() {
+                exec.drop_env.get_or_insert_with(Vec::new)
+                    .push("DYLD_INSERT_LIBRARIES".into());
+            }
+            let client = kube::Client::try_from(config)?;
             edb::load_from_cluster(edb, client).await?;
         }
         SourceKind::File => {
