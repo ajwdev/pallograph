@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
+[profile.release]
+debug = true # Keeps debug symbols without sacrificing release optimizations
+
 [build-dependencies]
 mangle-ast    = { git = "https://codeberg.org/ajwdev/mangle-rs.git", branch = "indexed-store" }
 mangle-driver = { git = "https://codeberg.org/ajwdev/mangle-rs.git", branch = "indexed-store" }
