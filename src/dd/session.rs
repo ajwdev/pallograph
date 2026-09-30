@@ -119,7 +119,7 @@ pub enum AddOutcome {
 /// Concrete trace type produced by `arrange_by_self()` on a `Row` collection.
 /// Spelled out so `drain_trace` can be a plain (non-generic) function — the
 /// `Key`/`Diff` GATs resist a generic signature.
-type RowTrace = TraceAgent<KeySpine<Row, u32, isize>>;
+type RowTrace = TraceAgent<KeySpine<Row, u64, isize>>;
 
 /// Drain all rows with a positive accumulated count from a single trace.
 ///
@@ -232,15 +232,15 @@ impl DdSession {
             let edb_by_rel = Arc::clone(&edb_by_rel);
 
             let (mut handles, mut traces, build_errors) = worker
-                .dataflow::<u32, _, _>({
+                .dataflow::<u64, _, _>({
                     let input_rels = Arc::clone(&input_rels);
                     let strata_work = strata_work;
                     let probe_ref = probe.clone();
 
                     move |scope| {
-                        let mut handles: HashMap<String, InputSession<u32, Row, isize>> =
+                        let mut handles: HashMap<String, InputSession<u64, Row, isize>> =
                             HashMap::new();
-                        let mut rels: HashMap<String, VecCollection<'_, u32, Row>> =
+                        let mut rels: HashMap<String, VecCollection<'_, u64, Row>> =
                             HashMap::new();
                         // Any rule the DD builder can't translate is collected here and
                         // reported back to spawn() so it fails loudly rather than
@@ -267,14 +267,14 @@ impl DdSession {
                                     .map(|r| r.head_rel.clone())
                                     .collect();
 
-                                let results: HashMap<String, VecCollection<'_, u32, Row>> =
-                                    scope.iterative::<u64, _, _>(|nested| {
+                                let results: HashMap<String, VecCollection<'_, u64, Row>> =
+                                    scope.iterative::<u32, _, _>(|nested| {
                                         let summary =
-                                            Product::new(Default::default(), 1u64);
+                                            Product::new(Default::default(), 1u32);
 
                                         let mut inner_rels: HashMap<
                                             String,
-                                            VecCollection<'_, Product<u32, u64>, Row>,
+                                            VecCollection<'_, Product<u64, u32>, Row>,
                                         > = rels
                                             .iter()
                                             .map(|(k, v)| (k.clone(), v.clone().enter(nested)))
@@ -283,11 +283,11 @@ impl DdSession {
 
                                         let mut vars: HashMap<
                                             String,
-                                            VecVariable<'_, Product<u32, u64>, Row, isize>,
+                                            VecVariable<'_, Product<u64, u32>, Row, isize>,
                                         > = HashMap::new();
                                         let mut var_colls: HashMap<
                                             String,
-                                            VecCollection<'_, Product<u32, u64>, Row>,
+                                            VecCollection<'_, Product<u64, u32>, Row>,
                                         > = HashMap::new();
                                         for pred in &head_preds {
                                             if let Some(seed) = inner_rels.remove(pred) {
@@ -308,7 +308,7 @@ impl DdSession {
 
                                         let mut by_head: HashMap<
                                             String,
-                                            Vec<VecCollection<'_, Product<u32, u64>, Row>>,
+                                            Vec<VecCollection<'_, Product<u64, u32>, Row>>,
                                         > = HashMap::new();
                                         for rule in &stratum.rules {
                                             match build_rule(rule, &inner_rels, &inner_unit) {
@@ -329,7 +329,7 @@ impl DdSession {
 
                                         let mut out: HashMap<
                                             String,
-                                            VecCollection<'_, u32, Row>,
+                                            VecCollection<'_, u64, Row>,
                                         > = HashMap::new();
                                         for (pred, var) in vars {
                                             let curr = var_colls.remove(&pred).unwrap();
@@ -363,7 +363,7 @@ impl DdSession {
                             } else {
                                 let mut by_head: HashMap<
                                     String,
-                                    Vec<VecCollection<'_, u32, Row>>,
+                                    Vec<VecCollection<'_, u64, Row>>,
                                 > = HashMap::new();
 
                                 for rule in &stratum.rules {
@@ -442,7 +442,7 @@ impl DdSession {
                 handle.flush();
             }
             // Step until the initial EDB is fully propagated.
-            worker.step_or_park_while(None, || probe.less_than(&1u32));
+            worker.step_or_park_while(None, || probe.less_than(&1u64));
 
             // Tell `spawn()` the initial seed/settle is done and it's safe to
             // hand the session to the caller.
@@ -454,7 +454,7 @@ impl DdSession {
             // The epoch monotonically increases.  Insert/Remove commands buffer
             // diffs into the InputSession; Commit advances the epoch and steps
             // the worker until the probe clears, then acks.  Shutdown exits.
-            let mut epoch: u32 = 1;
+            let mut epoch: u64 = 1;
 
             loop {
                 match rx.recv() {
@@ -547,9 +547,9 @@ impl DdSession {
                             let probe_ref = probe.clone();
 
                             let (mut new_traces, layer_errors) =
-                                worker.dataflow::<u32, _, _>(move |scope| {
+                                worker.dataflow::<u64, _, _>(move |scope| {
                                 // Import each existing trace as a VecCollection.
-                                let mut rels: HashMap<String, VecCollection<'_, u32, Row>> =
+                                let mut rels: HashMap<String, VecCollection<'_, u64, Row>> =
                                     imported_traces
                                         .into_iter()
                                         .map(|(name, mut trace)| {
@@ -568,7 +568,7 @@ impl DdSession {
                                 for stratum in &to_layer {
                                     let mut by_head: HashMap<
                                         String,
-                                        Vec<VecCollection<'_, u32, Row>>,
+                                        Vec<VecCollection<'_, u64, Row>>,
                                     > = HashMap::new();
                                     for rule in &stratum.rules {
                                         match build_rule(rule, &rels, &unit_coll) {
