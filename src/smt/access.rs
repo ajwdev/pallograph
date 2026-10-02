@@ -748,7 +748,7 @@ impl<'ctx> SmtEncoder<'ctx> {
     }
 
     /// Return the direct escalation mechanism(s) from `principal` to `target` in one hop.
-    /// Returns a comma-separated string, e.g. "pods/exec, token". Empty string if unknown.
+    /// Returns a comma-separated string, e.g. "pod-exec, token". Empty string if unknown.
     fn mechanism_for(&self, principal: &str, target: &str) -> Option<String> {
         use mangle_common::Value;
 
@@ -780,7 +780,7 @@ impl<'ctx> SmtEncoder<'ctx> {
             .get("exec_reachable_sa")
             .is_some_and(|r| r.iter().any(|row| matches_sa(row, 1, 2)))
         {
-            mechanisms.push("pods/exec");
+            mechanisms.push("pod-exec");
         }
         if self
             .facts
@@ -794,7 +794,7 @@ impl<'ctx> SmtEncoder<'ctx> {
             .get("pod_creatable_sa")
             .is_some_and(|r| r.iter().any(|row| matches_sa(row, 1, 2)))
         {
-            mechanisms.push("pods create");
+            mechanisms.push("pod-create");
         }
         if self
             .facts
@@ -1093,5 +1093,48 @@ mod tests {
             shown.contains(&"system:kube-controller-manager".to_string()),
             "builtin missing with include_builtins: {shown:?}"
         );
+    }
+
+    #[test]
+    fn pod_exec_and_pod_create_hops_use_hyphenated_mechanism_labels() {
+        // demo:target holds cluster-admin and runs a pod. exec-user can only
+        // exec into pods in demo; create-user can only create pods in demo.
+        let role = |name: &str, resource: &str| {
+            format!(
+                r#"{{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"Role","metadata":{{"name":"{name}","namespace":"demo"}},"rules":[{{"apiGroups":[""],"resources":["{resource}"],"verbs":["create"]}}]}}"#
+            )
+        };
+        let binding = |name: &str, user: &str| {
+            format!(
+                r#"{{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{{"name":"{name}","namespace":"demo"}},"roleRef":{{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"{name}"}},"subjects":[{{"kind":"User","name":"{user}"}}]}}"#
+            )
+        };
+        let extra = [
+            r#"{"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"target","namespace":"demo"}}"#.to_string(),
+            r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","namespace":"demo"},"spec":{"serviceAccountName":"target","containers":[{"name":"c","image":"busybox"}]}}"#.to_string(),
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"target-admin"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"ServiceAccount","name":"target","namespace":"demo"}]}"#.to_string(),
+            role("exec-role", "pods/exec"),
+            binding("exec-role", "exec-user"),
+            role("create-role", "pods"),
+            binding("create-role", "create-user"),
+        ]
+        .join("\n");
+        let eval = load_engine_with(&extra).evaluate().expect("evaluate");
+
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let mut enc = SmtEncoder::new(&ctx);
+        enc.assert_rbac_axioms(&eval);
+
+        let mechanisms = |user: &str| -> Vec<String> {
+            enc.paths_for_principal(user, "", Some(("", "*", "*", "*")))
+                .into_iter()
+                .flat_map(|p| p.hops)
+                .filter(|(id, _)| id == "system:serviceaccount:demo:target")
+                .map(|(_, mech)| mech)
+                .collect()
+        };
+        assert_eq!(mechanisms("exec-user"), vec!["pod-exec"]);
+        assert_eq!(mechanisms("create-user"), vec!["pod-create"]);
     }
 }
