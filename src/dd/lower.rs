@@ -70,8 +70,8 @@ pub enum Step {
     Unit,
 
     /// First step: seed the pipeline by scanning `rel`.
-    /// After this step the schema has `n_cols` columns in relation-column order.
-    Scan { rel: String, n_cols: usize },
+    /// After this step the schema holds `rel`'s columns in relation-column order.
+    Scan { rel: String },
 
     /// Join the current pipeline against `rel`.
     ///
@@ -129,7 +129,7 @@ pub enum Step {
     },
 
     /// Final step: project the specified slots into the head relation's tuple.
-    Insert { head_rel: String, proj: Vec<Slot> },
+    Insert { proj: Vec<Slot> },
 }
 
 /// One lowered aggregate in a `Step::Reduce`.
@@ -285,12 +285,8 @@ fn lower_inner(
                         .collect();
 
                     if schema.is_empty() {
-                        let n = var_names.len();
                         schema.extend(var_names);
-                        steps.push(Step::Scan {
-                            rel: rel_name,
-                            n_cols: n,
-                        });
+                        steps.push(Step::Scan { rel: rel_name });
                     } else {
                         emit_join(rel_name, &var_names, schema, steps);
                     }
@@ -336,9 +332,8 @@ fn lower_inner(
 
                     if schema.is_empty() {
                         // First atom of the body: seed with a plain scan.
-                        let n = var_names.len();
                         schema.extend(var_names);
-                        steps.push(Step::Scan { rel, n_cols: n });
+                        steps.push(Step::Scan { rel });
                     } else if let Some(kpos) = key_pos {
                         // Keyed (indexed) join on `key == relation[col_idx]`.
                         let arity = var_names.len();
@@ -482,11 +477,8 @@ fn lower_inner(
                 .iter()
                 .map(|a| resolve_operand(a, ir, schema))
                 .collect();
-            *head_rel = rel_name.clone();
-            steps.push(Step::Insert {
-                head_rel: rel_name,
-                proj: proj?,
-            });
+            *head_rel = rel_name;
+            steps.push(Step::Insert { proj: proj? });
             Ok(())
         }
 
@@ -559,12 +551,8 @@ fn lower_inner(
             let (probe_rel, probe_vars) = resolve_data_source(probe_source, ir)?;
 
             // Seed from the build side.
-            let n = build_vars.len();
             schema.extend(build_vars.clone());
-            steps.push(Step::Scan {
-                rel: build_rel,
-                n_cols: n,
-            });
+            steps.push(Step::Scan { rel: build_rel });
 
             // Join on the probe side — shared vars become keys automatically.
             emit_join(probe_rel, &probe_vars, schema, steps);
@@ -588,12 +576,8 @@ fn lower_inner(
                 .iter()
                 .map(|v| ir.resolve_name(*v).to_string())
                 .collect();
-            let n = var_names.len();
             schema.extend(var_names.clone());
-            steps.push(Step::Scan {
-                rel: src_rel,
-                n_cols: n,
-            });
+            steps.push(Step::Scan { rel: src_rel });
 
             // Resolve group-by key positions within the source schema.
             let key_cols: Vec<usize> = keys

@@ -1,27 +1,15 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-mod config;
-mod dd;
-mod edb;
-mod engine;
-mod load;
-mod selector;
-// mod op_printer;
-mod query;
-mod repl;
-mod smt;
-pub mod snapshot;
-mod value;
-
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use mangle_interpreter::MemStore;
 
-use engine::{Backend, DdBackend, Engine, InterpreterBackend};
-use repl::OutputFormat;
+use pallograph::engine::{Backend, DdBackend, Engine, InterpreterBackend};
+use pallograph::repl::OutputFormat;
+use pallograph::{config, edb, load, repl};
 
 #[derive(clap::ValueEnum, Clone, PartialEq)]
 enum BackendKind {

@@ -233,7 +233,6 @@ impl DdSession {
 
             let (mut handles, mut traces, build_errors) = worker.dataflow::<u64, _, _>({
                 let input_rels = Arc::clone(&input_rels);
-                let strata_work = strata_work;
                 let probe_ref = probe.clone();
 
                 move |scope| {

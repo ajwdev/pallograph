@@ -41,7 +41,5 @@ jobs:
         with:
           arguments: .#ci
       - uses: Swatinem/rust-cache@v2
-      # Gates on clippy errors only. Raise to `-- -D warnings` once the
-      # dead-code warnings from main.rs re-declaring the lib modules are gone.
-      - run: cargo clippy --all-targets --locked
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --all-targets --locked

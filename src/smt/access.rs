@@ -250,10 +250,9 @@ impl<'ctx> SmtEncoder<'ctx> {
                     mangle_common::Value::String(b_ns),
                     ..,
                 ] = t.as_slice()
+                    && (namespace.is_empty() || b_ns == namespace)
                 {
-                    if namespace.is_empty() || b_ns == namespace {
-                        principal_set.insert(p.clone());
-                    }
+                    principal_set.insert(p.clone());
                 }
             }
         }
@@ -735,15 +734,11 @@ impl<'ctx> SmtEncoder<'ctx> {
         };
 
         let matches_sa = |row: &[Value], rel_ns_idx: usize, rel_name_idx: usize| -> bool {
-            if let (Some(target_ns), Some(target_name)) = (sa_ns, sa_name) {
-                if let (
-                    Some(Value::String(p)),
-                    Some(Value::String(ns)),
-                    Some(Value::String(name)),
-                ) = (row.first(), row.get(rel_ns_idx), row.get(rel_name_idx))
-                {
-                    return p == principal && ns == target_ns && name == target_name;
-                }
+            if let (Some(target_ns), Some(target_name)) = (sa_ns, sa_name)
+                && let (Some(Value::String(p)), Some(Value::String(ns)), Some(Value::String(name))) =
+                    (row.first(), row.get(rel_ns_idx), row.get(rel_name_idx))
+            {
+                return p == principal && ns == target_ns && name == target_name;
             }
             false
         };
@@ -881,53 +876,52 @@ impl<'ctx> SmtEncoder<'ctx> {
                     Value::String(ref_kind),
                     Value::String(ref_name),
                 ] = t.as_slice()
+                    && rb_bindings.contains(&(b_ns.clone(), b_name.clone()))
                 {
-                    if rb_bindings.contains(&(b_ns.clone(), b_name.clone())) {
-                        if let Some((_, q_ag, q_r, q_v)) = perm_filter {
-                            let matches = if ref_kind == "Role" {
-                                self.role_matches(b_ns, ref_name, q_ag, q_r, q_v)
-                            } else {
-                                self.clusterrole_matches(ref_name, q_ag, q_r, q_v)
-                            };
-                            if !matches {
-                                continue;
-                            }
+                    if let Some((_, q_ag, q_r, q_v)) = perm_filter {
+                        let matches = if ref_kind == "Role" {
+                            self.role_matches(b_ns, ref_name, q_ag, q_r, q_v)
+                        } else {
+                            self.clusterrole_matches(ref_name, q_ag, q_r, q_v)
+                        };
+                        if !matches {
+                            continue;
                         }
-                        out.push(AccessPath {
-                            binding_kind: "RoleBinding",
-                            binding_namespace: b_ns.clone(),
-                            binding_name: b_name.clone(),
-                            role_kind: if ref_kind == "Role" {
-                                "Role"
-                            } else {
-                                "ClusterRole"
-                            },
-                            role_name: ref_name.clone(),
-                            hops: hops.clone(),
-                        });
                     }
+                    out.push(AccessPath {
+                        binding_kind: "RoleBinding",
+                        binding_namespace: b_ns.clone(),
+                        binding_name: b_name.clone(),
+                        role_kind: if ref_kind == "Role" {
+                            "Role"
+                        } else {
+                            "ClusterRole"
+                        },
+                        role_name: ref_name.clone(),
+                        hops: hops.clone(),
+                    });
                 }
             }
         }
 
         if let Some(rows) = self.facts.get("clusterrolebinding_roleref") {
             for t in rows {
-                if let [Value::String(b_name), Value::String(ref_name)] = t.as_slice() {
-                    if crb_bindings.contains(b_name) {
-                        if let Some((_, q_ag, q_r, q_v)) = perm_filter {
-                            if !self.clusterrole_matches(ref_name, q_ag, q_r, q_v) {
-                                continue;
-                            }
-                        }
-                        out.push(AccessPath {
-                            binding_kind: "ClusterRoleBinding",
-                            binding_namespace: String::new(),
-                            binding_name: b_name.clone(),
-                            role_kind: "ClusterRole",
-                            role_name: ref_name.clone(),
-                            hops: hops.clone(),
-                        });
+                if let [Value::String(b_name), Value::String(ref_name)] = t.as_slice()
+                    && crb_bindings.contains(b_name)
+                {
+                    if let Some((_, q_ag, q_r, q_v)) = perm_filter
+                        && !self.clusterrole_matches(ref_name, q_ag, q_r, q_v)
+                    {
+                        continue;
                     }
+                    out.push(AccessPath {
+                        binding_kind: "ClusterRoleBinding",
+                        binding_namespace: String::new(),
+                        binding_name: b_name.clone(),
+                        role_kind: "ClusterRole",
+                        role_name: ref_name.clone(),
+                        hops: hops.clone(),
+                    });
                 }
             }
         }

@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use mangle_ast::Arena;
 use mangle_common::{Store, Value};
 use mangle_driver::compile_units;
@@ -52,8 +52,6 @@ pub struct RelationDoc {
 
 pub struct CompiledProgram {
     ir: Ir,
-    // TODO We might not need this
-    arena: Arena,
     strata: Vec<HashSet<&'static str>>, // static lifetime because of global interner in Arena
 }
 
@@ -71,7 +69,7 @@ impl CompiledProgram {
             strata.push(pred_names);
         }
 
-        Ok(Self { ir, arena, strata })
+        Ok(Self { ir, strata })
     }
 
     /// Extract per-relation documentation from the compiled `Decl`s in the IR:
@@ -369,25 +367,24 @@ impl CompiledProgram {
             let mut delta_ids: Vec<(InstId, NameId)> = vec![];
 
             for (idx, inst) in self.ir.insts.iter().enumerate() {
-                if let mangle_ir::Inst::Rule { head, premises, .. } = inst {
-                    if let mangle_ir::Inst::Atom { predicate, .. } = self.ir.get(*head) {
-                        let name = self.ir.resolve_name(*predicate);
+                if let mangle_ir::Inst::Rule { head, premises, .. } = inst
+                    && let mangle_ir::Inst::Atom { predicate, .. } = self.ir.get(*head)
+                {
+                    let name = self.ir.resolve_name(*predicate);
 
-                        if !pred_names.contains(name) {
-                            continue;
-                        }
-                        initial_ids.push(mangle_ir::InstId::new(idx));
+                    if !pred_names.contains(name) {
+                        continue;
+                    }
+                    initial_ids.push(mangle_ir::InstId::new(idx));
 
-                        // For each recursive premise, add a delta plan entry for semi-naive evaluation.
-                        for p in premises {
-                            if let mangle_ir::Inst::Atom {
-                                predicate: pname, ..
-                            } = self.ir.get(*p)
-                            {
-                                if pred_names.contains(self.ir.resolve_name(*pname)) {
-                                    delta_ids.push((mangle_ir::InstId::new(idx), *pname));
-                                }
-                            }
+                    // For each recursive premise, add a delta plan entry for semi-naive evaluation.
+                    for p in premises {
+                        if let mangle_ir::Inst::Atom {
+                            predicate: pname, ..
+                        } = self.ir.get(*p)
+                            && pred_names.contains(self.ir.resolve_name(*pname))
+                        {
+                            delta_ids.push((mangle_ir::InstId::new(idx), *pname));
                         }
                     }
                 }
@@ -535,12 +532,11 @@ fn execute_with_provenance<'a>(
 
         let mut rule_ids: Vec<InstId> = Vec::new();
         for (i, inst) in ir.insts.iter().enumerate() {
-            if let Inst::Rule { head, .. } = inst {
-                if let Inst::Atom { predicate, .. } = ir.get(*head) {
-                    if stratum_pred_names.contains(ir.resolve_name(*predicate)) {
-                        rule_ids.push(InstId::new(i));
-                    }
-                }
+            if let Inst::Rule { head, .. } = inst
+                && let Inst::Atom { predicate, .. } = ir.get(*head)
+                && stratum_pred_names.contains(ir.resolve_name(*predicate))
+            {
+                rule_ids.push(InstId::new(i));
             }
         }
 
@@ -553,11 +549,11 @@ fn execute_with_provenance<'a>(
         'outer: for &rule_id in &rule_ids {
             if let Inst::Rule { premises, .. } = ir.get(rule_id) {
                 for &premise in premises {
-                    if let Inst::Atom { predicate, .. } = ir.get(premise) {
-                        if stratum_pred_names.contains(ir.resolve_name(*predicate)) {
-                            is_recursive = true;
-                            break 'outer;
-                        }
+                    if let Inst::Atom { predicate, .. } = ir.get(premise)
+                        && stratum_pred_names.contains(ir.resolve_name(*predicate))
+                    {
+                        is_recursive = true;
+                        break 'outer;
                     }
                 }
             }
@@ -891,6 +887,39 @@ impl Engine {
     }
 }
 
+/// Extract the head predicate name from a Mangle rule source string.
+///
+/// Scans for the first non-empty, non-`Decl`, non-comment line and returns
+/// the identifier before the opening `(`.  Returns `None` if the source
+/// contains only declarations (or cannot be parsed).
+fn extract_head_pred(rule_src: &str) -> Option<String> {
+    for line in rule_src.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("Decl") || line.starts_with("//") {
+            continue;
+        }
+        if let Some(pred) = line.split('(').next() {
+            let pred = pred.trim();
+            if !pred.is_empty() {
+                return Some(pred.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Drain all facts from a MemStore into a Vec for later replay.
+fn drain_store(store: MemStore) -> Vec<(String, Vec<Value>)> {
+    let mut out = Vec::new();
+    for rel in store.relation_names() {
+        let rel: String = rel;
+        for tuple in store.get_facts(&rel) {
+            out.push((rel.clone(), tuple));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -995,37 +1024,4 @@ mod tests {
             failures.join("\n")
         );
     }
-}
-
-/// Extract the head predicate name from a Mangle rule source string.
-///
-/// Scans for the first non-empty, non-`Decl`, non-comment line and returns
-/// the identifier before the opening `(`.  Returns `None` if the source
-/// contains only declarations (or cannot be parsed).
-fn extract_head_pred(rule_src: &str) -> Option<String> {
-    for line in rule_src.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("Decl") || line.starts_with("//") {
-            continue;
-        }
-        if let Some(pred) = line.split('(').next() {
-            let pred = pred.trim();
-            if !pred.is_empty() {
-                return Some(pred.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Drain all facts from a MemStore into a Vec for later replay.
-fn drain_store(store: MemStore) -> Vec<(String, Vec<Value>)> {
-    let mut out = Vec::new();
-    for rel in store.relation_names() {
-        let rel: String = rel;
-        for tuple in store.get_facts(&rel) {
-            out.push((rel.clone(), tuple));
-        }
-    }
-    out
 }
