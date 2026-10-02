@@ -91,10 +91,8 @@ impl Diff {
             let before_set = before.relations.get(rel).unwrap_or(&empty);
             let after_set = after.relations.get(rel).unwrap_or(&empty);
 
-            let add: BTreeSet<Vec<Value>> =
-                after_set.difference(before_set).cloned().collect();
-            let rem: BTreeSet<Vec<Value>> =
-                before_set.difference(after_set).cloned().collect();
+            let add: BTreeSet<Vec<Value>> = after_set.difference(before_set).cloned().collect();
+            let rem: BTreeSet<Vec<Value>> = before_set.difference(after_set).cloned().collect();
 
             if !add.is_empty() {
                 added.insert(rel.clone(), add);
@@ -113,11 +111,7 @@ impl Diff {
 
     /// Summary iterator: (relation, added_count, removed_count) for changed relations.
     pub fn relation_changes(&self) -> impl Iterator<Item = (&str, usize, usize)> {
-        let all: BTreeSet<&String> = self
-            .added
-            .keys()
-            .chain(self.removed.keys())
-            .collect();
+        let all: BTreeSet<&String> = self.added.keys().chain(self.removed.keys()).collect();
         all.into_iter().map(|rel| {
             let a = self.added.get(rel).map(|s| s.len()).unwrap_or(0);
             let r = self.removed.get(rel).map(|s| s.len()).unwrap_or(0);
@@ -194,7 +188,10 @@ mod tests {
         let added_tuple = added.iter().next().unwrap();
         assert_eq!(added_tuple[0], Value::String("intern@example.com".into()));
         assert!(
-            diff.removed.get("can").map(|s| s.is_empty()).unwrap_or(true),
+            diff.removed
+                .get("can")
+                .map(|s| s.is_empty())
+                .unwrap_or(true),
             "no can facts should be removed"
         );
     }
@@ -224,6 +221,9 @@ mod tests {
         let snap_b = Snapshot::from_store(&store_b, Scope::All);
         let diff = Diff::between(&snap_a, &snap_b);
 
-        assert!(diff.is_empty(), "identical stores should produce empty diff");
+        assert!(
+            diff.is_empty(),
+            "identical stores should produce empty diff"
+        );
     }
 }

@@ -15,11 +15,11 @@ use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
 use crate::edb::{K8sManifestsSource, ShellSource};
-use crate::snapshot::{Diff, Scope, Snapshot};
 use crate::engine::{Engine, EvalStore, RelationDoc};
 use crate::load;
 use crate::query;
 use crate::smt;
+use crate::snapshot::{Diff, Scope, Snapshot};
 
 struct ReplHelper {
     path_completer: FilenameCompleter,
@@ -28,7 +28,12 @@ struct ReplHelper {
 impl Completer for ReplHelper {
     type Candidate = Pair;
 
-    fn complete(&self, line: &str, pos: usize, ctx: &Context<'_>) -> rustyline::Result<(usize, Vec<Pair>)> {
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
         if line.starts_with('!') && pos >= 1 {
             let (start, candidates) = self.path_completer.complete(&line[1..], pos - 1, ctx)?;
             return Ok((start + 1, candidates));
@@ -82,10 +87,7 @@ fn print_relation_detail(name: &str, store: &EvalStore, doc: Option<&RelationDoc
             .as_deref()
             .map(|d| format!("  — {d}"))
             .unwrap_or_default();
-        println!(
-            "  {i}. {:name_w$}  {:ty_w$}{desc}",
-            col.name, ty,
-        );
+        println!("  {i}. {:name_w$}  {:ty_w$}{desc}", col.name, ty,);
     }
 }
 
@@ -140,46 +142,90 @@ fn print_help() {
     println!();
     println!("Querying");
     println!("  <predicate>                            — show all tuples for a relation");
-    println!("  <predicate>(arg, _, ...)               — filter by constants (_ or uppercase vars match any)");
-    println!("  \\show                                  — list documented relations (arity + description)");
-    println!("  \\show --all                            — also list undocumented intermediate relations");
-    println!("  \\show <rel...>                         — describe relations (columns, types, docs)");
+    println!(
+        "  <predicate>(arg, _, ...)               — filter by constants (_ or uppercase vars match any)"
+    );
+    println!(
+        "  \\show                                  — list documented relations (arity + description)"
+    );
+    println!(
+        "  \\show --all                            — also list undocumented intermediate relations"
+    );
+    println!(
+        "  \\show <rel...>                         — describe relations (columns, types, docs)"
+    );
     println!("  \\query <body>  / ?- <body>             — evaluate a one-shot conjunctive query");
     println!("  \\why <pred>(<args>...)                 — show derivation tree for a fact");
-    println!("  \\match <Kind> <ns> <selector>          — objects of <Kind> in <ns> matching a kubectl selector (ns \"\" = cluster-scoped)");
-    println!("  \\match_all <ns> <selector>             — objects of any Kind in <ns> matching a kubectl selector");
+    println!(
+        "  \\match <Kind> <ns> <selector>          — objects of <Kind> in <ns> matching a kubectl selector (ns \"\" = cluster-scoped)"
+    );
+    println!(
+        "  \\match_all <ns> <selector>             — objects of any Kind in <ns> matching a kubectl selector"
+    );
     println!();
     println!("EDB / Rules");
     println!("  +pred(arg1, arg2, ...).                — insert a ground fact and re-evaluate");
     println!("  -pred(arg1, arg2, ...).                — retract a ground fact and re-evaluate");
-    println!("  ~pred(old...). pred(new...).           — atomic replace: retract old, insert new, re-evaluate");
+    println!(
+        "  ~pred(old...). pred(new...).           — atomic replace: retract old, insert new, re-evaluate"
+    );
     println!("  \\define <rule>.                        — add a rule and re-evaluate");
     println!();
     println!("Loading");
-    println!("  \\source <src>                          — load Mangle rules from a file or ! <cmd> and re-evaluate");
-    println!("  \\load <rel> <src>                      — load flat JSON tuples into <rel>; src is a file or ! <cmd>");
-    println!("  \\load-k8s <src>                        — load k8s objects through the projection pipeline; src is a dir, .json file, or ! <kubectl args>");
+    println!(
+        "  \\source <src>                          — load Mangle rules from a file or ! <cmd> and re-evaluate"
+    );
+    println!(
+        "  \\load <rel> <src>                      — load flat JSON tuples into <rel>; src is a file or ! <cmd>"
+    );
+    println!(
+        "  \\load-k8s <src>                        — load k8s objects through the projection pipeline; src is a dir, .json file, or ! <kubectl args>"
+    );
     println!();
     println!("Snapshots");
-    println!("  \\snapshot <name>                       — save current eval state as a named snapshot");
-    println!("  \\diff <name>                           — diff current state against a named snapshot");
+    println!(
+        "  \\snapshot <name>                       — save current eval state as a named snapshot"
+    );
+    println!(
+        "  \\diff <name>                           — diff current state against a named snapshot"
+    );
     println!("  \\diff <name1> <name2>                  — diff two named snapshots");
-    println!("  \\access-diff <name>                    — diff RBAC can/5 permission closure vs named snapshot");
-    println!("  \\access-diff <name1> <name2>           — diff RBAC can/5 between two named snapshots");
+    println!(
+        "  \\access-diff <name>                    — diff RBAC can/5 permission closure vs named snapshot"
+    );
+    println!(
+        "  \\access-diff <name1> <name2>           — diff RBAC can/5 between two named snapshots"
+    );
     println!();
     println!("SMT / Z3");
-    println!("  \\smt check_access <ns> <r> <v> [p...] — find principals in can(_,ns,r,v) outside expected set (ns=\"\" for cluster-wide)");
-    println!("  \\smt reaches <ns> <ag> <r> <v> [p...] — find principals that effective_can reach (ag,r,v), escalation-aware");
-    println!("  \\smt cluster-admin [p...]              — shorthand for reaches \"\" \"*\" \"*\" \"*\"");
-    println!("  \\smt node_selector                     — find pods whose nodeSelector no node satisfies");
-    println!("  \\smt anti_affinity                     — find a valid pod placement or prove none exists");
-    println!("  \\smt karpenter                         — find nodeSelector gaps in Karpenter NodePool coverage");
+    println!(
+        "  \\smt check_access <ns> <r> <v> [p...] — find principals in can(_,ns,r,v) outside expected set (ns=\"\" for cluster-wide)"
+    );
+    println!(
+        "  \\smt reaches <ns> <ag> <r> <v> [p...] — find principals that effective_can reach (ag,r,v), escalation-aware"
+    );
+    println!(
+        "  \\smt cluster-admin [p...]              — shorthand for reaches \"\" \"*\" \"*\" \"*\""
+    );
+    println!(
+        "  \\smt node_selector                     — find pods whose nodeSelector no node satisfies"
+    );
+    println!(
+        "  \\smt anti_affinity                     — find a valid pod placement or prove none exists"
+    );
+    println!(
+        "  \\smt karpenter                         — find nodeSelector gaps in Karpenter NodePool coverage"
+    );
     println!("  \\smtlib <rel> [rel...]                 — dump SMT-LIB 2 encoding of relations");
     println!();
     println!("Session");
     println!("  \\pretty                                — toggle compact/pretty tuple display");
-    println!("  \\format plain|pretty|ndjson            — set output format (ndjson = one JSON object per row, for piping)");
-    println!("  \\reset                                 — clear session state (_N results, \\define rules, + facts), re-evaluate");
+    println!(
+        "  \\format plain|pretty|ndjson            — set output format (ndjson = one JSON object per row, for piping)"
+    );
+    println!(
+        "  \\reset                                 — clear session state (_N results, \\define rules, + facts), re-evaluate"
+    );
     println!("  !<cmd>                                 — run a shell command");
     println!("  \\help                                  — show this help");
     println!("  \\quit                                  — exit");
@@ -272,7 +318,10 @@ fn run_match(
         let obj = &row[4..8]; // ApiVersion, Kind, Namespace, Name
         if format == OutputFormat::Ndjson {
             let cols = ["apiVersion", "kind", "namespace", "name"];
-            println!("{}", ndjson_row(obj, |i| cols.get(i).map(|s| s.to_string())));
+            println!(
+                "{}",
+                ndjson_row(obj, |i| cols.get(i).map(|s| s.to_string()))
+            );
         } else {
             let parts: Vec<String> = obj
                 .iter()
@@ -303,8 +352,11 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
     let config = rustyline::Config::builder()
         .completion_type(rustyline::config::CompletionType::List)
         .build();
-    let mut rl = rustyline::Editor::<ReplHelper, rustyline::history::DefaultHistory>::with_config(config)?;
-    rl.set_helper(Some(ReplHelper { path_completer: FilenameCompleter::new() }));
+    let mut rl =
+        rustyline::Editor::<ReplHelper, rustyline::history::DefaultHistory>::with_config(config)?;
+    rl.set_helper(Some(ReplHelper {
+        path_completer: FilenameCompleter::new(),
+    }));
     let _ = rl.load_history(&history_path);
 
     let mut current_store = store;
@@ -426,7 +478,8 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     if names.is_empty() {
                         // List view. By default only documented relations are shown;
                         // undocumented intermediates are hidden unless --all is given.
-                        let mut names: Vec<&str> = current_store.relation_names()
+                        let mut names: Vec<&str> = current_store
+                            .relation_names()
                             .filter(|n| !n.starts_with(':'))
                             .collect();
                         names.sort_unstable();
@@ -452,7 +505,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             println!("  {n}/{arity}{desc}");
                         }
                         if hidden > 0 {
-                            println!("  ({hidden} undocumented relation(s) hidden; ::show --all to include)");
+                            println!(
+                                "  ({hidden} undocumented relation(s) hidden; ::show --all to include)"
+                            );
                         }
                     } else {
                         // Detail view: a psql \d-style block per requested relation.
@@ -462,7 +517,10 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     }
                     continue;
                 }
-                if let Some(raw_body) = line.strip_prefix("::query ").or_else(|| line.strip_prefix("?- ")) {
+                if let Some(raw_body) = line
+                    .strip_prefix("::query ")
+                    .or_else(|| line.strip_prefix("?- "))
+                {
                     let raw_body = raw_body.trim();
                     let (body, vars) = {
                         let existing = extract_vars(raw_body);
@@ -473,7 +531,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 (new_body, all_vars)
                             }
                             None if existing.is_empty() => {
-                                eprintln!("No variables found — use uppercase names for variables.");
+                                eprintln!(
+                                    "No variables found — use uppercase names for variables."
+                                );
                                 continue;
                             }
                             None => (raw_body.to_string(), existing),
@@ -562,7 +622,15 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             } else {
                                 let index = build_provenance_index(&current_store.provenance);
                                 for tuple in matched {
-                                    println!("{}({})", q.predicate, tuple.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "));
+                                    println!(
+                                        "{}({})",
+                                        q.predicate,
+                                        tuple
+                                            .iter()
+                                            .map(|v| v.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    );
                                     print_why(&index, &q.predicate, tuple, 1, &mut Vec::new());
                                 }
                             }
@@ -609,7 +677,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
-                            println!("Saved snapshot '{name}' v{version} ({rc} relations, {fc} facts).");
+                            println!(
+                                "Saved snapshot '{name}' v{version} ({rc} relations, {fc} facts)."
+                            );
                         }
                         Err(e) => eprintln!("Error: {e:#}"),
                     }
@@ -622,24 +692,34 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         snapshot_names.get(n).and_then(|v| snapshot_data.get(v))
                     };
                     let (before, after_snap) = match parts.as_slice() {
-                        [name] => {
-                            match lookup(name) {
-                                Some(s) => (s, None),
-                                None => { eprintln!("No snapshot named '{}'.", name); continue; }
+                        [name] => match lookup(name) {
+                            Some(s) => (s, None),
+                            None => {
+                                eprintln!("No snapshot named '{}'.", name);
+                                continue;
                             }
-                        }
+                        },
                         [name1, name2] => {
                             let s1 = match lookup(name1) {
                                 Some(s) => s,
-                                None => { eprintln!("No snapshot named '{}'.", name1); continue; }
+                                None => {
+                                    eprintln!("No snapshot named '{}'.", name1);
+                                    continue;
+                                }
                             };
                             let s2 = match lookup(name2) {
                                 Some(s) => s,
-                                None => { eprintln!("No snapshot named '{}'.", name2); continue; }
+                                None => {
+                                    eprintln!("No snapshot named '{}'.", name2);
+                                    continue;
+                                }
                             };
                             (s1, Some(s2))
                         }
-                        _ => { eprintln!("Usage: ::diff <name>  or  ::diff <name1> <name2>"); continue; }
+                        _ => {
+                            eprintln!("Usage: ::diff <name>  or  ::diff <name1> <name2>");
+                            continue;
+                        }
                     };
                     let current_snap;
                     let after: &Snapshot = match after_snap {
@@ -689,14 +769,18 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             enc.assert_rbac_axioms_from_snapshot_as(s2, name2);
                             print_access_diff(&enc, name1, name2);
                         }
-                        _ => eprintln!("Usage: ::access-diff <snap>  or  ::access-diff <snap1> <snap2>"),
+                        _ => eprintln!(
+                            "Usage: ::access-diff <snap>  or  ::access-diff <snap1> <snap2>"
+                        ),
                     }
                     continue;
                 }
 
                 if let Some(rule) = line.strip_prefix("::define ") {
                     let checkpoint = engine.rules_len();
-                    if let Err(e) = engine.add_rule(format!("{}.", rule.trim_end_matches('.').trim())) {
+                    if let Err(e) =
+                        engine.add_rule(format!("{}.", rule.trim_end_matches('.').trim()))
+                    {
                         engine.truncate_rules(checkpoint);
                         eprintln!("Error: {e:#}");
                         continue;
@@ -750,7 +834,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             let command = rest[1..].trim().to_string();
                             Ok(Box::new(ShellSource { command }))
                         } else {
-                            Ok(Box::new(K8sManifestsSource { paths: vec![rest.to_string()] }))
+                            Ok(Box::new(K8sManifestsSource {
+                                paths: vec![rest.to_string()],
+                            }))
                         };
                     match source_result.and_then(|mut src| engine.populate_from(src.as_mut())) {
                         Ok(()) => match engine.evaluate() {
@@ -771,7 +857,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     let (relation, source) = match rest.find(|c: char| c.is_whitespace()) {
                         Some(idx) => (&rest[..idx], rest[idx + 1..].trim()),
                         None => {
-                            eprintln!("Usage: ::load <relation> <source>  (source is a file path or ! <cmd>)");
+                            eprintln!(
+                                "Usage: ::load <relation> <source>  (source is a file path or ! <cmd>)"
+                            );
                             continue;
                         }
                     };
@@ -794,27 +882,41 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     // Split into two atoms at the boundary between "). " and the next predicate.
                     match split_two_atoms(rest) {
                         Some((old_atom, new_atom)) => {
-                            let result = parse_ground_tuple(old_atom)
-                                .and_then(|(rel, tuple)| {
-                                    parse_ground_tuple(new_atom).map(|n| ((rel, tuple), n))
-                                });
+                            let result = parse_ground_tuple(old_atom).and_then(|(rel, tuple)| {
+                                parse_ground_tuple(new_atom).map(|n| ((rel, tuple), n))
+                            });
                             match result {
                                 Ok(((old_rel, old_tuple), (new_rel, new_tuple))) => {
                                     if let Some(arity) = engine.relation_arity(&new_rel) {
                                         if new_tuple.len() != arity {
-                                            eprintln!("arity mismatch: {new_rel}/{arity} expects {arity} arg(s), got {}", new_tuple.len());
+                                            eprintln!(
+                                                "arity mismatch: {new_rel}/{arity} expects {arity} arg(s), got {}",
+                                                new_tuple.len()
+                                            );
                                             continue;
                                         }
                                     }
                                     let removed = engine.retract_fact(&old_rel, &old_tuple);
                                     engine.add_fact(new_rel, new_tuple);
                                     if engine.has_session() {
-                                        if removed { println!("Replaced."); } else { println!("Warning: old fact not found; new fact inserted."); }
+                                        if removed {
+                                            println!("Replaced.");
+                                        } else {
+                                            println!(
+                                                "Warning: old fact not found; new fact inserted."
+                                            );
+                                        }
                                     } else {
                                         match engine.evaluate() {
                                             Ok(new_store) => {
                                                 current_store = new_store;
-                                                if removed { println!("Replaced."); } else { println!("Warning: old fact not found; new fact inserted."); }
+                                                if removed {
+                                                    println!("Replaced.");
+                                                } else {
+                                                    println!(
+                                                        "Warning: old fact not found; new fact inserted."
+                                                    );
+                                                }
                                             }
                                             Err(e) => eprintln!("Error: {e:#}"),
                                         }
@@ -835,7 +937,10 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         Ok((rel, tuple)) => {
                             if let Some(arity) = engine.relation_arity(&rel) {
                                 if tuple.len() != arity {
-                                    eprintln!("arity mismatch: {rel}/{arity} expects {arity} arg(s), got {}", tuple.len());
+                                    eprintln!(
+                                        "arity mismatch: {rel}/{arity} expects {arity} arg(s), got {}",
+                                        tuple.len()
+                                    );
                                     continue;
                                 }
                             }
@@ -844,7 +949,10 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                     eprintln!("Asserted.");
                                 } else {
                                     match engine.evaluate() {
-                                        Ok(new_store) => { current_store = new_store; eprintln!("Asserted."); }
+                                        Ok(new_store) => {
+                                            current_store = new_store;
+                                            eprintln!("Asserted.");
+                                        }
                                         Err(e) => eprintln!("Error: {e:#}"),
                                     }
                                 }
@@ -867,7 +975,10 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                     eprintln!("Retracted.");
                                 } else {
                                     match engine.evaluate() {
-                                        Ok(new_store) => { current_store = new_store; eprintln!("Retracted."); }
+                                        Ok(new_store) => {
+                                            current_store = new_store;
+                                            eprintln!("Retracted.");
+                                        }
                                         Err(e) => eprintln!("Error: {e:#}"),
                                     }
                                 }
@@ -887,7 +998,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         [kind, namespace, selector] => {
                             run_match(engine, Some(kind), namespace, selector, format);
                         }
-                        _ => eprintln!("Usage: ::match <Kind> <namespace> <selector>  (namespace \"\" for cluster-scoped)"),
+                        _ => eprintln!(
+                            "Usage: ::match <Kind> <namespace> <selector>  (namespace \"\" for cluster-scoped)"
+                        ),
                     }
                     continue;
                 }
@@ -925,9 +1038,16 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                     if format == OutputFormat::Ndjson {
                                         println!("{}", ndjson_row(tuple, |i| cols.get(i).cloned()));
                                     } else {
-                                        let args: Vec<String> = tuple.iter().map(|v| {
-                                            if format == OutputFormat::Pretty { format_pretty(v) } else { v.to_string() }
-                                        }).collect();
+                                        let args: Vec<String> = tuple
+                                            .iter()
+                                            .map(|v| {
+                                                if format == OutputFormat::Pretty {
+                                                    format_pretty(v)
+                                                } else {
+                                                    v.to_string()
+                                                }
+                                            })
+                                            .collect();
                                         println!("  {pred}({})", args.join(", "));
                                     }
                                 }
@@ -954,9 +1074,16 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             if format == OutputFormat::Ndjson {
                                 println!("{}", ndjson_row(tuple, |i| cols.get(i).cloned()));
                             } else {
-                                let args: Vec<String> = tuple.iter().map(|v| {
-                                    if format == OutputFormat::Pretty { format_pretty(v) } else { v.to_string() }
-                                }).collect();
+                                let args: Vec<String> = tuple
+                                    .iter()
+                                    .map(|v| {
+                                        if format == OutputFormat::Pretty {
+                                            format_pretty(v)
+                                        } else {
+                                            v.to_string()
+                                        }
+                                    })
+                                    .collect();
                                 println!("  {pred}({})", args.join(", "));
                             }
                         }
@@ -993,7 +1120,10 @@ fn collapse_string_newlines(input: &str) -> String {
                 out.push('"');
             }
             '\n' if in_string => {
-                while chars.peek().map_or(false, |c| c.is_ascii_whitespace() && *c != '\n') {
+                while chars
+                    .peek()
+                    .map_or(false, |c| c.is_ascii_whitespace() && *c != '\n')
+                {
                     chars.next();
                 }
             }
@@ -1041,7 +1171,11 @@ fn extract_vars(body: &str) -> Vec<String> {
     let mut token = String::new();
 
     let consider = |tok: &str, vars: &mut Vec<String>| {
-        if tok.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+        if tok
+            .chars()
+            .next()
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false)
             && !vars.contains(&tok.to_string())
         {
             vars.push(tok.to_string());
@@ -1077,17 +1211,32 @@ fn fmt_binding(p: &smt::AccessPath) -> String {
     } else {
         format!("{}/", p.binding_namespace)
     };
-    format!("{} {}{} → {} {}", p.binding_kind, ns, p.binding_name, p.role_kind, p.role_name)
+    format!(
+        "{} {}{} → {} {}",
+        p.binding_kind, ns, p.binding_name, p.role_kind, p.role_name
+    )
 }
 
 fn mech_str(mech: &str) -> String {
-    if mech.is_empty() { String::new() } else { format!(" [{mech}]") }
+    if mech.is_empty() {
+        String::new()
+    } else {
+        format!(" [{mech}]")
+    }
 }
 
 /// Serialize an access path to a stable string key for grouping.
 fn path_sig(p: &smt::AccessPath) -> String {
-    let hops: String = p.hops.iter().map(|(a, b)| format!("{a}#{b}")).collect::<Vec<_>>().join(",");
-    format!("{}|{}|{}|{}", hops, p.binding_kind, p.binding_namespace, p.binding_name)
+    let hops: String = p
+        .hops
+        .iter()
+        .map(|(a, b)| format!("{a}#{b}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{}|{}|{}|{}",
+        hops, p.binding_kind, p.binding_namespace, p.binding_name
+    )
 }
 
 fn print_violation_paths(paths: &[smt::AccessPath]) {
@@ -1131,7 +1280,9 @@ fn print_reaches_grouped(violations: &[smt::Violation]) {
         if !groups.contains_key(&sig) {
             order.push(sig.clone());
         }
-        let entry = groups.entry(sig).or_insert_with(|| (v.paths.clone(), Vec::new()));
+        let entry = groups
+            .entry(sig)
+            .or_insert_with(|| (v.paths.clone(), Vec::new()));
         entry.1.push(v.principal.clone());
     }
     for sig in &order {
@@ -1164,11 +1315,19 @@ fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label:
 
     let verdicts = per_principal_verdicts(&can_gained, &can_lost, &eff_gained, &eff_lost);
 
-    println!("=== Access diff: '{}' → '{}' ===", before_label, after_label);
+    println!(
+        "=== Access diff: '{}' → '{}' ===",
+        before_label, after_label
+    );
     if !verdicts.is_empty() {
         println!();
         println!("  Per-principal:");
-        let col_w = verdicts.iter().map(|(p, _, _)| p.len()).max().unwrap_or(8).min(32);
+        let col_w = verdicts
+            .iter()
+            .map(|(p, _, _)| p.len())
+            .max()
+            .unwrap_or(8)
+            .min(32);
         for (principal, gained, lost) in &verdicts {
             let label = if *gained > 0 { "FAIL" } else { "PASS" };
             println!("    {label}  {principal:<col_w$}  +{gained} gained / -{lost} lost");
@@ -1181,8 +1340,10 @@ fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label:
         let mut sorted = can_gained;
         sorted.sort_by(|a, b| a.principal.cmp(&b.principal));
         for d in &sorted {
-            println!("    {}  ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
-                d.principal, d.namespace, d.apigroup, d.resource, d.verb);
+            println!(
+                "    {}  ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
+                d.principal, d.namespace, d.apigroup, d.resource, d.verb
+            );
         }
     }
     if !can_lost.is_empty() {
@@ -1190,12 +1351,17 @@ fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label:
         let mut sorted = can_lost;
         sorted.sort_by(|a, b| a.principal.cmp(&b.principal));
         for d in &sorted {
-            println!("    {}  ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
-                d.principal, d.namespace, d.apigroup, d.resource, d.verb);
+            println!(
+                "    {}  ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
+                d.principal, d.namespace, d.apigroup, d.resource, d.verb
+            );
         }
     }
     if !eff_gained.is_empty() {
-        println!("  EFFECTIVE GAINED ({}) [escalation-aware]:", eff_gained.len());
+        println!(
+            "  EFFECTIVE GAINED ({}) [escalation-aware]:",
+            eff_gained.len()
+        );
         let via_rel = smt::rbac_model::fn_name("indirect_perm", after_label);
         print_eff_diffs_grouped(&eff_gained, &via_rel, &enc.facts);
     }
@@ -1213,10 +1379,18 @@ fn per_principal_verdicts(
     eff_lost: &[smt::diff::EffDiff],
 ) -> Vec<(String, usize, usize)> {
     let mut map: BTreeMap<String, (usize, usize)> = BTreeMap::new();
-    for d in can_gained { map.entry(d.principal.clone()).or_default().0 += 1; }
-    for d in eff_gained { map.entry(d.principal.clone()).or_default().0 += 1; }
-    for d in can_lost   { map.entry(d.principal.clone()).or_default().1 += 1; }
-    for d in eff_lost   { map.entry(d.principal.clone()).or_default().1 += 1; }
+    for d in can_gained {
+        map.entry(d.principal.clone()).or_default().0 += 1;
+    }
+    for d in eff_gained {
+        map.entry(d.principal.clone()).or_default().0 += 1;
+    }
+    for d in can_lost {
+        map.entry(d.principal.clone()).or_default().1 += 1;
+    }
+    for d in eff_lost {
+        map.entry(d.principal.clone()).or_default().1 += 1;
+    }
 
     let mut result: Vec<(String, usize, usize)> = map
         .into_iter()
@@ -1242,12 +1416,26 @@ fn print_eff_diffs_grouped(
     let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
 
     for (i, d) in diffs.iter().enumerate() {
-        let targets = find_via_targets(facts, via_rel, &d.principal, &d.namespace, &d.apigroup, &d.resource, &d.verb);
+        let targets = find_via_targets(
+            facts,
+            via_rel,
+            &d.principal,
+            &d.namespace,
+            &d.apigroup,
+            &d.resource,
+            &d.verb,
+        );
         if targets.is_empty() {
-            groups.entry((d.principal.clone(), String::new())).or_default().push(i);
+            groups
+                .entry((d.principal.clone(), String::new()))
+                .or_default()
+                .push(i);
         } else {
             for target in targets {
-                groups.entry((d.principal.clone(), target)).or_default().push(i);
+                groups
+                    .entry((d.principal.clone(), target))
+                    .or_default()
+                    .push(i);
             }
         }
     }
@@ -1260,8 +1448,10 @@ fn print_eff_diffs_grouped(
         }
         for &i in indices {
             let d = &diffs[i];
-            println!("      ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
-                d.namespace, d.apigroup, d.resource, d.verb);
+            println!(
+                "      ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
+                d.namespace, d.apigroup, d.resource, d.verb
+            );
         }
     }
 }
@@ -1282,10 +1472,17 @@ fn find_via_targets(
         .into_iter()
         .flatten()
         .filter_map(|row| {
-            if let [Value::String(p), Value::String(ns), Value::String(ag), Value::String(r), Value::String(v), Value::String(target)] =
-                row.as_slice()
+            if let [
+                Value::String(p),
+                Value::String(ns),
+                Value::String(ag),
+                Value::String(r),
+                Value::String(v),
+                Value::String(target),
+            ] = row.as_slice()
             {
-                if p == principal && ns == namespace && ag == apigroup && r == resource && v == verb {
+                if p == principal && ns == namespace && ag == apigroup && r == resource && v == verb
+                {
                     Some(target.clone())
                 } else {
                     None
@@ -1308,7 +1505,9 @@ fn smt_command(input: &str, store: &EvalStore) {
             let (Some(ns_raw), Some(res_raw), Some(verb_raw)) =
                 (args.next(), args.next(), args.next())
             else {
-                eprintln!("Usage: ::smt check_access <namespace> <resource> <verb> [expected_principal ...]");
+                eprintln!(
+                    "Usage: ::smt check_access <namespace> <resource> <verb> [expected_principal ...]"
+                );
                 eprintln!("       Use \"\" for namespace to check cluster-wide (CRB) grants.");
                 return;
             };
@@ -1357,11 +1556,18 @@ fn smt_command(input: &str, store: &EvalStore) {
                     .collect();
                 ("", "*", "*", "*", expected_owned)
             } else {
-                let (Some(ns_raw), Some(ag_raw), Some(res_raw), Some(verb_raw)) =
-                    (token_iter.next(), token_iter.next(), token_iter.next(), token_iter.next())
-                else {
-                    eprintln!("Usage: ::smt reaches <namespace> <apigroup> <resource> <verb> [--direct] [expected ...]");
-                    eprintln!("       Use ::smt cluster-admin [--direct] to check for cluster-admin level access.");
+                let (Some(ns_raw), Some(ag_raw), Some(res_raw), Some(verb_raw)) = (
+                    token_iter.next(),
+                    token_iter.next(),
+                    token_iter.next(),
+                    token_iter.next(),
+                ) else {
+                    eprintln!(
+                        "Usage: ::smt reaches <namespace> <apigroup> <resource> <verb> [--direct] [expected ...]"
+                    );
+                    eprintln!(
+                        "       Use ::smt cluster-admin [--direct] to check for cluster-admin level access."
+                    );
                     return;
                 };
                 let expected_owned: Vec<String> = token_iter
@@ -1384,13 +1590,24 @@ fn smt_command(input: &str, store: &EvalStore) {
             enc.assert_rbac_axioms(store);
 
             let direct = enc.direct_violations(namespace, apigroup, resource, verb);
-            let via = enc.check_reaches(namespace, apigroup, resource, verb, &expected, include_direct);
+            let via = enc.check_reaches(
+                namespace,
+                apigroup,
+                resource,
+                verb,
+                &expected,
+                include_direct,
+            );
 
             if direct.is_empty() && via.is_empty() {
-                println!("PASS  effective_can(_, {namespace:?}, {apigroup:?}, {resource:?}, {verb:?})");
+                println!(
+                    "PASS  effective_can(_, {namespace:?}, {apigroup:?}, {resource:?}, {verb:?})"
+                );
             } else {
                 let total = direct.len() + via.len();
-                println!("FAIL  {total} principal(s) can reach ({namespace:?}, {apigroup:?}, {resource:?}, {verb:?}):");
+                println!(
+                    "FAIL  {total} principal(s) can reach ({namespace:?}, {apigroup:?}, {resource:?}, {verb:?}):"
+                );
                 if !direct.is_empty() {
                     println!("  direct ({}):", direct.len());
                     print_reaches_grouped(&direct);
@@ -1406,7 +1623,9 @@ fn smt_command(input: &str, store: &EvalStore) {
             let mut args = rest.split_whitespace();
             let Some(ns_raw) = args.next() else {
                 eprintln!("Usage: ::smt check_isolation <namespace> [allowed_principal ...]");
-                eprintln!("       Proves that ONLY the listed principals have any access in <namespace>.");
+                eprintln!(
+                    "       Proves that ONLY the listed principals have any access in <namespace>."
+                );
                 return;
             };
             let namespace = ns_raw.trim_matches('"');
@@ -1423,7 +1642,9 @@ fn smt_command(input: &str, store: &EvalStore) {
 
             let violations = enc.check_namespace_isolation(namespace, &allowed);
             if violations.is_empty() {
-                println!("PASS  namespace {namespace:?} is isolated to the expected principals (Z3 UNSAT proof)");
+                println!(
+                    "PASS  namespace {namespace:?} is isolated to the expected principals (Z3 UNSAT proof)"
+                );
             } else {
                 println!(
                     "FAIL  {} unexpected principal(s) have access in {namespace:?}:",
@@ -1462,7 +1683,9 @@ fn smt_command(input: &str, store: &EvalStore) {
                     }
                 }
                 PlacementResult::Unsat => {
-                    println!("FAIL  no valid placement exists — anti-affinity constraints unsatisfiable");
+                    println!(
+                        "FAIL  no valid placement exists — anti-affinity constraints unsatisfiable"
+                    );
                 }
             }
         }
@@ -1471,16 +1694,22 @@ fn smt_command(input: &str, store: &EvalStore) {
             if gaps.is_empty() {
                 println!("PASS  full coverage — no nodeSelector gap found (Z3 UNSAT)");
             } else {
-                println!("FAIL  {} coverage gap(s) found - nodeSelectors no NodePool can satisfy:", gaps.len());
+                println!(
+                    "FAIL  {} coverage gap(s) found - nodeSelectors no NodePool can satisfy:",
+                    gaps.len()
+                );
                 for (i, gap) in gaps.iter().enumerate() {
-                    let labels: Vec<String> = gap.labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                    let labels: Vec<String> =
+                        gap.labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
                     println!("  GAP {}  {}", i + 1, labels.join(", "));
                 }
             }
         }
         _ => {
             eprintln!("Unknown SMT subcommand: {subcommand:?}");
-            eprintln!("Available: check_access, reaches, cluster-admin, node_selector, anti_affinity, karpenter");
+            eprintln!(
+                "Available: check_access, reaches, cluster-admin, node_selector, anti_affinity, karpenter"
+            );
         }
     }
 }
@@ -1565,7 +1794,11 @@ fn auto_complete_partial(body: &str, store: &EvalStore) -> Option<(String, Vec<S
     };
 
     let arity = store.scan(rel).first().map(|t| t.len())?;
-    let given = if inner.is_empty() { 0 } else { count_top_level_args(inner) };
+    let given = if inner.is_empty() {
+        0
+    } else {
+        count_top_level_args(inner)
+    };
 
     if given >= arity {
         return None;
@@ -1579,7 +1812,10 @@ fn auto_complete_partial(body: &str, store: &EvalStore) -> Option<(String, Vec<S
     } else {
         // Partial call — pad trailing positions with _ so Mangle sees the right arity,
         // but keep the head vars exactly as the user specified.
-        let padding = std::iter::repeat("_").take(arity - given).collect::<Vec<_>>().join(", ");
+        let padding = std::iter::repeat("_")
+            .take(arity - given)
+            .collect::<Vec<_>>()
+            .join(", ");
         let new_body = format!("{}({}, {})", rel, inner, padding);
         Some((new_body, vec![]))
     }
@@ -1587,7 +1823,9 @@ fn auto_complete_partial(body: &str, store: &EvalStore) -> Option<(String, Vec<S
 
 /// Build a map from (relation, tuple) → list of premise-sets that derived it.
 /// A single fact may have been derived by multiple rules/paths.
-fn build_provenance_index(entries: &[ProvenanceEntry]) -> HashMap<(String, Vec<Value>), Vec<Vec<(String, Vec<Value>)>>> {
+fn build_provenance_index(
+    entries: &[ProvenanceEntry],
+) -> HashMap<(String, Vec<Value>), Vec<Vec<(String, Vec<Value>)>>> {
     let mut index: HashMap<(String, Vec<Value>), Vec<Vec<(String, Vec<Value>)>>> = HashMap::new();
     for entry in entries {
         index
@@ -1613,7 +1851,16 @@ fn print_why(
         return;
     }
     if visited.contains(&key) {
-        println!("{}↻ (cycle: {}({}))", "  ".repeat(depth), rel, tuple.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "));
+        println!(
+            "{}↻ (cycle: {}({}))",
+            "  ".repeat(depth),
+            rel,
+            tuple
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         return;
     }
 
@@ -1629,7 +1876,11 @@ fn print_why(
                 }
                 visited.push(key.clone());
                 for (p_rel, p_tuple) in premises {
-                    let args = p_tuple.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+                    let args = p_tuple
+                        .iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     println!("{}  {}({})", indent, p_rel, args);
                     print_why(index, p_rel, p_tuple, depth + 1, visited);
                 }

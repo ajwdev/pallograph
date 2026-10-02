@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use mangle_common::Value;
 use mangle_interpreter::MemStore;
 use serde_json::Value as Json;
@@ -127,7 +127,10 @@ fn parse_tuples(bytes: &[u8]) -> Result<Vec<Vec<Value>>> {
 
 fn json_row_to_tuple(row: &Json) -> Result<Vec<Value>> {
     let Json::Array(cells) = row else {
-        bail!("expected a JSON array for each tuple, got {}", row.type_name());
+        bail!(
+            "expected a JSON array for each tuple, got {}",
+            row.type_name()
+        );
     };
     cells.iter().map(json_scalar_to_value).collect()
 }

@@ -71,8 +71,8 @@ impl FactSource for K8sManifestsSource {
                 if !matches!(ext, "json" | "yaml" | "yml") {
                     continue;
                 }
-                let bytes = std::fs::read(&path)
-                    .with_context(|| format!("reading {}", path.display()))?;
+                let bytes =
+                    std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
                 let parsed = match ext {
                     "json" => parse_k8s_json(&bytes),
                     _ => parse_k8s_yaml(&bytes),
@@ -93,14 +93,19 @@ fn expand_pattern(pattern: &str) -> Box<dyn Iterator<Item = Result<std::path::Pa
     } else {
         pattern.to_string()
     };
-    let opts = glob::MatchOptions { require_literal_separator: false, ..Default::default() };
+    let opts = glob::MatchOptions {
+        require_literal_separator: false,
+        ..Default::default()
+    };
     match glob::glob_with(&glob_pattern, opts) {
         Ok(paths) => Box::new(paths.filter_map(|e| match e {
             Ok(p) if p.is_file() => Some(Ok(p)),
             Ok(_) => None,
             Err(e) => Some(Err(anyhow::anyhow!(e))),
         })),
-        Err(e) => Box::new(std::iter::once(Err(anyhow::anyhow!("invalid glob pattern {pattern:?}: {e}")))),
+        Err(e) => Box::new(std::iter::once(Err(anyhow::anyhow!(
+            "invalid glob pattern {pattern:?}: {e}"
+        )))),
     }
 }
 
@@ -206,7 +211,11 @@ fn parse_k8s_json(bytes: &[u8]) -> Result<Vec<(DynamicObject, Option<(String, St
 
 pub fn populate(store: &mut MemStore, source: &mut dyn FactSource) -> Result<()> {
     for (obj, type_hint) in source.k8s_objects()? {
-        add_object(store, &obj, type_hint.as_ref().map(|(av, k)| (av.as_str(), k.as_str())));
+        add_object(
+            store,
+            &obj,
+            type_hint.as_ref().map(|(av, k)| (av.as_str(), k.as_str())),
+        );
     }
     Ok(())
 }
@@ -221,7 +230,12 @@ pub async fn load_from_cluster(store: &mut MemStore, client: Client) -> Result<(
 }
 
 pub fn load_k8s_from_command(store: &mut MemStore, command: &str) -> Result<()> {
-    populate(store, &mut ShellSource { command: command.to_string() })
+    populate(
+        store,
+        &mut ShellSource {
+            command: command.to_string(),
+        },
+    )
 }
 
 fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str, &str)>) {
@@ -473,15 +487,22 @@ fn extract_labels_and_selectors(
 
 fn extract_pod_scheduling(store: &mut MemStore, namespace: &str, name: &str, data: &Json) {
     // spec.nodeSelector → pod_node_selector(Namespace, Name, Key, Value)
-    if let Some(sel) = data.get("spec").and_then(|s| s.get("nodeSelector")).and_then(|s| s.as_object()) {
+    if let Some(sel) = data
+        .get("spec")
+        .and_then(|s| s.get("nodeSelector"))
+        .and_then(|s| s.as_object())
+    {
         for (key, val) in sel {
             if let Json::String(v) = val {
-                store.add_fact("pod_node_selector", vec![
-                    Value::String(namespace.to_string()),
-                    Value::String(name.to_string()),
-                    Value::String(key.clone()),
-                    Value::String(v.clone()),
-                ]);
+                store.add_fact(
+                    "pod_node_selector",
+                    vec![
+                        Value::String(namespace.to_string()),
+                        Value::String(name.to_string()),
+                        Value::String(key.clone()),
+                        Value::String(v.clone()),
+                    ],
+                );
             }
         }
     }
@@ -513,13 +534,16 @@ fn extract_pod_anti_affinity(store: &mut MemStore, namespace: &str, name: &str, 
 
         for (key, val) in match_labels {
             if let Json::String(v) = val {
-                store.add_fact("pod_anti_affinity_req", vec![
-                    Value::String(namespace.to_string()),
-                    Value::String(name.to_string()),
-                    Value::String(key.clone()),
-                    Value::String(v.clone()),
-                    Value::String(topology_key.to_string()),
-                ]);
+                store.add_fact(
+                    "pod_anti_affinity_req",
+                    vec![
+                        Value::String(namespace.to_string()),
+                        Value::String(name.to_string()),
+                        Value::String(key.clone()),
+                        Value::String(v.clone()),
+                        Value::String(topology_key.to_string()),
+                    ],
+                );
             }
         }
     }
@@ -528,17 +552,24 @@ fn extract_pod_anti_affinity(store: &mut MemStore, namespace: &str, name: &str, 
 fn extract_node_data(store: &mut MemStore, name: &str, data: &Json) {
     // status.allocatable → node_allocatable(Name, Resource, Quantity)
     // node_taint is derived via Mangle rules in base.mg using :list:member + :match_field.
-    if let Some(alloc) = data.get("status").and_then(|s| s.get("allocatable")).and_then(|a| a.as_object()) {
+    if let Some(alloc) = data
+        .get("status")
+        .and_then(|s| s.get("allocatable"))
+        .and_then(|a| a.as_object())
+    {
         for (resource, quantity) in alloc {
             let q = match quantity {
                 Json::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            store.add_fact("node_allocatable", vec![
-                Value::String(name.to_string()),
-                Value::String(resource.clone()),
-                Value::String(q),
-            ]);
+            store.add_fact(
+                "node_allocatable",
+                vec![
+                    Value::String(name.to_string()),
+                    Value::String(resource.clone()),
+                    Value::String(q),
+                ],
+            );
         }
     }
 }
@@ -557,11 +588,14 @@ fn extract_nodepool_data(store: &mut MemStore, name: &str, data: &Json) {
     {
         for (key, val) in labels {
             if let Json::String(v) = val {
-                store.add_fact("nodepool_label", vec![
-                    Value::String(name.to_string()),
-                    Value::String(key.clone()),
-                    Value::String(v.clone()),
-                ]);
+                store.add_fact(
+                    "nodepool_label",
+                    vec![
+                        Value::String(name.to_string()),
+                        Value::String(key.clone()),
+                        Value::String(v.clone()),
+                    ],
+                );
             }
         }
     }
@@ -587,23 +621,29 @@ fn extract_nodepool_data(store: &mut MemStore, name: &str, data: &Json) {
                     if let Some(values) = req.get("values").and_then(|v| v.as_array()) {
                         for val in values {
                             if let Some(v) = val.as_str() {
-                                store.add_fact("nodepool_requirement", vec![
-                                    Value::String(name.to_string()),
-                                    Value::String(key.to_string()),
-                                    Value::String(operator.to_string()),
-                                    Value::String(v.to_string()),
-                                ]);
+                                store.add_fact(
+                                    "nodepool_requirement",
+                                    vec![
+                                        Value::String(name.to_string()),
+                                        Value::String(key.to_string()),
+                                        Value::String(operator.to_string()),
+                                        Value::String(v.to_string()),
+                                    ],
+                                );
                             }
                         }
                     }
                 }
                 "Exists" | "DoesNotExist" => {
-                    store.add_fact("nodepool_requirement", vec![
-                        Value::String(name.to_string()),
-                        Value::String(key.to_string()),
-                        Value::String(operator.to_string()),
-                        Value::String(String::new()),
-                    ]);
+                    store.add_fact(
+                        "nodepool_requirement",
+                        vec![
+                            Value::String(name.to_string()),
+                            Value::String(key.to_string()),
+                            Value::String(operator.to_string()),
+                            Value::String(String::new()),
+                        ],
+                    );
                 }
                 _ => {}
             }
@@ -616,12 +656,15 @@ fn extract_nodepool_data(store: &mut MemStore, name: &str, data: &Json) {
             let key = taint.get("key").and_then(|k| k.as_str()).unwrap_or("");
             let value = taint.get("value").and_then(|v| v.as_str()).unwrap_or("");
             let effect = taint.get("effect").and_then(|e| e.as_str()).unwrap_or("");
-            store.add_fact("nodepool_taint", vec![
-                Value::String(name.to_string()),
-                Value::String(key.to_string()),
-                Value::String(value.to_string()),
-                Value::String(effect.to_string()),
-            ]);
+            store.add_fact(
+                "nodepool_taint",
+                vec![
+                    Value::String(name.to_string()),
+                    Value::String(key.to_string()),
+                    Value::String(value.to_string()),
+                    Value::String(effect.to_string()),
+                ],
+            );
         }
     }
 }
@@ -634,8 +677,7 @@ mod tests {
     use std::path::Path;
 
     fn engine_from_store(store: MemStore) -> Engine {
-        Engine::new(store, Path::new("rules"), Box::new(InterpreterBackend))
-            .expect("engine")
+        Engine::new(store, Path::new("rules"), Box::new(InterpreterBackend)).expect("engine")
     }
 
     /// Construct and add a ClusterRole with explicit rules.
@@ -655,15 +697,15 @@ mod tests {
             "rules": rules
         }))
         .unwrap();
-        add_object(store, &obj, Some(("rbac.authorization.k8s.io/v1", "ClusterRole")));
+        add_object(
+            store,
+            &obj,
+            Some(("rbac.authorization.k8s.io/v1", "ClusterRole")),
+        );
     }
 
     /// Construct and add an aggregating ClusterRole (no direct rules, aggregationRule only).
-    fn add_aggregating_clusterrole(
-        store: &mut MemStore,
-        name: &str,
-        selectors: serde_json::Value,
-    ) {
+    fn add_aggregating_clusterrole(store: &mut MemStore, name: &str, selectors: serde_json::Value) {
         let obj: DynamicObject = serde_json::from_value(json!({
             "apiVersion": "rbac.authorization.k8s.io/v1",
             "kind": "ClusterRole",
@@ -674,7 +716,11 @@ mod tests {
             "rules": []
         }))
         .unwrap();
-        add_object(store, &obj, Some(("rbac.authorization.k8s.io/v1", "ClusterRole")));
+        add_object(
+            store,
+            &obj,
+            Some(("rbac.authorization.k8s.io/v1", "ClusterRole")),
+        );
     }
 
     fn has_clusterrole_perm(
@@ -700,17 +746,31 @@ mod tests {
         let mut store = MemStore::new();
 
         // One selector entry with two requirements: key-a=true AND key-b=true.
-        add_aggregating_clusterrole(&mut store, "my-agg", json!([
-            {"matchLabels": {"key-a": "true", "key-b": "true"}}
-        ]));
+        add_aggregating_clusterrole(
+            &mut store,
+            "my-agg",
+            json!([
+                {"matchLabels": {"key-a": "true", "key-b": "true"}}
+            ]),
+        );
         // Source CR with only key-a — must NOT be aggregated.
-        add_clusterrole(&mut store, "only-a", json!({"key-a": "true"}), json!([
-            {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}
-        ]));
+        add_clusterrole(
+            &mut store,
+            "only-a",
+            json!({"key-a": "true"}),
+            json!([
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}
+            ]),
+        );
         // Source CR with both keys — MUST be aggregated.
-        add_clusterrole(&mut store, "both-ab", json!({"key-a": "true", "key-b": "true"}), json!([
-            {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
-        ]));
+        add_clusterrole(
+            &mut store,
+            "both-ab",
+            json!({"key-a": "true", "key-b": "true"}),
+            json!([
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+            ]),
+        );
 
         let result = engine_from_store(store).evaluate().unwrap();
 
@@ -729,16 +789,30 @@ mod tests {
     fn aggregation_or_semantics_across_selectors() {
         let mut store = MemStore::new();
 
-        add_aggregating_clusterrole(&mut store, "my-agg", json!([
-            {"matchLabels": {"sel-a": "true"}},
-            {"matchLabels": {"sel-b": "true"}}
-        ]));
-        add_clusterrole(&mut store, "cr-a", json!({"sel-a": "true"}), json!([
-            {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
-        ]));
-        add_clusterrole(&mut store, "cr-b", json!({"sel-b": "true"}), json!([
-            {"apiGroups": [""], "resources": ["services"], "verbs": ["get"]}
-        ]));
+        add_aggregating_clusterrole(
+            &mut store,
+            "my-agg",
+            json!([
+                {"matchLabels": {"sel-a": "true"}},
+                {"matchLabels": {"sel-b": "true"}}
+            ]),
+        );
+        add_clusterrole(
+            &mut store,
+            "cr-a",
+            json!({"sel-a": "true"}),
+            json!([
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+            ]),
+        );
+        add_clusterrole(
+            &mut store,
+            "cr-b",
+            json!({"sel-b": "true"}),
+            json!([
+                {"apiGroups": [""], "resources": ["services"], "verbs": ["get"]}
+            ]),
+        );
 
         let result = engine_from_store(store).evaluate().unwrap();
 
@@ -757,15 +831,29 @@ mod tests {
     fn aggregation_match_expressions_exists() {
         let mut store = MemStore::new();
 
-        add_aggregating_clusterrole(&mut store, "my-agg", json!([
-            {"matchExpressions": [{"key": "rbac.io/agg", "operator": "Exists"}]}
-        ]));
-        add_clusterrole(&mut store, "has-key", json!({"rbac.io/agg": "anything"}), json!([
-            {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["get"]}
-        ]));
-        add_clusterrole(&mut store, "no-key", json!({}), json!([
-            {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["list"]}
-        ]));
+        add_aggregating_clusterrole(
+            &mut store,
+            "my-agg",
+            json!([
+                {"matchExpressions": [{"key": "rbac.io/agg", "operator": "Exists"}]}
+            ]),
+        );
+        add_clusterrole(
+            &mut store,
+            "has-key",
+            json!({"rbac.io/agg": "anything"}),
+            json!([
+                {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["get"]}
+            ]),
+        );
+        add_clusterrole(
+            &mut store,
+            "no-key",
+            json!({}),
+            json!([
+                {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["list"]}
+            ]),
+        );
 
         let result = engine_from_store(store).evaluate().unwrap();
 
@@ -784,17 +872,31 @@ mod tests {
     fn aggregation_match_expressions_in() {
         let mut store = MemStore::new();
 
-        add_aggregating_clusterrole(&mut store, "my-agg", json!([
-            {"matchExpressions": [
-                {"key": "tier", "operator": "In", "values": ["admin", "edit"]}
-            ]}
-        ]));
-        add_clusterrole(&mut store, "is-admin", json!({"tier": "admin"}), json!([
-            {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}
-        ]));
-        add_clusterrole(&mut store, "is-view", json!({"tier": "view"}), json!([
-            {"apiGroups": [""], "resources": ["secrets"], "verbs": ["list"]}
-        ]));
+        add_aggregating_clusterrole(
+            &mut store,
+            "my-agg",
+            json!([
+                {"matchExpressions": [
+                    {"key": "tier", "operator": "In", "values": ["admin", "edit"]}
+                ]}
+            ]),
+        );
+        add_clusterrole(
+            &mut store,
+            "is-admin",
+            json!({"tier": "admin"}),
+            json!([
+                {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}
+            ]),
+        );
+        add_clusterrole(
+            &mut store,
+            "is-view",
+            json!({"tier": "view"}),
+            json!([
+                {"apiGroups": [""], "resources": ["secrets"], "verbs": ["list"]}
+            ]),
+        );
 
         let result = engine_from_store(store).evaluate().unwrap();
 
@@ -829,12 +931,21 @@ mod tests {
             ]
         }))
         .unwrap();
-        add_object(&mut store, &obj, Some(("rbac.authorization.k8s.io/v1", "ClusterRole")));
+        add_object(
+            &mut store,
+            &obj,
+            Some(("rbac.authorization.k8s.io/v1", "ClusterRole")),
+        );
 
         // Source CR that contributes the same rule.
-        add_clusterrole(&mut store, "src-cr", json!({"agg-to-me": "true"}), json!([
-            {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
-        ]));
+        add_clusterrole(
+            &mut store,
+            "src-cr",
+            json!({"agg-to-me": "true"}),
+            json!([
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+            ]),
+        );
 
         let result = engine_from_store(store).evaluate().unwrap();
 
@@ -848,11 +959,17 @@ mod tests {
                     && row[3] == Value::String("get".into())
             })
             .count();
-        assert_eq!(count, 1, "duplicate derivation paths must collapse to a single fact");
+        assert_eq!(
+            count, 1,
+            "duplicate derivation paths must collapse to a single fact"
+        );
     }
 
     fn kinds(objects: &[(DynamicObject, Option<(String, String)>)]) -> Vec<&str> {
-        objects.iter().map(|(o, _)| o.types.as_ref().unwrap().kind.as_str()).collect()
+        objects
+            .iter()
+            .map(|(o, _)| o.types.as_ref().unwrap().kind.as_str())
+            .collect()
     }
 
     #[test]

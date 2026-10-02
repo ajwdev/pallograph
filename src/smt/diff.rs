@@ -3,9 +3,9 @@
 
 use std::collections::HashSet;
 
+use z3::SatResult;
 use z3::ast::Ast;
 use z3::ast::String as Z3String;
-use z3::SatResult;
 
 use super::SmtEncoder;
 use super::rbac_model::fn_name;
@@ -65,7 +65,12 @@ impl<'ctx> SmtEncoder<'ctx> {
         };
 
         let have_set: HashSet<_> = self.can_entries.get(have).into_iter().flatten().collect();
-        let not_have_set: HashSet<_> = self.can_entries.get(not_have).into_iter().flatten().collect();
+        let not_have_set: HashSet<_> = self
+            .can_entries
+            .get(not_have)
+            .into_iter()
+            .flatten()
+            .collect();
 
         let mut results = Vec::new();
         for (principal, namespace, apigroup, resource, verb) in have_set.difference(&not_have_set) {
@@ -103,7 +108,12 @@ impl<'ctx> SmtEncoder<'ctx> {
         };
 
         let have_set: HashSet<_> = self.eff_entries.get(have).into_iter().flatten().collect();
-        let not_have_set: HashSet<_> = self.eff_entries.get(not_have).into_iter().flatten().collect();
+        let not_have_set: HashSet<_> = self
+            .eff_entries
+            .get(not_have)
+            .into_iter()
+            .flatten()
+            .collect();
 
         let mut results = Vec::new();
         for (principal, namespace, apigroup, resource, verb) in have_set.difference(&not_have_set) {
@@ -134,7 +144,6 @@ impl<'ctx> SmtEncoder<'ctx> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -142,10 +151,10 @@ mod tests {
     use mangle_common::Value;
     use mangle_interpreter::MemStore;
 
+    use super::super::SmtEncoder;
     use crate::edb;
     use crate::engine::{Engine, InterpreterBackend};
-    use crate::snapshot::{Snapshot, Scope};
-    use super::super::SmtEncoder;
+    use crate::snapshot::{Scope, Snapshot};
 
     fn load_engine() -> Engine {
         let mut edb = MemStore::new();
@@ -166,8 +175,14 @@ mod tests {
 
         let gained = enc.check_permission_expansion("before", "after");
         let lost = enc.check_permission_contraction("before", "after");
-        assert!(gained.is_empty(), "identical before/after must have no expansion");
-        assert!(lost.is_empty(), "identical before/after must have no contraction");
+        assert!(
+            gained.is_empty(),
+            "identical before/after must have no expansion"
+        );
+        assert!(
+            lost.is_empty(),
+            "identical before/after must have no contraction"
+        );
     }
 
     #[test]
@@ -179,13 +194,16 @@ mod tests {
 
         let after_snap = {
             let mut store = MemStore::new();
-            store.add_fact("direct_perm", vec![
-                Value::String("alice".into()),
-                Value::String("default".into()),
-                Value::String("".into()),
-                Value::String("pods".into()),
-                Value::String("get".into()),
-            ]);
+            store.add_fact(
+                "direct_perm",
+                vec![
+                    Value::String("alice".into()),
+                    Value::String("default".into()),
+                    Value::String("".into()),
+                    Value::String("pods".into()),
+                    Value::String("get".into()),
+                ],
+            );
             Snapshot::from_store(&store, Scope::All)
         };
 
@@ -215,34 +233,43 @@ mod tests {
         // The Z3 semantic check must return empty (the narrow grant is subsumed).
         let before_snap = {
             let mut store = MemStore::new();
-            store.add_fact("direct_perm", vec![
-                Value::String("alice".into()),
-                Value::String("default".into()),
-                Value::String("".into()),
-                Value::String("pods".into()),
-                Value::String("*".into()),  // wildcard verb
-            ]);
+            store.add_fact(
+                "direct_perm",
+                vec![
+                    Value::String("alice".into()),
+                    Value::String("default".into()),
+                    Value::String("".into()),
+                    Value::String("pods".into()),
+                    Value::String("*".into()), // wildcard verb
+                ],
+            );
             Snapshot::from_store(&store, Scope::All)
         };
 
         let after_snap = {
             let mut store = MemStore::new();
             // Same wildcard grant as before.
-            store.add_fact("direct_perm", vec![
-                Value::String("alice".into()),
-                Value::String("default".into()),
-                Value::String("".into()),
-                Value::String("pods".into()),
-                Value::String("*".into()),
-            ]);
+            store.add_fact(
+                "direct_perm",
+                vec![
+                    Value::String("alice".into()),
+                    Value::String("default".into()),
+                    Value::String("".into()),
+                    Value::String("pods".into()),
+                    Value::String("*".into()),
+                ],
+            );
             // Additionally: an explicit narrow grant (subsumed by the wildcard above).
-            store.add_fact("direct_perm", vec![
-                Value::String("alice".into()),
-                Value::String("default".into()),
-                Value::String("".into()),
-                Value::String("pods".into()),
-                Value::String("get".into()),
-            ]);
+            store.add_fact(
+                "direct_perm",
+                vec![
+                    Value::String("alice".into()),
+                    Value::String("default".into()),
+                    Value::String("".into()),
+                    Value::String("pods".into()),
+                    Value::String("get".into()),
+                ],
+            );
             Snapshot::from_store(&store, Scope::All)
         };
 
@@ -259,7 +286,13 @@ mod tests {
         assert!(
             gained.is_empty(),
             "narrow grant subsumed by wildcard must not be reported as expansion; got: {:?}",
-            gained.iter().map(|d| format!("{}/{}/{}/{}/{}", d.principal, d.namespace, d.apigroup, d.resource, d.verb)).collect::<Vec<_>>()
+            gained
+                .iter()
+                .map(|d| format!(
+                    "{}/{}/{}/{}/{}",
+                    d.principal, d.namespace, d.apigroup, d.resource, d.verb
+                ))
+                .collect::<Vec<_>>()
         );
     }
 }

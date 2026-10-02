@@ -31,8 +31,6 @@ impl EvalStore {
     pub fn relation_names(&self) -> impl Iterator<Item = &str> {
         self.facts.keys().map(String::as_str)
     }
-
-
 }
 
 /// Documentation for a single relation column, derived from a `Decl`'s head
@@ -83,7 +81,13 @@ impl CompiledProgram {
     pub fn relation_docs(&self) -> HashMap<String, RelationDoc> {
         let mut docs = HashMap::new();
         for inst in &self.ir.insts {
-            let Inst::Decl { atom, descr, bounds, .. } = inst else {
+            let Inst::Decl {
+                atom,
+                descr,
+                bounds,
+                ..
+            } = inst
+            else {
                 continue;
             };
             let Inst::Atom { predicate, args } = self.ir.get(*atom) else {
@@ -138,7 +142,13 @@ impl CompiledProgram {
                 }
             }
 
-            docs.insert(rel_name, RelationDoc { description, columns });
+            docs.insert(
+                rel_name,
+                RelationDoc {
+                    description,
+                    columns,
+                },
+            );
         }
         docs
     }
@@ -447,10 +457,13 @@ impl Backend for DdBackend {
         // Batch mode = spawn a persistent session, snapshot every relation, drop.
         // spawn() blocks until the worker is settled at epoch 1, so snapshot_all()
         // sees fully-derived state.  Dropping the session shuts the worker down.
-        let session = crate::dd::session::DdSession::spawn(edb, rule_sources)
-            .context("spawn dd session")?;
+        let session =
+            crate::dd::session::DdSession::spawn(edb, rule_sources).context("spawn dd session")?;
         let facts = session.snapshot_all();
-        Ok(EvalStore { facts, provenance: vec![] })
+        Ok(EvalStore {
+            facts,
+            provenance: vec![],
+        })
     }
 }
 
@@ -504,7 +517,10 @@ fn execute_with_provenance<'a>(
     // Phase 1: pre-plan all strata (requires mutable IR access).
     enum StratumPlan {
         NonRecursive(Vec<Op>),
-        Recursive { initial_ops: Vec<Op>, delta_plans: Vec<Op> },
+        Recursive {
+            initial_ops: Vec<Op>,
+            delta_plans: Vec<Op>,
+        },
     }
 
     let mut strata_plans: Vec<Option<StratumPlan>> = Vec::new();
@@ -579,7 +595,10 @@ fn execute_with_provenance<'a>(
                     }
                 }
             }
-            strata_plans.push(Some(StratumPlan::Recursive { initial_ops, delta_plans }));
+            strata_plans.push(Some(StratumPlan::Recursive {
+                initial_ops,
+                delta_plans,
+            }));
         }
     }
 
@@ -605,7 +624,10 @@ fn execute_with_provenance<'a>(
                     interpreter.execute(&op)?;
                 }
             }
-            Some(StratumPlan::Recursive { initial_ops, delta_plans }) => {
+            Some(StratumPlan::Recursive {
+                initial_ops,
+                delta_plans,
+            }) => {
                 for op in initial_ops {
                     interpreter.execute(&op)?;
                 }
@@ -634,7 +656,6 @@ fn execute_with_provenance<'a>(
 
     Ok(interpreter)
 }
-
 
 pub struct Engine {
     /// EDB facts collected at load time; replayed on each evaluate.
@@ -675,10 +696,7 @@ pub fn load_bench_fixtures() -> Result<(Vec<(String, Vec<Value>)>, Vec<String>)>
         .context("glob entries")?;
     let mut rules: Vec<String> = rule_files
         .iter()
-        .map(|p| {
-            std::fs::read_to_string(p)
-                .with_context(|| format!("reading {}", p.display()))
-        })
+        .map(|p| std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display())))
         .collect::<Result<Vec<_>>>()?;
     rules.sort();
     Ok((edb, rules))
@@ -762,7 +780,10 @@ impl Engine {
 
     /// Return the arity of an existing EDB relation, or None if no facts exist yet.
     pub fn relation_arity(&self, relation: &str) -> Option<usize> {
-        self.edb.iter().find(|(r, _)| r == relation).map(|(_, t)| t.len())
+        self.edb
+            .iter()
+            .find(|(r, _)| r == relation)
+            .map(|(_, t)| t.len())
     }
 
     /// Insert a ground fact into the EDB. Returns true if inserted, false if already present.
@@ -783,7 +804,11 @@ impl Engine {
 
     /// Remove a ground fact from the EDB. Returns true if a matching fact was found and removed.
     pub fn retract_fact(&mut self, relation: &str, tuple: &[Value]) -> bool {
-        if let Some(pos) = self.edb.iter().position(|(r, t)| r == relation && t.as_slice() == tuple) {
+        if let Some(pos) = self
+            .edb
+            .iter()
+            .position(|(r, t)| r == relation && t.as_slice() == tuple)
+        {
             if let Some(s) = &self.session {
                 let row = crate::dd::value::Row::from(tuple);
                 s.retract(relation.to_string(), row);
@@ -806,7 +831,6 @@ impl Engine {
         }
         Ok(())
     }
-
 
     /// Reset all REPL session state: drop added rules and EDB temporaries, restore
     /// to the state at initial load.
@@ -832,7 +856,8 @@ impl Engine {
     /// Remove all rules whose head matches `predicate`.
     pub fn remove_rules_for(&mut self, predicate: &str) {
         let prefix = format!("{predicate}(");
-        self.rule_sources.retain(|s| !s.trim_start().starts_with(&prefix));
+        self.rule_sources
+            .retain(|s| !s.trim_start().starts_with(&prefix));
         if let Some(s) = &mut self.session {
             let _ = s.rebuild(&self.edb, &self.rule_sources);
         }
@@ -851,7 +876,10 @@ impl Engine {
         // A live session is kept in sync by every mutator, so snapshot it
         // rather than spawning (and settling) a second dataflow.
         if let Some(s) = &self.session {
-            return Ok(EvalStore { facts: s.snapshot_all(), provenance: vec![] });
+            return Ok(EvalStore {
+                facts: s.snapshot_all(),
+                provenance: vec![],
+            });
         }
         self.backend.evaluate(&self.edb, &self.rule_sources)
     }
@@ -906,7 +934,10 @@ mod tests {
 
         println!("interpreter avg: {:?}", interp_avg);
         println!("dd          avg: {:?}", dd_avg);
-        println!("ratio dd/interp: {:.1}x", dd_avg.as_secs_f64() / interp_avg.as_secs_f64());
+        println!(
+            "ratio dd/interp: {:.1}x",
+            dd_avg.as_secs_f64() / interp_avg.as_secs_f64()
+        );
     }
 
     /// Assert that every relation produced by the two backends contains the
@@ -918,14 +949,10 @@ mod tests {
         let interp = InterpreterBackend
             .evaluate(&edb, &rules)
             .expect("interpreter failed");
-        let dd = DdBackend
-            .evaluate(&edb, &rules)
-            .expect("dd failed");
+        let dd = DdBackend.evaluate(&edb, &rules).expect("dd failed");
 
-        let all_rels: std::collections::HashSet<&str> = interp
-            .relation_names()
-            .chain(dd.relation_names())
-            .collect();
+        let all_rels: std::collections::HashSet<&str> =
+            interp.relation_names().chain(dd.relation_names()).collect();
 
         let mut failures: Vec<String> = Vec::new();
         for rel in &all_rels {
@@ -962,7 +989,11 @@ mod tests {
             }
         }
 
-        assert!(failures.is_empty(), "parity failures:\n{}", failures.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "parity failures:\n{}",
+            failures.join("\n")
+        );
     }
 }
 

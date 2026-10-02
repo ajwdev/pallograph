@@ -18,9 +18,9 @@
 //! pass maintains `schema: Vec<String>` and resolves every `Operand::Var(name_id)`
 //! to `Slot::Col(pos)` by looking up `pos = schema.index_of(name)`.
 
-use anyhow::{bail, Result};
-use mangle_ir::physical::{Aggregate, Condition, Constant, DataSource, Expr, Op, Operand};
+use anyhow::{Result, bail};
 use mangle_ir::Ir;
+use mangle_ir::physical::{Aggregate, Condition, Constant, DataSource, Expr, Op, Operand};
 
 use crate::dd::value::{OrdF64, Val};
 
@@ -53,7 +53,10 @@ pub enum OwnedExpr {
     Value(Slot),
     /// Any `fn:*` scalar function call.  Delegated at build time to the
     /// interpreter's `eval_function` via `Val→Value→Val` round-trip.
-    Call { func: String, args: Vec<Slot> },
+    Call {
+        func: String,
+        args: Vec<Slot>,
+    },
 }
 
 /// A single step in the lowered pipeline for one rule.
@@ -120,7 +123,10 @@ pub enum Step {
     /// GroupBy / aggregation: group the current rows by `key_cols` and compute
     /// one aggregate per entry.  Output schema = key columns ++ aggregate result
     /// columns (in `aggregates` order).
-    Reduce { key_cols: Vec<usize>, aggregates: Vec<LoweredAggregate> },
+    Reduce {
+        key_cols: Vec<usize>,
+        aggregates: Vec<LoweredAggregate>,
+    },
 
     /// Final step: project the specified slots into the head relation's tuple.
     Insert { head_rel: String, proj: Vec<Slot> },
@@ -207,7 +213,10 @@ fn resolve_data_source(source: &DataSource, ir: &Ir) -> Result<(String, Vec<Stri
     match source {
         DataSource::Scan { relation, vars } | DataSource::ScanDelta { relation, vars } => {
             let rel = ir.resolve_name(*relation).to_string();
-            let vars: Vec<_> = vars.iter().map(|v| ir.resolve_name(*v).to_string()).collect();
+            let vars: Vec<_> = vars
+                .iter()
+                .map(|v| ir.resolve_name(*v).to_string())
+                .collect();
             Ok((rel, vars))
         }
         DataSource::IndexLookup { .. } => {
@@ -232,7 +241,12 @@ fn emit_join(rel_name: String, vars: &[String], schema: &mut Vec<String>, steps:
         }
     }
 
-    steps.push(Step::Join { rel: rel_name, left_key_cols, right_key_cols, right_new_cols });
+    steps.push(Step::Join {
+        rel: rel_name,
+        left_key_cols,
+        right_key_cols,
+        right_new_cols,
+    });
 }
 
 fn lower_aggregate(agg: &Aggregate, ir: &Ir, schema: &[String]) -> Result<LoweredAggregate> {
@@ -241,10 +255,9 @@ fn lower_aggregate(agg: &Aggregate, ir: &Ir, schema: &[String]) -> Result<Lowere
         None => None,
         Some(Operand::Var(name_id)) => {
             let name = ir.resolve_name(*name_id);
-            let col = schema
-                .iter()
-                .position(|v| v == name)
-                .ok_or_else(|| anyhow::anyhow!("aggregate arg `{name}` not in schema {schema:?}"))?;
+            let col = schema.iter().position(|v| v == name).ok_or_else(|| {
+                anyhow::anyhow!("aggregate arg `{name}` not in schema {schema:?}")
+            })?;
             Some(Slot::Col(col))
         }
         Some(Operand::Const(c)) => Some(Slot::Const(resolve_constant(c, ir))),
@@ -266,13 +279,18 @@ fn lower_inner(
                     // ScanDelta is lowered as Scan — DD's iterate operator handles
                     // the delta bookkeeping internally when we use Variable in Phase 3.
                     let rel_name = ir.resolve_name(*relation).to_string();
-                    let var_names: Vec<_> =
-                        vars.iter().map(|v| ir.resolve_name(*v).to_string()).collect();
+                    let var_names: Vec<_> = vars
+                        .iter()
+                        .map(|v| ir.resolve_name(*v).to_string())
+                        .collect();
 
                     if schema.is_empty() {
                         let n = var_names.len();
                         schema.extend(var_names);
-                        steps.push(Step::Scan { rel: rel_name, n_cols: n });
+                        steps.push(Step::Scan {
+                            rel: rel_name,
+                            n_cols: n,
+                        });
                     } else {
                         emit_join(rel_name, &var_names, schema, steps);
                     }
@@ -280,7 +298,12 @@ fn lower_inner(
                     lower_inner(body, ir, schema, steps, head_rel)
                 }
 
-                DataSource::IndexLookup { relation, col_idx, key, vars } => {
+                DataSource::IndexLookup {
+                    relation,
+                    col_idx,
+                    key,
+                    vars,
+                } => {
                     // The planner emits an indexed join: `relation` looked up with
                     // `col_idx` keyed on `key`, naming the looked-up columns as fresh
                     // vars ($scan_N) and expressing the key equality as a *separate*
@@ -295,8 +318,10 @@ fn lower_inner(
                     // on already-equal rows). Any *other* shared columns are still
                     // enforced by their own downstream Filters, exactly as before.
                     let rel = ir.resolve_name(*relation).to_string();
-                    let var_names: Vec<String> =
-                        vars.iter().map(|v| ir.resolve_name(*v).to_string()).collect();
+                    let var_names: Vec<String> = vars
+                        .iter()
+                        .map(|v| ir.resolve_name(*v).to_string())
+                        .collect();
 
                     // Column position of the key variable in the current schema, if
                     // `key` is a Var already bound. `None` for a constant key or an
@@ -352,7 +377,11 @@ fn lower_inner(
                     };
                     let left_slot = resolve_operand(left, ir, schema)?;
                     let right_slot = resolve_operand(right, ir, schema)?;
-                    steps.push(Step::Cmp { op: my_op, left: left_slot, right: right_slot });
+                    steps.push(Step::Cmp {
+                        op: my_op,
+                        left: left_slot,
+                        right: right_slot,
+                    });
                 }
                 Condition::Negation { relation, args } => {
                     let rel_name = ir.resolve_name(*relation).to_string();
@@ -385,9 +414,14 @@ fn lower_inner(
                 }
                 Condition::Call { function, args } => {
                     let func_name = ir.resolve_name(*function).to_string();
-                    let arg_slots: Result<Vec<_>> =
-                        args.iter().map(|a| resolve_operand(a, ir, schema)).collect();
-                    steps.push(Step::CallFilter { func: func_name, args: arg_slots? });
+                    let arg_slots: Result<Vec<_>> = args
+                        .iter()
+                        .map(|a| resolve_operand(a, ir, schema))
+                        .collect();
+                    steps.push(Step::CallFilter {
+                        func: func_name,
+                        args: arg_slots?,
+                    });
                 }
             }
             lower_inner(body, ir, schema, steps, head_rel)
@@ -398,9 +432,14 @@ fn lower_inner(
                 Expr::Value(operand) => OwnedExpr::Value(resolve_operand(operand, ir, schema)?),
                 Expr::Call { function, args } => {
                     let func_name = ir.resolve_name(*function).to_string();
-                    let slots: Result<Vec<_>> =
-                        args.iter().map(|a| resolve_operand(a, ir, schema)).collect();
-                    OwnedExpr::Call { func: func_name, args: slots? }
+                    let slots: Result<Vec<_>> = args
+                        .iter()
+                        .map(|a| resolve_operand(a, ir, schema))
+                        .collect();
+                    OwnedExpr::Call {
+                        func: func_name,
+                        args: slots?,
+                    }
                 }
             };
             schema.push(ir.resolve_name(*var).to_string());
@@ -408,11 +447,19 @@ fn lower_inner(
             lower_inner(body, ir, schema, steps, head_rel)
         }
 
-        Op::MatchField { struct_op, field, var, body } => {
+        Op::MatchField {
+            struct_op,
+            field,
+            var,
+            body,
+        } => {
             let struct_slot = resolve_operand(struct_op, ir, schema)?;
             let field_name = ir.resolve_name(*field).to_string();
             schema.push(ir.resolve_name(*var).to_string());
-            steps.push(Step::MatchField { struct_slot, field: field_name });
+            steps.push(Step::MatchField {
+                struct_slot,
+                field: field_name,
+            });
             lower_inner(body, ir, schema, steps, head_rel)
         }
 
@@ -431,10 +478,15 @@ fn lower_inner(
                 steps.push(Step::Unit);
             }
             let rel_name = ir.resolve_name(*relation).to_string();
-            let proj: Result<Vec<_>> =
-                args.iter().map(|a| resolve_operand(a, ir, schema)).collect();
+            let proj: Result<Vec<_>> = args
+                .iter()
+                .map(|a| resolve_operand(a, ir, schema))
+                .collect();
             *head_rel = rel_name.clone();
-            steps.push(Step::Insert { head_rel: rel_name, proj: proj? });
+            steps.push(Step::Insert {
+                head_rel: rel_name,
+                proj: proj?,
+            });
             Ok(())
         }
 
@@ -497,14 +549,22 @@ fn lower_inner(
         // HashJoin — a planner optimisation for 2-way equijoins (MANGLE_HASHJOIN=1).
         // Semantically identical to nested-loop join; lower as Scan + Join.
         // -----------------------------------------------------------------------
-        Op::HashJoin { build_source, probe_source, join_keys: _, body } => {
+        Op::HashJoin {
+            build_source,
+            probe_source,
+            join_keys: _,
+            body,
+        } => {
             let (build_rel, build_vars) = resolve_data_source(build_source, ir)?;
             let (probe_rel, probe_vars) = resolve_data_source(probe_source, ir)?;
 
             // Seed from the build side.
             let n = build_vars.len();
             schema.extend(build_vars.clone());
-            steps.push(Step::Scan { rel: build_rel, n_cols: n });
+            steps.push(Step::Scan {
+                rel: build_rel,
+                n_cols: n,
+            });
 
             // Join on the probe side — shared vars become keys automatically.
             emit_join(probe_rel, &probe_vars, schema, steps);
@@ -515,14 +575,25 @@ fn lower_inner(
         // -----------------------------------------------------------------------
         // GroupBy — aggregation: group by keys, compute aggregates, continue body.
         // -----------------------------------------------------------------------
-        Op::GroupBy { source, vars, keys, aggregates, body } => {
+        Op::GroupBy {
+            source,
+            vars,
+            keys,
+            aggregates,
+            body,
+        } => {
             // Resolve the source relation and seed the schema.
             let src_rel = ir.resolve_name(*source).to_string();
-            let var_names: Vec<String> =
-                vars.iter().map(|v| ir.resolve_name(*v).to_string()).collect();
+            let var_names: Vec<String> = vars
+                .iter()
+                .map(|v| ir.resolve_name(*v).to_string())
+                .collect();
             let n = var_names.len();
             schema.extend(var_names.clone());
-            steps.push(Step::Scan { rel: src_rel, n_cols: n });
+            steps.push(Step::Scan {
+                rel: src_rel,
+                n_cols: n,
+            });
 
             // Resolve group-by key positions within the source schema.
             let key_cols: Vec<usize> = keys
@@ -543,14 +614,14 @@ fn lower_inner(
                 .collect::<Result<_>>()?;
 
             // Emit the Reduce step.
-            steps.push(Step::Reduce { key_cols: key_cols.clone(), aggregates: lowered_aggs });
+            steps.push(Step::Reduce {
+                key_cols: key_cols.clone(),
+                aggregates: lowered_aggs,
+            });
 
             // Rewrite schema: key columns first, then one column per aggregate result.
             // The body's Insert/Cmp steps will resolve against this new schema.
-            let mut new_schema: Vec<String> = key_cols
-                .iter()
-                .map(|&i| schema[i].clone())
-                .collect();
+            let mut new_schema: Vec<String> = key_cols.iter().map(|&i| schema[i].clone()).collect();
             for agg in aggregates {
                 new_schema.push(ir.resolve_name(agg.var).to_string());
             }

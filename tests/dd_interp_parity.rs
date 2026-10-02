@@ -41,7 +41,10 @@ fn s(x: &str) -> Value {
 }
 
 fn edb(facts: &[(&str, Vec<Value>)]) -> Edb {
-    facts.iter().map(|(r, t)| (r.to_string(), t.clone())).collect()
+    facts
+        .iter()
+        .map(|(r, t)| (r.to_string(), t.clone()))
+        .collect()
 }
 
 /// Evaluate `rules` over `edb` on both backends; assert every (non-`$`) relation
@@ -113,8 +116,18 @@ fn assert_parity_impl(name: &str, e: &Edb, rules: &str, normalize_lists: bool) {
         let i = prep(interp.scan(rel));
         let d = prep(dd.scan(rel));
         if i != d {
-            let missing: Vec<_> = i.iter().filter(|t| !d.contains(t)).take(3).cloned().collect();
-            let extra: Vec<_> = d.iter().filter(|t| !i.contains(t)).take(3).cloned().collect();
+            let missing: Vec<_> = i
+                .iter()
+                .filter(|t| !d.contains(t))
+                .take(3)
+                .cloned()
+                .collect();
+            let extra: Vec<_> = d
+                .iter()
+                .filter(|t| !i.contains(t))
+                .take(3)
+                .cloned()
+                .collect();
             failures.push(format!(
                 "  {rel}: interp={} dd={}\n     missing from dd: {missing:?}\n     extra in dd:     {extra:?}",
                 i.len(),
@@ -406,7 +419,11 @@ fn mixed_value_types() {
 #[test]
 fn infix_numeric_comparison() {
     // Infix <, >, <=, >= as body terms (bound var vs constant) -> Cmp Lt/Gt/Le/Ge.
-    let e = edb(&[("val", vec![n(5)]), ("val", vec![n(10)]), ("val", vec![n(15)])]);
+    let e = edb(&[
+        ("val", vec![n(5)]),
+        ("val", vec![n(10)]),
+        ("val", vec![n(15)]),
+    ]);
     assert_parity(
         "comparison_ops",
         &e,
@@ -433,7 +450,11 @@ fn comparison_two_variables() {
 #[test]
 fn comparison_neq() {
     // `!=` takes the Ineq path -> Cmp Neq.
-    let e = edb(&[("val", vec![n(5)]), ("val", vec![n(10)]), ("val", vec![n(15)])]);
+    let e = edb(&[
+        ("val", vec![n(5)]),
+        ("val", vec![n(10)]),
+        ("val", vec![n(15)]),
+    ]);
     assert_parity(
         "neq",
         &e,
@@ -452,7 +473,9 @@ struct Lcg(u64);
 impl Lcg {
     fn new(seed: u64) -> Self {
         // Nudge away from 0 so the first output is non-trivial.
-        Lcg(seed.wrapping_mul(2862933555777941757).wrapping_add(3037000493))
+        Lcg(seed
+            .wrapping_mul(2862933555777941757)
+            .wrapping_add(3037000493))
     }
     fn next_u64(&mut self) -> u64 {
         self.0 = self
@@ -501,7 +524,9 @@ fn property_negation_random_graphs() {
     for seed in 0..30u64 {
         let mut rng = Lcg::new(seed.wrapping_add(100));
         let nodes = 2 + rng.below(5); // 2..=6 nodes
-        let mut e: Edb = (0..nodes).map(|i| ("node".to_string(), vec![n(i as i64)])).collect();
+        let mut e: Edb = (0..nodes)
+            .map(|i| ("node".to_string(), vec![n(i as i64)]))
+            .collect();
         e.extend(random_graph(&mut rng, nodes));
         assert_parity(&format!("neg_seed_{seed}"), &e, rules);
     }

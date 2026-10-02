@@ -85,6 +85,5 @@ pub fn load_config(explicit: Option<&Path>) -> Result<Option<Config>> {
 fn read_config(path: &Path) -> Result<Config> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("reading config from {}", path.display()))?;
-    toml::from_str(&contents)
-        .with_context(|| format!("parsing config from {}", path.display()))
+    toml::from_str(&contents).with_context(|| format!("parsing config from {}", path.display()))
 }

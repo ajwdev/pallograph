@@ -3,12 +3,12 @@
 
 use std::collections::HashSet;
 
-use z3::ast::{Ast, Bool};
-use z3::ast::String as Z3String;
 use z3::SatResult;
+use z3::ast::String as Z3String;
+use z3::ast::{Ast, Bool};
 
-use super::{AccessPath, SmtEncoder, Violation};
 use super::rbac_model::fn_name;
+use super::{AccessPath, SmtEncoder, Violation};
 
 impl<'ctx> SmtEncoder<'ctx> {
     /// Check that every principal with can(_, namespace, resource, verb) is in `expected`.
@@ -38,8 +38,11 @@ impl<'ctx> SmtEncoder<'ctx> {
         if let Some(rb_tuples) = self.facts.get("subject_in_rb") {
             // subject_in_rb: (principal, binding_ns, binding_name)
             for t in rb_tuples {
-                if let [mangle_common::Value::String(p), mangle_common::Value::String(b_ns), ..] =
-                    t.as_slice()
+                if let [
+                    mangle_common::Value::String(p),
+                    mangle_common::Value::String(b_ns),
+                    ..,
+                ] = t.as_slice()
                 {
                     // Include if namespace matches OR if we're checking cluster-wide ("").
                     if namespace.is_empty() || b_ns == namespace {
@@ -59,7 +62,8 @@ impl<'ctx> SmtEncoder<'ctx> {
         }
 
         let known_principals_owned: Vec<String> = principal_set.into_iter().collect();
-        let known_principals: Vec<&str> = known_principals_owned.iter().map(String::as_str).collect();
+        let known_principals: Vec<&str> =
+            known_principals_owned.iter().map(String::as_str).collect();
 
         if known_principals.is_empty() {
             return vec![];
@@ -103,8 +107,10 @@ impl<'ctx> SmtEncoder<'ctx> {
         self.solver.assert(&witness_has_perm);
         self.solver.assert(&witness_is_known);
         if !not_expected.is_empty() {
-            self.solver
-                .assert(&Bool::and(self.ctx, &not_expected.iter().collect::<Vec<_>>()));
+            self.solver.assert(&Bool::and(
+                self.ctx,
+                &not_expected.iter().collect::<Vec<_>>(),
+            ));
         }
 
         let mut violations = Vec::new();
@@ -146,11 +152,7 @@ impl<'ctx> SmtEncoder<'ctx> {
     /// string. Z3 evaluates the RecFuncDecl body directly to find satisfying assignments.
     /// When the loop terminates via UNSAT that is a proof — not just "searched and found
     /// nothing" — that no string exists satisfying the constraints.
-    pub fn check_namespace_isolation(
-        &self,
-        namespace: &str,
-        allowed: &[&str],
-    ) -> Vec<Violation> {
+    pub fn check_namespace_isolation(&self, namespace: &str, allowed: &[&str]) -> Vec<Violation> {
         let Some(can_decl) = self.get_decl("can") else {
             return vec![];
         };
@@ -180,8 +182,10 @@ impl<'ctx> SmtEncoder<'ctx> {
         self.solver.push();
         self.solver.assert(&has_access);
         if !not_allowed.is_empty() {
-            self.solver
-                .assert(&Bool::and(self.ctx, &not_allowed.iter().collect::<Vec<_>>()));
+            self.solver.assert(&Bool::and(
+                self.ctx,
+                &not_allowed.iter().collect::<Vec<_>>(),
+            ));
         }
 
         let mut violations = Vec::new();
@@ -203,8 +207,10 @@ impl<'ctx> SmtEncoder<'ctx> {
                 .unwrap_or_default();
 
             // Exclude this principal and let Z3 find the next one.
-            self.solver
-                .assert(&p._eq(&Z3String::from_str(self.ctx, &principal).unwrap()).not());
+            self.solver.assert(
+                &p._eq(&Z3String::from_str(self.ctx, &principal).unwrap())
+                    .not(),
+            );
 
             let paths = self.paths_for_principal(&principal, "", None);
             violations.push(Violation {
@@ -239,7 +245,12 @@ impl<'ctx> SmtEncoder<'ctx> {
         let mut principal_set: HashSet<String> = HashSet::new();
         if let Some(rb_tuples) = self.facts.get("subject_in_rb") {
             for t in rb_tuples {
-                if let [mangle_common::Value::String(p), mangle_common::Value::String(b_ns), ..] = t.as_slice() {
+                if let [
+                    mangle_common::Value::String(p),
+                    mangle_common::Value::String(b_ns),
+                    ..,
+                ] = t.as_slice()
+                {
                     if namespace.is_empty() || b_ns == namespace {
                         principal_set.insert(p.clone());
                     }
@@ -255,7 +266,8 @@ impl<'ctx> SmtEncoder<'ctx> {
         }
 
         let known_principals_owned: Vec<String> = principal_set.into_iter().collect();
-        let known_principals: Vec<&str> = known_principals_owned.iter().map(String::as_str).collect();
+        let known_principals: Vec<&str> =
+            known_principals_owned.iter().map(String::as_str).collect();
         if known_principals.is_empty() {
             return vec![];
         }
@@ -286,15 +298,21 @@ impl<'ctx> SmtEncoder<'ctx> {
 
         let not_expected: Vec<Bool> = expected
             .iter()
-            .map(|ep| witness._eq(&Z3String::from_str(self.ctx, ep).unwrap()).not())
+            .map(|ep| {
+                witness
+                    ._eq(&Z3String::from_str(self.ctx, ep).unwrap())
+                    .not()
+            })
             .collect();
 
         self.solver.push();
         self.solver.assert(&witness_reaches);
         self.solver.assert(&witness_is_known);
         if !not_expected.is_empty() {
-            self.solver
-                .assert(&Bool::and(self.ctx, &not_expected.iter().collect::<Vec<_>>()));
+            self.solver.assert(&Bool::and(
+                self.ctx,
+                &not_expected.iter().collect::<Vec<_>>(),
+            ));
         }
 
         let mut violations = Vec::new();
@@ -316,7 +334,11 @@ impl<'ctx> SmtEncoder<'ctx> {
                     ._eq(&Z3String::from_str(self.ctx, &principal).unwrap())
                     .not(),
             );
-            let paths = self.paths_for_principal(&principal, "", Some((namespace, apigroup, resource, verb)));
+            let paths = self.paths_for_principal(
+                &principal,
+                "",
+                Some((namespace, apigroup, resource, verb)),
+            );
             violations.push(Violation {
                 principal,
                 namespace: namespace.to_string(),
@@ -362,16 +384,20 @@ impl<'ctx> SmtEncoder<'ctx> {
         let wc = |entry: &str, query: &str| entry == "*" || entry == query;
         let matching: Vec<String> = {
             let mut seen = HashSet::new();
-            self.can_entries.get("")
+            self.can_entries
+                .get("")
                 .into_iter()
                 .flatten()
                 .filter(|(_, e_ns, e_ag, e_r, e_v)| {
-                    e_ns == namespace
-                        && wc(e_ag, apigroup)
-                        && wc(e_r, resource)
-                        && wc(e_v, verb)
+                    e_ns == namespace && wc(e_ag, apigroup) && wc(e_r, resource) && wc(e_v, verb)
                 })
-                .filter_map(|(p, ..)| if seen.insert(p.clone()) { Some(p.clone()) } else { None })
+                .filter_map(|(p, ..)| {
+                    if seen.insert(p.clone()) {
+                        Some(p.clone())
+                    } else {
+                        None
+                    }
+                })
                 .collect()
         };
 
@@ -380,8 +406,15 @@ impl<'ctx> SmtEncoder<'ctx> {
             .map(|p| {
                 // paths_for_principal with perm_filter + has_direct=true returns only
                 // the binding(s) that grant the queried permission — no via-chains.
-                let paths = self.paths_for_principal(&p, "", Some((namespace, apigroup, resource, verb)));
-                Violation { principal: p, namespace: namespace.to_string(), resource: resource.to_string(), verb: verb.to_string(), paths }
+                let paths =
+                    self.paths_for_principal(&p, "", Some((namespace, apigroup, resource, verb)));
+                Violation {
+                    principal: p,
+                    namespace: namespace.to_string(),
+                    resource: resource.to_string(),
+                    verb: verb.to_string(),
+                    paths,
+                }
             })
             .collect()
     }
@@ -411,27 +444,43 @@ impl<'ctx> SmtEncoder<'ctx> {
         let crb_key = fn_name("subject_in_crb", suffix);
         let ci_key = fn_name("controls_identity", suffix);
 
-        let rb_bindings: HashSet<(String, String)> = self.facts
+        let rb_bindings: HashSet<(String, String)> = self
+            .facts
             .get(&rb_key)
             .map(|rows| {
                 rows.iter()
                     .filter_map(|t| {
-                        if let [Value::String(p), Value::String(b_ns), Value::String(b_name)] = t.as_slice() {
-                            if p == principal { Some((b_ns.clone(), b_name.clone())) } else { None }
-                        } else { None }
+                        if let [Value::String(p), Value::String(b_ns), Value::String(b_name)] =
+                            t.as_slice()
+                        {
+                            if p == principal {
+                                Some((b_ns.clone(), b_name.clone()))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
                     })
                     .collect()
             })
             .unwrap_or_default();
 
-        let crb_bindings: HashSet<String> = self.facts
+        let crb_bindings: HashSet<String> = self
+            .facts
             .get(&crb_key)
             .map(|rows| {
                 rows.iter()
                     .filter_map(|t| {
                         if let [Value::String(p), Value::String(b_name)] = t.as_slice() {
-                            if p == principal { Some(b_name.clone()) } else { None }
-                        } else { None }
+                            if p == principal {
+                                Some(b_name.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
                     })
                     .collect()
             })
@@ -461,13 +510,20 @@ impl<'ctx> SmtEncoder<'ctx> {
         // Via-paths would be redundant noise. Filter to only the binding(s) that grant
         // the queried permission so irrelevant sibling bindings don't appear.
         if has_direct {
-            self.collect_binding_paths(&rb_bindings, &crb_bindings, vec![], perm_filter, &mut paths);
+            self.collect_binding_paths(
+                &rb_bindings,
+                &crb_bindings,
+                vec![],
+                perm_filter,
+                &mut paths,
+            );
             return paths;
         }
 
         // Principal only reaches the permission via escalation chains.
         // Collect controls_identity targets, excluding self.
-        let via_targets: Vec<String> = self.facts
+        let via_targets: Vec<String> = self
+            .facts
             .get(&ci_key)
             .map(|rows| {
                 rows.iter()
@@ -478,7 +534,9 @@ impl<'ctx> SmtEncoder<'ctx> {
                             } else {
                                 None
                             }
-                        } else { None }
+                        } else {
+                            None
+                        }
                     })
                     .collect()
             })
@@ -489,17 +547,20 @@ impl<'ctx> SmtEncoder<'ctx> {
         // a target that only has escalation access won't appear here, so cluster-admin
         // principals don't endlessly list each other as via-paths.
         let can = self.can_entries.get(suffix);
-        let relevant_targets: Vec<&String> = via_targets.iter().filter(|target| {
-            can.is_some_and(|entries| {
-                entries.iter().any(|(ep, e_ns, e_ag, e_r, e_v)| {
-                    ep == *target
-                        && e_ns == q_ns
-                        && (e_ag == "*" || q_ag == e_ag)
-                        && (e_r == "*" || q_r == e_r)
-                        && (e_v == "*" || q_v == e_v)
+        let relevant_targets: Vec<&String> = via_targets
+            .iter()
+            .filter(|target| {
+                can.is_some_and(|entries| {
+                    entries.iter().any(|(ep, e_ns, e_ag, e_r, e_v)| {
+                        ep == *target
+                            && e_ns == q_ns
+                            && (e_ag == "*" || q_ag == e_ag)
+                            && (e_r == "*" || q_r == e_r)
+                            && (e_v == "*" || q_v == e_v)
+                    })
                 })
             })
-        }).collect();
+            .collect();
 
         // Build hop chains for all relevant targets first.
         let target_chains: Vec<(&String, Vec<(String, String)>)> = relevant_targets
@@ -524,33 +585,55 @@ impl<'ctx> SmtEncoder<'ctx> {
                 continue;
             }
 
-            let target_rb: HashSet<(String, String)> = self.facts
+            let target_rb: HashSet<(String, String)> = self
+                .facts
                 .get(&rb_key)
                 .map(|rows| {
                     rows.iter()
                         .filter_map(|t| {
-                            if let [Value::String(p), Value::String(b_ns), Value::String(b_name)] = t.as_slice() {
-                                if p == target.as_str() { Some((b_ns.clone(), b_name.clone())) } else { None }
-                            } else { None }
+                            if let [Value::String(p), Value::String(b_ns), Value::String(b_name)] =
+                                t.as_slice()
+                            {
+                                if p == target.as_str() {
+                                    Some((b_ns.clone(), b_name.clone()))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
                         })
                         .collect()
                 })
                 .unwrap_or_default();
 
-            let target_crb: HashSet<String> = self.facts
+            let target_crb: HashSet<String> = self
+                .facts
                 .get(&crb_key)
                 .map(|rows| {
                     rows.iter()
                         .filter_map(|t| {
                             if let [Value::String(p), Value::String(b_name)] = t.as_slice() {
-                                if p == target.as_str() { Some(b_name.clone()) } else { None }
-                            } else { None }
+                                if p == target.as_str() {
+                                    Some(b_name.clone())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
                         })
                         .collect()
                 })
                 .unwrap_or_default();
 
-            self.collect_binding_paths(&target_rb, &target_crb, hops.clone(), perm_filter, &mut paths);
+            self.collect_binding_paths(
+                &target_rb,
+                &target_crb,
+                hops.clone(),
+                perm_filter,
+                &mut paths,
+            );
         }
 
         paths
@@ -590,7 +673,8 @@ impl<'ctx> SmtEncoder<'ctx> {
             return vec![(target.to_string(), String::new())];
         }
 
-        let intermediates: Vec<String> = self.facts
+        let intermediates: Vec<String> = self
+            .facts
             .get("escalation_hop")
             .map(|rows| {
                 rows.iter()
@@ -652,8 +736,11 @@ impl<'ctx> SmtEncoder<'ctx> {
 
         let matches_sa = |row: &[Value], rel_ns_idx: usize, rel_name_idx: usize| -> bool {
             if let (Some(target_ns), Some(target_name)) = (sa_ns, sa_name) {
-                if let (Some(Value::String(p)), Some(Value::String(ns)), Some(Value::String(name))) =
-                    (row.first(), row.get(rel_ns_idx), row.get(rel_name_idx))
+                if let (
+                    Some(Value::String(p)),
+                    Some(Value::String(ns)),
+                    Some(Value::String(name)),
+                ) = (row.first(), row.get(rel_ns_idx), row.get(rel_name_idx))
                 {
                     return p == principal && ns == target_ns && name == target_name;
                 }
@@ -661,29 +748,47 @@ impl<'ctx> SmtEncoder<'ctx> {
             false
         };
 
-        if self.facts.get("exec_reachable_sa").is_some_and(|r| r.iter().any(|row| matches_sa(row, 1, 2))) {
+        if self
+            .facts
+            .get("exec_reachable_sa")
+            .is_some_and(|r| r.iter().any(|row| matches_sa(row, 1, 2)))
+        {
             mechanisms.push("pods/exec");
         }
-        if self.facts.get("token_accessible_sa").is_some_and(|r| r.iter().any(|row| matches_sa(row, 1, 2))) {
+        if self
+            .facts
+            .get("token_accessible_sa")
+            .is_some_and(|r| r.iter().any(|row| matches_sa(row, 1, 2)))
+        {
             mechanisms.push("token");
         }
-        if self.facts.get("pod_creatable_sa").is_some_and(|r| r.iter().any(|row| matches_sa(row, 1, 2))) {
+        if self
+            .facts
+            .get("pod_creatable_sa")
+            .is_some_and(|r| r.iter().any(|row| matches_sa(row, 1, 2)))
+        {
             mechanisms.push("pods create");
         }
-        if self.facts.get("impersonatable_sa").is_some_and(|r| r.iter().any(|row| matches_sa(row, 1, 2))) {
+        if self
+            .facts
+            .get("impersonatable_sa")
+            .is_some_and(|r| r.iter().any(|row| matches_sa(row, 1, 2)))
+        {
             mechanisms.push("impersonate");
         }
 
         // Non-SA target (user/group): mechanism must be impersonation.
-        if sa_ns.is_none() && self.facts.get("escalation_hop").is_some_and(|rows| {
-            rows.iter().any(|r| {
-                if let [Value::String(p), Value::String(t)] = r.as_slice() {
-                    p == principal && t == target
-                } else {
-                    false
-                }
+        if sa_ns.is_none()
+            && self.facts.get("escalation_hop").is_some_and(|rows| {
+                rows.iter().any(|r| {
+                    if let [Value::String(p), Value::String(t)] = r.as_slice() {
+                        p == principal && t == target
+                    } else {
+                        false
+                    }
+                })
             })
-        }) {
+        {
             mechanisms.push("impersonate");
         }
 
@@ -705,24 +810,52 @@ impl<'ctx> SmtEncoder<'ctx> {
         let wc = |entry: &str, query: &str| entry == "*" || entry == query;
         self.facts.get("clusterrole_perm").is_some_and(|rows| {
             rows.iter().any(|t| {
-                if let [Value::String(rn), Value::String(e_ag), Value::String(e_r), Value::String(e_v)] = t.as_slice() {
+                if let [
+                    Value::String(rn),
+                    Value::String(e_ag),
+                    Value::String(e_r),
+                    Value::String(e_v),
+                ] = t.as_slice()
+                {
                     rn == role_name && wc(e_ag, q_ag) && wc(e_r, q_r) && wc(e_v, q_v)
-                } else { false }
+                } else {
+                    false
+                }
             })
         })
     }
 
     /// Return true when a Role's permissions (scoped to `role_ns`) include at
     /// least one rule that matches `(q_ag, q_r, q_v)` under wildcard semantics.
-    fn role_matches(&self, role_ns: &str, role_name: &str, q_ag: &str, q_r: &str, q_v: &str) -> bool {
+    fn role_matches(
+        &self,
+        role_ns: &str,
+        role_name: &str,
+        q_ag: &str,
+        q_r: &str,
+        q_v: &str,
+    ) -> bool {
         use mangle_common::Value;
         let wc = |entry: &str, query: &str| entry == "*" || entry == query;
         self.facts.get("role_perm").is_some_and(|rows| {
             rows.iter().any(|t| {
                 // role_perm: (Namespace, RoleName, ApiGroup, Resource, Verb)
-                if let [Value::String(rns), Value::String(rn), Value::String(e_ag), Value::String(e_r), Value::String(e_v)] = t.as_slice() {
-                    rns == role_ns && rn == role_name && wc(e_ag, q_ag) && wc(e_r, q_r) && wc(e_v, q_v)
-                } else { false }
+                if let [
+                    Value::String(rns),
+                    Value::String(rn),
+                    Value::String(e_ag),
+                    Value::String(e_r),
+                    Value::String(e_v),
+                ] = t.as_slice()
+                {
+                    rns == role_ns
+                        && rn == role_name
+                        && wc(e_ag, q_ag)
+                        && wc(e_r, q_r)
+                        && wc(e_v, q_v)
+                } else {
+                    false
+                }
             })
         })
     }
@@ -742,7 +875,13 @@ impl<'ctx> SmtEncoder<'ctx> {
 
         if let Some(rows) = self.facts.get("rolebinding_roleref") {
             for t in rows {
-                if let [Value::String(b_ns), Value::String(b_name), Value::String(ref_kind), Value::String(ref_name)] = t.as_slice() {
+                if let [
+                    Value::String(b_ns),
+                    Value::String(b_name),
+                    Value::String(ref_kind),
+                    Value::String(ref_name),
+                ] = t.as_slice()
+                {
                     if rb_bindings.contains(&(b_ns.clone(), b_name.clone())) {
                         if let Some((_, q_ag, q_r, q_v)) = perm_filter {
                             let matches = if ref_kind == "Role" {
@@ -750,13 +889,19 @@ impl<'ctx> SmtEncoder<'ctx> {
                             } else {
                                 self.clusterrole_matches(ref_name, q_ag, q_r, q_v)
                             };
-                            if !matches { continue; }
+                            if !matches {
+                                continue;
+                            }
                         }
                         out.push(AccessPath {
                             binding_kind: "RoleBinding",
                             binding_namespace: b_ns.clone(),
                             binding_name: b_name.clone(),
-                            role_kind: if ref_kind == "Role" { "Role" } else { "ClusterRole" },
+                            role_kind: if ref_kind == "Role" {
+                                "Role"
+                            } else {
+                                "ClusterRole"
+                            },
                             role_name: ref_name.clone(),
                             hops: hops.clone(),
                         });
@@ -770,7 +915,9 @@ impl<'ctx> SmtEncoder<'ctx> {
                 if let [Value::String(b_name), Value::String(ref_name)] = t.as_slice() {
                     if crb_bindings.contains(b_name) {
                         if let Some((_, q_ag, q_r, q_v)) = perm_filter {
-                            if !self.clusterrole_matches(ref_name, q_ag, q_r, q_v) { continue; }
+                            if !self.clusterrole_matches(ref_name, q_ag, q_r, q_v) {
+                                continue;
+                            }
                         }
                         out.push(AccessPath {
                             binding_kind: "ClusterRoleBinding",
@@ -823,7 +970,9 @@ mod tests {
         .evaluate()
         .expect("evaluate");
         assert!(
-            eval.scan("rolebinding_roleref").iter().any(|t| t.contains(&Value::String("leader-election".into()))),
+            eval.scan("rolebinding_roleref")
+                .iter()
+                .any(|t| t.contains(&Value::String("leader-election".into()))),
             "fixture binding was not loaded"
         );
 
@@ -836,23 +985,40 @@ mod tests {
         let admin = direct
             .iter()
             .find(|v| v.principal == "admin@example.com")
-            .unwrap_or_else(|| panic!("admin@example.com missing from {:?}", direct.iter().map(|v| &v.principal).collect::<Vec<_>>()));
+            .unwrap_or_else(|| {
+                panic!(
+                    "admin@example.com missing from {:?}",
+                    direct.iter().map(|v| &v.principal).collect::<Vec<_>>()
+                )
+            });
         assert!(
             admin.paths.iter().all(|p| p.role_name != "leader-election"),
             "non-granting binding shown: {:?}",
-            admin.paths.iter().map(|p| (&p.binding_name, &p.role_name)).collect::<Vec<_>>()
+            admin
+                .paths
+                .iter()
+                .map(|p| (&p.binding_name, &p.role_name))
+                .collect::<Vec<_>>()
         );
 
         // Every displayed binding, for every principal, references a granting role.
         for v in &direct {
-            assert!(!v.paths.is_empty(), "{} has no explaining binding", v.principal);
+            assert!(
+                !v.paths.is_empty(),
+                "{} has no explaining binding",
+                v.principal
+            );
             for p in &v.paths {
                 let grants = if p.role_kind == "Role" {
                     enc.role_matches(&p.binding_namespace, &p.role_name, "*", "*", "*")
                 } else {
                     enc.clusterrole_matches(&p.role_name, "*", "*", "*")
                 };
-                assert!(grants, "{} shown via {} which does not grant */*/*", v.principal, p.role_name);
+                assert!(
+                    grants,
+                    "{} shown via {} which does not grant */*/*",
+                    v.principal, p.role_name
+                );
             }
         }
     }

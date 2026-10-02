@@ -106,7 +106,10 @@ mod tests {
         assert_eq!(value_to_json(&Value::Number(42)), Json::from(42));
         assert_eq!(value_to_json(&Value::Float(1.5)), Json::from(1.5));
         // Names keep their leading slash so they round-trip faithfully.
-        assert_eq!(value_to_json(&Value::Name("/true".into())), Json::from("/true"));
+        assert_eq!(
+            value_to_json(&Value::Name("/true".into())),
+            Json::from("/true")
+        );
         assert_eq!(value_to_json(&Value::Null), Json::Null);
     }
 
@@ -130,6 +133,9 @@ mod tests {
                 Value::Number(30),
             ],
         );
-        assert_eq!(value_to_json(&v), serde_json::json!({"name": "alice", "age": 30}));
+        assert_eq!(
+            value_to_json(&v),
+            serde_json::json!({"name": "alice", "age": 30})
+        );
     }
 }
