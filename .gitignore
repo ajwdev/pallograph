@@ -1,3 +1,7 @@
 pallograph
 /target
 /notes
+
+# Optional real-cluster dump used by the real_* benchmarks in place of
+# testdata/. Never commit real workload data.
+/testdata-real
