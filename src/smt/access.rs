@@ -45,7 +45,9 @@ impl<'ctx> SmtEncoder<'ctx> {
                 ] = t.as_slice()
                 {
                     // Include if namespace matches OR if we're checking cluster-wide ("").
-                    if namespace.is_empty() || b_ns == namespace {
+                    if (namespace.is_empty() || b_ns == namespace)
+                        && (self.include_builtins || !crate::builtins::is_builtin(p))
+                    {
                         principal_set.insert(p.clone());
                     }
                 }
@@ -55,7 +57,9 @@ impl<'ctx> SmtEncoder<'ctx> {
         if let Some(crb_tuples) = self.facts.get("subject_in_crb") {
             // subject_in_crb: (principal, binding_name)
             for t in crb_tuples {
-                if let [mangle_common::Value::String(p), ..] = t.as_slice() {
+                if let [mangle_common::Value::String(p), ..] = t.as_slice()
+                    && (self.include_builtins || !crate::builtins::is_builtin(p))
+                {
                     principal_set.insert(p.clone());
                 }
             }
@@ -212,14 +216,16 @@ impl<'ctx> SmtEncoder<'ctx> {
                     .not(),
             );
 
-            let paths = self.paths_for_principal(&principal, "", None);
-            violations.push(Violation {
-                principal,
-                namespace: namespace.to_string(),
-                resource,
-                verb,
-                paths,
-            });
+            if self.include_builtins || !crate::builtins::is_builtin(&principal) {
+                let paths = self.paths_for_principal(&principal, "", None);
+                violations.push(Violation {
+                    principal,
+                    namespace: namespace.to_string(),
+                    resource,
+                    verb,
+                    paths,
+                });
+            }
         }
 
         self.solver.pop(1);
@@ -251,6 +257,7 @@ impl<'ctx> SmtEncoder<'ctx> {
                     ..,
                 ] = t.as_slice()
                     && (namespace.is_empty() || b_ns == namespace)
+                    && (self.include_builtins || !crate::builtins::is_builtin(p))
                 {
                     principal_set.insert(p.clone());
                 }
@@ -258,7 +265,9 @@ impl<'ctx> SmtEncoder<'ctx> {
         }
         if let Some(crb_tuples) = self.facts.get("subject_in_crb") {
             for t in crb_tuples {
-                if let [mangle_common::Value::String(p), ..] = t.as_slice() {
+                if let [mangle_common::Value::String(p), ..] = t.as_slice()
+                    && (self.include_builtins || !crate::builtins::is_builtin(p))
+                {
                     principal_set.insert(p.clone());
                 }
             }
@@ -367,6 +376,27 @@ impl<'ctx> SmtEncoder<'ctx> {
         violations
     }
 
+    /// Return the RBAC subject kind for a principal: "serviceaccount", "group", or "user".
+    /// Checks the raw binding subject tables loaded from RBAC facts.
+    pub fn principal_kind(&self, p: &str) -> &'static str {
+        use mangle_common::Value;
+        if p.starts_with("system:serviceaccount:") {
+            return "serviceaccount";
+        }
+        // all_group_perm/all_user_perm are IDB relations with principal as column 0.
+        let in_rel = |rel: &str| {
+            self.facts.get(rel).is_some_and(|rows| {
+                rows.iter()
+                    .any(|t| t.first() == Some(&Value::String(p.to_string())))
+            })
+        };
+        if in_rel("all_group_perm") {
+            "group"
+        } else {
+            "user"
+        }
+    }
+
     /// Return all principals with a direct `can` entry matching (namespace, apigroup,
     /// resource, verb), along with their relevant binding paths.
     /// Used by `cluster-admin` and `reaches` output to show the direct-grant tier.
@@ -391,7 +421,9 @@ impl<'ctx> SmtEncoder<'ctx> {
                     e_ns == namespace && wc(e_ag, apigroup) && wc(e_r, resource) && wc(e_v, verb)
                 })
                 .filter_map(|(p, ..)| {
-                    if seen.insert(p.clone()) {
+                    if (self.include_builtins || !crate::builtins::is_builtin(p))
+                        && seen.insert(p.clone())
+                    {
                         Some(p.clone())
                     } else {
                         None
@@ -941,7 +973,11 @@ mod tests {
 
     /// `testdata/` plus extra NDJSON manifests written to a throwaway directory.
     fn load_engine_with(extra: &str) -> Engine {
-        let dir = std::env::temp_dir().join(format!("pallograph-access-{}", std::process::id()));
+        // Unique per call: tests run in parallel threads of one process.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("pallograph-access-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         std::fs::write(dir.join("extra.json"), extra).expect("write extra manifests");
         let mut edb = MemStore::new();
@@ -1015,5 +1051,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn builtin_principals_hidden_by_default_and_shown_with_include_builtins() {
+        // A built-in principal granted cluster-admin through a ClusterRoleBinding.
+        let eval = load_engine_with(concat!(
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"builtin-admin"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"User","name":"system:kube-controller-manager"}]}"#, "\n",
+        ))
+        .evaluate()
+        .expect("evaluate");
+
+        let principals = |include_builtins: bool| -> Vec<String> {
+            let cfg = z3::Config::new();
+            let ctx = z3::Context::new(&cfg);
+            let mut enc = SmtEncoder::new(&ctx);
+            enc.assert_rbac_axioms(&eval);
+            enc.include_builtins = include_builtins;
+            enc.direct_violations("", "*", "*", "*")
+                .into_iter()
+                .map(|v| v.principal)
+                .collect()
+        };
+
+        let hidden = principals(false);
+        assert!(
+            hidden.contains(&"admin@example.com".to_string()),
+            "user principal missing: {hidden:?}"
+        );
+        assert!(
+            !hidden.contains(&"system:kube-controller-manager".to_string()),
+            "builtin shown by default: {hidden:?}"
+        );
+
+        let shown = principals(true);
+        assert!(
+            shown.contains(&"admin@example.com".to_string()),
+            "user principal missing: {shown:?}"
+        );
+        assert!(
+            shown.contains(&"system:kube-controller-manager".to_string()),
+            "builtin missing with include_builtins: {shown:?}"
+        );
     }
 }

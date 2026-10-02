@@ -91,6 +91,10 @@ impl<'ctx> SmtEncoder<'ctx> {
             "clusterrolebinding_roleref".to_string(),
             scan("clusterrolebinding_roleref"),
         );
+        // Subject kind tables: derived from IDB, used to annotate principals as user/group.
+        for rel in &["all_group_perm", "all_user_perm"] {
+            self.facts.insert(rel.to_string(), scan(rel));
+        }
         // Role permission tables: used by collect_binding_paths to filter displayed
         // bindings to only those that actually grant the queried permission.
         self.facts

@@ -42,6 +42,9 @@
         kind
         kubectl
         kwok
+        # Used to regenerate src/builtins.txt (see its header).
+        jq
+        ast-grep
       ]);
     });
   });

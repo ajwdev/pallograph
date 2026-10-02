@@ -42,6 +42,9 @@ pub struct SmtEncoder<'ctx> {
     pub ctx: &'ctx z3::Context,
     pub solver: Solver<'ctx>,
     pub decls: HashMap<String, FuncDecl<'ctx>>,
+    /// When true, built-in Kubernetes/EKS principals are included in results.
+    /// Default false: builtins are filtered out as expected-platform noise.
+    pub include_builtins: bool,
     /// Recursively-defined functions (used for can, effective_can axioms).
     /// RecFuncDecl derefs to FuncDecl; use `get_decl` for a unified lookup.
     pub rec_decls: HashMap<String, RecFuncDecl<'ctx>>,
@@ -63,6 +66,7 @@ impl<'ctx> SmtEncoder<'ctx> {
             facts: HashMap::new(),
             can_entries: HashMap::new(),
             eff_entries: HashMap::new(),
+            include_builtins: false,
         }
     }
 
