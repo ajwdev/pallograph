@@ -1,0 +1,31 @@
+# Public Kubernetes vocabulary. The anonymizer keeps a value verbatim in
+# fields that are schema-defined (apiVersion, kind, apiGroup, RBAC verbs,
+# resources and apiGroups) only if every word in it appears here or in
+# api-resources.txt. Anything else (CRDs, internal groups) is rewritten.
+# Generic, public words only. One or more words per line.
+
+# verbs
+get list watch create update patch delete deletecollection impersonate
+escalate bind approve sign use proxy connect
+
+# subresources
+exec attach log portforward status scale finalize token binding eviction
+ephemeralcontainers approval metrics
+
+# subjects and roles
+User Group ServiceAccount Role ClusterRole RoleBinding ClusterRoleBinding
+
+# kinds
+Pod Node Namespace Service Endpoints EndpointSlice ConfigMap Secret Event
+PersistentVolume PersistentVolumeClaim StorageClass Deployment StatefulSet
+DaemonSet ReplicaSet ReplicationController Job CronJob Ingress IngressClass
+NetworkPolicy HorizontalPodAutoscaler PodDisruptionBudget PriorityClass
+CustomResourceDefinition Lease RuntimeClass CSIDriver CSINode
+VolumeAttachment ResourceQuota LimitRange
+NodePool NodeClaim EC2NodeClass
+
+# api groups and versions
+apps batch rbac authorization k8s io v1 v1beta1 v1alpha1 v2 policy storage
+networking apiextensions admissionregistration certificates scheduling
+coordination events discovery node flowcontrol apiserver autoscaling
+karpenter sh resource metrics
