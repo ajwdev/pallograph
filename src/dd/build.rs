@@ -50,14 +50,17 @@ fn eval_cmp(op: CmpOp, left: &Val, right: &Val) -> bool {
 // Expr evaluation
 // ---------------------------------------------------------------------------
 
-fn eval_expr(expr: &OwnedExpr, row: &Row) -> Val {
+/// Evaluate a `let` expression against one row.
+///
+/// Calls the interpreter's own `eval_function`, so errors (e.g. `fn:plus` on
+/// a string) carry the same messages and fail the same evaluations as upstream
+/// mangle. See `Step::Let` for how they are surfaced.
+fn eval_expr(expr: &OwnedExpr, row: &Row) -> Result<Val> {
     match expr {
-        OwnedExpr::Value(slot) => slot_val(slot, row),
+        OwnedExpr::Value(slot) => Ok(slot_val(slot, row)),
         OwnedExpr::Call { func, args } => {
             let vals: Vec<Value> = args.iter().map(|s| slot_val(s, row).into()).collect();
-            let result =
-                eval_function(func, &vals).unwrap_or_else(|e| panic!("Let fn:{func} failed: {e}"));
-            Val::from(&result)
+            Ok(Val::from(&eval_function(func, &vals)?))
         }
     }
 }
@@ -426,10 +429,19 @@ where
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("Let before Scan"))?;
                 let expr = expr.clone();
-                curr = Some(pipeline.map(move |row| {
-                    let v = eval_expr(&expr, &row);
-                    row.appended(std::iter::once(v))
-                }));
+                // Same scheme as `CallFilter`: a failing row is dropped and its
+                // error emitted into `errors`. Evaluate once and tag each row
+                // with its outcome, since functions can be costlier than checks.
+                let evaluated = pipeline.map(move |row| match eval_expr(&expr, &row) {
+                    Ok(v) => (None, row.appended(std::iter::once(v))),
+                    Err(e) => (Some(e.to_string()), row),
+                });
+                errors.push(
+                    evaluated.clone().flat_map(|(err, _row)| {
+                        err.map(|m| Row(vec![Val::String(m.into())].into()))
+                    }),
+                );
+                curr = Some(evaluated.flat_map(|(err, row)| err.is_none().then_some(row)));
             }
 
             // ---------------------------------------------------------------

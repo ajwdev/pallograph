@@ -1383,6 +1383,29 @@ mod tests {
         );
     }
 
+    /// A failing function in a `let` fails the whole evaluation.
+    #[test]
+    fn let_function_error_fails_both_backends() {
+        let edb = facts("np_v", vec![vec![num(1)], vec![st("x")]]);
+        assert_both_err(
+            &edb,
+            "Decl np_v(X).\nnp_out(Y) :- np_v(X) |> let Y = fn:plus(X, 1).",
+            "fn:plus: expected integer",
+        );
+    }
+
+    /// The happy path still evaluates normally.
+    #[test]
+    fn let_function_ok() {
+        let edb = facts("np_v", vec![vec![num(1)], vec![num(41)]]);
+        assert_both(
+            &edb,
+            "Decl np_v(X).\nnp_out(Y) :- np_v(X) |> let Y = fn:plus(X, 1).",
+            "np_out",
+            vec![vec![num(2)], vec![num(42)]],
+        );
+    }
+
     /// Same for `:match_prefix` on a non-name.
     #[test]
     fn match_prefix_type_error_fails_both_backends() {

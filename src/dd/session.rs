@@ -1243,4 +1243,32 @@ mod tests {
         session.commit();
         assert_eq!(session.query("miss").unwrap(), vec![vec![v_str("beta")]]);
     }
+
+    /// A failing `let` function behaves like a built-in type error: reads
+    /// fail while the offending fact is live, and recover once it is retracted.
+    #[test]
+    fn session_let_error_tracks_offending_fact() {
+        let edb: Vec<(String, Vec<Value>)> = vec![("num".to_string(), vec![Value::Number(1)])];
+        let rules = vec![
+            "Decl num(X).\nDecl next(Y).\nnext(Y) :- num(X) |> let Y = fn:plus(X, 1).".to_string(),
+        ];
+
+        let session = DdSession::spawn(&edb, &rules).expect("spawn");
+        assert_eq!(session.query("next").unwrap(), vec![vec![Value::Number(2)]]);
+
+        let bad = Row::from(&[v_str("x")][..]);
+        session.insert("num".to_string(), bad.clone());
+        session.commit();
+        let err = session
+            .query("next")
+            .expect_err("fn:plus on a string should fail the read");
+        assert!(
+            format!("{err:#}").contains("fn:plus: expected integer"),
+            "unexpected error: {err:#}"
+        );
+
+        session.retract("num".to_string(), bad);
+        session.commit();
+        assert_eq!(session.query("next").unwrap(), vec![vec![Value::Number(2)]]);
+    }
 }
