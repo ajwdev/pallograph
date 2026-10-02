@@ -786,15 +786,32 @@ impl Engine {
     pub fn add_fact(&mut self, relation: String, tuple: Vec<Value>) -> bool {
         let entry = (relation, tuple);
         if !self.edb.contains(&entry) {
-            if let Some(s) = &self.session {
-                let row = crate::dd::value::Row::from(entry.1.as_slice());
-                s.insert(entry.0.clone(), row);
-                s.commit();
+            // The DD worker drops facts for relations it has no input handle
+            // for, so a brand-new relation needs the session rebuilt.
+            let known = self.session.as_ref().is_none_or(|s| s.has_input(&entry.0));
+            if known {
+                if let Some(s) = &self.session {
+                    let row = crate::dd::value::Row::from(entry.1.as_slice());
+                    s.insert(entry.0.clone(), row);
+                    s.commit();
+                }
+                self.edb.push(entry);
+            } else {
+                self.edb.push(entry);
+                self.rebuild_session();
             }
-            self.edb.push(entry);
             true
         } else {
             false
+        }
+    }
+
+    /// Re-spawn the live session from the current EDB and rules, if there is one.
+    fn rebuild_session(&mut self) {
+        if let Some(s) = &mut self.session
+            && let Err(e) = s.rebuild(&self.edb, &self.rule_sources)
+        {
+            eprintln!("Error rebuilding incremental session: {e:#}");
         }
     }
 
@@ -1023,5 +1040,42 @@ mod tests {
             "parity failures:\n{}",
             failures.join("\n")
         );
+    }
+
+    /// A fact for a relation the session did not start with must reach the
+    /// dataflow (not be silently dropped) and match the interpreter.
+    #[test]
+    fn dd_add_fact_new_relation_is_visible() {
+        let rules = vec!["Decl known(X).".to_string()];
+        let mut dd = Engine::from_parts(vec![], rules.clone(), Box::new(DdBackend)).unwrap();
+        assert!(dd.has_session());
+        assert!(dd.add_fact("brand_new".into(), vec![Value::String("x".into())]));
+
+        let live = dd.query_live("brand_new");
+        assert_eq!(live, vec![vec![Value::String("x".into())]]);
+
+        let mut interp = Engine::from_parts(vec![], rules, Box::new(InterpreterBackend)).unwrap();
+        interp.add_fact("brand_new".into(), vec![Value::String("x".into())]);
+        let store = interp.evaluate().unwrap();
+        assert_eq!(live, store.scan("brand_new").to_vec());
+        assert_eq!(
+            dd.evaluate().unwrap().scan("brand_new"),
+            store.scan("brand_new")
+        );
+    }
+
+    /// A relation that is declared but never derived or populated is still a
+    /// session input, so rules added later can reference it and see no rows.
+    #[test]
+    fn dd_declared_but_empty_relation_is_queryable() {
+        let rules = vec!["Decl lonely(X).".to_string()];
+        let mut dd = Engine::from_parts(vec![], rules, Box::new(DdBackend)).unwrap();
+        assert!(dd.query_live("lonely").is_empty());
+        dd.add_rule("Decl seen(X).\nseen(X) :- lonely(X).".to_string())
+            .expect("rule over declared-but-empty relation");
+        assert!(dd.query_live("seen").is_empty());
+        let store = dd.evaluate().unwrap();
+        assert!(store.scan("lonely").is_empty());
+        assert!(store.scan("seen").is_empty());
     }
 }

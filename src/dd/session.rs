@@ -160,6 +160,9 @@ pub struct DdSession {
     tx: Sender<Command>,
     /// Worker thread guard — `Some` until drop, when we Shutdown+join.
     guard: Option<WorkerGuards<()>>,
+    /// Relations the dataflow has an input handle for. The worker silently
+    /// drops inserts into any other relation, so callers must `rebuild` first.
+    inputs: std::collections::HashSet<String>,
 }
 
 impl DdSession {
@@ -187,6 +190,7 @@ impl DdSession {
         let mut input_rels_set: std::collections::HashSet<String> =
             all_edb_rels.into_iter().collect();
         input_rels_set.extend(edb_by_rel.keys().cloned());
+        let known_inputs = input_rels_set.clone();
         let input_rels: Vec<String> = input_rels_set.into_iter().collect();
 
         // Wrap non-Copy data in Arc so the Fn closure (which timely may call
@@ -649,6 +653,7 @@ impl DdSession {
         Ok(DdSession {
             tx,
             guard: Some(guard),
+            inputs: known_inputs,
         })
     }
 
@@ -659,6 +664,11 @@ impl DdSession {
     /// Buffer an insert delta.  Not visible until `commit()`.
     pub fn insert(&self, rel: String, row: Row) {
         let _ = self.tx.send(Command::Insert { rel, row });
+    }
+
+    /// True if the dataflow can accept facts for `rel` without a `rebuild`.
+    pub fn has_input(&self, rel: &str) -> bool {
+        self.inputs.contains(rel)
     }
 
     /// Buffer a retract delta.  Not visible until `commit()`.

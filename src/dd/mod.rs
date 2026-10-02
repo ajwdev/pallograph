@@ -65,12 +65,32 @@ pub fn build_strata(rule_sources: &[String]) -> Result<(Vec<StratumWork>, Vec<St
         );
     }
 
-    let edb_rels: Vec<String> = stratified
+    let mut edb_rels: Vec<String> = stratified
         .extensional_preds()
         .iter()
         .filter_map(|pred| arena.predicate_name(*pred))
         .map(|s| s.to_string())
         .collect();
+    // A declared relation that no rule mentions or derives is still an input,
+    // so queries against it see an empty relation instead of "not found".
+    let derived: HashSet<String> = stratified
+        .intensional_preds()
+        .iter()
+        .filter_map(|pred| arena.predicate_name(*pred))
+        .map(|s| s.to_string())
+        .collect();
+    for inst in &ir.insts {
+        let Inst::Decl { atom, .. } = inst else {
+            continue;
+        };
+        let Inst::Atom { predicate, .. } = ir.get(*atom) else {
+            continue;
+        };
+        let name = ir.resolve_name(*predicate);
+        if !derived.contains(name) && !edb_rels.iter().any(|r| r == name) {
+            edb_rels.push(name.to_string());
+        }
+    }
 
     let mut strata = Vec::new();
 
