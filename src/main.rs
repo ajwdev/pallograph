@@ -37,10 +37,12 @@ struct Cli {
     #[arg(long, value_enum, default_value = "interpreter")]
     backend: BackendKind,
 
-    /// Output format for query/relation results and `::smt` checks. `ndjson`
-    /// emits one JSON object per row (or per violation), suitable for piping
-    /// into jq, DuckDB, etc. The process exits 1 if any `::smt` check failed.
-    #[arg(long, value_enum, default_value = "plain")]
+    /// Output format for query/relation results and `::smt` checks. `default`
+    /// names each column, `compact` prints bare tuples, `table` aligns columns
+    /// under a header, and `ndjson` emits one JSON object per row (or per
+    /// violation), suitable for piping into jq, DuckDB, etc. The process exits
+    /// 1 if any `::smt` check failed.
+    #[arg(long, value_enum, default_value = "default")]
     format: OutputFormat,
 }
 

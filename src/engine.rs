@@ -72,6 +72,22 @@ impl CompiledProgram {
         Ok(Self { ir, strata })
     }
 
+    /// Every relation the compiled program declares or defines by a rule/fact.
+    pub fn defined_relations(&self) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        for inst in &self.ir.insts {
+            let atom = match inst {
+                Inst::Decl { atom, .. } => *atom,
+                Inst::Rule { head, .. } => *head,
+                _ => continue,
+            };
+            if let Inst::Atom { predicate, .. } = self.ir.get(atom) {
+                out.insert(self.ir.resolve_name(*predicate).to_string());
+            }
+        }
+        out
+    }
+
     /// Extract per-relation documentation from the compiled `Decl`s in the IR:
     /// column names (from the decl head), types (from `bound [...]`), the
     /// relation description (from a `doc("...")` descr atom), and per-column
@@ -895,6 +911,17 @@ impl Engine {
             });
         }
         self.backend.evaluate(&self.edb, &self.rule_sources)
+    }
+
+    /// Names of every relation the engine knows: declared, defined by a rule
+    /// or fact in the sources, or holding EDB rows.
+    pub fn known_relations(&self) -> std::collections::HashSet<String> {
+        let mut known = self
+            .compile()
+            .map(|c| c.defined_relations())
+            .unwrap_or_default();
+        known.extend(self.edb.iter().map(|(r, _)| r.clone()));
+        known
     }
 
     /// Per-relation documentation (descriptions + column types) extracted from
