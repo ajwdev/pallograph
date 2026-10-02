@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use mangle_common::Value;
-use z3::ast::{Ast, Dynamic, Int};
 use z3::ast::String as Z3String;
+use z3::ast::{Ast, Dynamic, Int};
 use z3::{FuncDecl, RecFuncDecl, Solver, Sort};
 
 use crate::engine::EvalStore;
@@ -17,10 +17,10 @@ pub mod scheduling;
 
 #[derive(Clone)]
 pub struct AccessPath {
-    pub binding_kind: &'static str,   // "RoleBinding" | "ClusterRoleBinding"
-    pub binding_namespace: String,    // "" for ClusterRoleBinding
+    pub binding_kind: &'static str, // "RoleBinding" | "ClusterRoleBinding"
+    pub binding_namespace: String,  // "" for ClusterRoleBinding
     pub binding_name: String,
-    pub role_kind: &'static str,      // "Role" | "ClusterRole"
+    pub role_kind: &'static str, // "Role" | "ClusterRole"
     pub role_name: String,
     // Escalation chain leading to this binding.
     // Each element is (identity, mechanism_used_to_reach_it).
@@ -70,7 +70,7 @@ impl<'ctx> SmtEncoder<'ctx> {
     /// recursive definitions) before `decls` (ground-fact uninterpreted fns).
     pub fn get_decl(&self, name: &str) -> Option<&FuncDecl<'ctx>> {
         if let Some(rd) = self.rec_decls.get(name) {
-            Some(rd)  // RecFuncDecl derefs to &FuncDecl<'ctx>
+            Some(rd) // RecFuncDecl derefs to &FuncDecl<'ctx>
         } else {
             self.decls.get(name)
         }
@@ -118,10 +118,10 @@ impl<'ctx> SmtEncoder<'ctx> {
     pub fn ast_of(&self, v: &Value) -> Dynamic<'ctx> {
         match v {
             Value::Number(n) => Int::from_i64(self.ctx, *n).into(),
-            Value::String(s) | Value::Name(s) => {
-                Z3String::from_str(self.ctx, s).unwrap().into()
-            }
-            other => Z3String::from_str(self.ctx, &other.to_string()).unwrap().into(),
+            Value::String(s) | Value::Name(s) => Z3String::from_str(self.ctx, s).unwrap().into(),
+            other => Z3String::from_str(self.ctx, &other.to_string())
+                .unwrap()
+                .into(),
         }
     }
 }

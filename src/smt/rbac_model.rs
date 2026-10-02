@@ -30,12 +30,12 @@
 use std::collections::HashSet;
 
 use mangle_common::Value;
-use z3::ast::{Ast, Bool};
 use z3::ast::String as Z3String;
+use z3::ast::{Ast, Bool};
 use z3::{RecFuncDecl, Sort};
 
-use crate::engine::EvalStore;
 use super::SmtEncoder;
+use crate::engine::EvalStore;
 
 impl<'ctx> SmtEncoder<'ctx> {
     /// Load Mangle RBAC primitives and define `can` and `effective_can` as
@@ -58,7 +58,11 @@ impl<'ctx> SmtEncoder<'ctx> {
     }
 
     /// Like `assert_rbac_axioms_from_snapshot` but registers predicates under a suffix.
-    pub fn assert_rbac_axioms_from_snapshot_as(&mut self, snap: &crate::snapshot::Snapshot, suffix: &str) {
+    pub fn assert_rbac_axioms_from_snapshot_as(
+        &mut self,
+        snap: &crate::snapshot::Snapshot,
+        suffix: &str,
+    ) {
         self.assert_rbac_axioms_named(|rel| snap.scan_rel(rel), suffix);
     }
 
@@ -84,20 +88,36 @@ impl<'ctx> SmtEncoder<'ctx> {
         // Load roleref and escalation-mechanism tables for path reconstruction
         // (display only, not queried by Z3). Stored without suffix so
         // paths_for_principal always finds them regardless of which snapshot is current.
-        self.facts.insert("rolebinding_roleref".to_string(), scan("rolebinding_roleref"));
-        self.facts.insert("clusterrolebinding_roleref".to_string(), scan("clusterrolebinding_roleref"));
+        self.facts.insert(
+            "rolebinding_roleref".to_string(),
+            scan("rolebinding_roleref"),
+        );
+        self.facts.insert(
+            "clusterrolebinding_roleref".to_string(),
+            scan("clusterrolebinding_roleref"),
+        );
         // Role permission tables: used by collect_binding_paths to filter displayed
         // bindings to only those that actually grant the queried permission.
-        self.facts.insert("role_perm".to_string(), scan("role_perm"));
-        self.facts.insert("clusterrole_perm".to_string(), scan("clusterrole_perm"));
-        for rel in &["exec_reachable_sa", "token_accessible_sa", "pod_creatable_sa", "impersonatable_sa", "escalation_hop"] {
+        self.facts
+            .insert("role_perm".to_string(), scan("role_perm"));
+        self.facts
+            .insert("clusterrole_perm".to_string(), scan("clusterrole_perm"));
+        for rel in &[
+            "exec_reachable_sa",
+            "token_accessible_sa",
+            "pod_creatable_sa",
+            "impersonatable_sa",
+            "escalation_hop",
+        ] {
             self.facts.insert(rel.to_string(), scan(rel));
         }
 
         let can_fn = build_can_rec_func(self.ctx, &fn_name("can", suffix), &can_entries);
-        let eff_fn = build_effective_can_rec_func(self.ctx, &fn_name("effective_can", suffix), &eff_entries);
+        let eff_fn =
+            build_effective_can_rec_func(self.ctx, &fn_name("effective_can", suffix), &eff_entries);
         self.rec_decls.insert(fn_name("can", suffix), can_fn);
-        self.rec_decls.insert(fn_name("effective_can", suffix), eff_fn);
+        self.rec_decls
+            .insert(fn_name("effective_can", suffix), eff_fn);
         self.can_entries.insert(suffix.to_string(), can_entries);
         self.eff_entries.insert(suffix.to_string(), eff_entries);
     }
@@ -154,13 +174,16 @@ fn build_can_rec_func<'ctx>(
         .map(|(pe, nse, age, re, ve)| {
             let pe_z3 = Z3String::from_str(ctx, pe).unwrap();
             let nse_z3 = Z3String::from_str(ctx, nse).unwrap();
-            Bool::and(ctx, &[
-                &p_var._eq(&pe_z3),
-                &ns_var._eq(&nse_z3),
-                &matches(&ag_var, age),
-                &matches(&r_var, re),
-                &matches(&v_var, ve),
-            ])
+            Bool::and(
+                ctx,
+                &[
+                    &p_var._eq(&pe_z3),
+                    &ns_var._eq(&nse_z3),
+                    &matches(&ag_var, age),
+                    &matches(&r_var, re),
+                    &matches(&v_var, ve),
+                ],
+            )
         })
         .collect();
 
@@ -171,7 +194,13 @@ fn build_can_rec_func<'ctx>(
     };
 
     can_fn.add_def(
-        &[&p_var as &dyn Ast, &ns_var as &dyn Ast, &ag_var as &dyn Ast, &r_var as &dyn Ast, &v_var as &dyn Ast],
+        &[
+            &p_var as &dyn Ast,
+            &ns_var as &dyn Ast,
+            &ag_var as &dyn Ast,
+            &r_var as &dyn Ast,
+            &v_var as &dyn Ast,
+        ],
         &body,
     );
     can_fn
@@ -213,13 +242,16 @@ fn build_effective_can_rec_func<'ctx>(
         .map(|(pe, nse, age, re, ve)| {
             let pe_z3 = Z3String::from_str(ctx, pe).unwrap();
             let nse_z3 = Z3String::from_str(ctx, nse).unwrap();
-            Bool::and(ctx, &[
-                &p_var._eq(&pe_z3),
-                &ns_var._eq(&nse_z3),
-                &matches(&ag_var, age),
-                &matches(&r_var, re),
-                &matches(&v_var, ve),
-            ])
+            Bool::and(
+                ctx,
+                &[
+                    &p_var._eq(&pe_z3),
+                    &ns_var._eq(&nse_z3),
+                    &matches(&ag_var, age),
+                    &matches(&r_var, re),
+                    &matches(&v_var, ve),
+                ],
+            )
         })
         .collect();
 
@@ -230,7 +262,13 @@ fn build_effective_can_rec_func<'ctx>(
     };
 
     eff_fn.add_def(
-        &[&p_var as &dyn Ast, &ns_var as &dyn Ast, &ag_var as &dyn Ast, &r_var as &dyn Ast, &v_var as &dyn Ast],
+        &[
+            &p_var as &dyn Ast,
+            &ns_var as &dyn Ast,
+            &ag_var as &dyn Ast,
+            &r_var as &dyn Ast,
+            &v_var as &dyn Ast,
+        ],
         &body,
     );
     eff_fn
@@ -241,8 +279,13 @@ fn build_effective_can_rec_func<'ctx>(
 fn parse_perm_tuples(rows: &[Vec<Value>]) -> Vec<(String, String, String, String, String)> {
     rows.iter()
         .filter_map(|t| {
-            if let [Value::String(p), Value::String(ns), Value::String(ag), Value::String(r), Value::String(v)] =
-                t.as_slice()
+            if let [
+                Value::String(p),
+                Value::String(ns),
+                Value::String(ag),
+                Value::String(r),
+                Value::String(v),
+            ] = t.as_slice()
             {
                 Some((p.clone(), ns.clone(), ag.clone(), r.clone(), v.clone()))
             } else {
@@ -257,8 +300,14 @@ fn parse_perm_tuples(rows: &[Vec<Value>]) -> Vec<(String, String, String, String
 fn parse_perm_tuples_6(rows: &[Vec<Value>]) -> Vec<(String, String, String, String, String)> {
     rows.iter()
         .filter_map(|t| {
-            if let [Value::String(p), Value::String(ns), Value::String(ag), Value::String(r), Value::String(v), _] =
-                t.as_slice()
+            if let [
+                Value::String(p),
+                Value::String(ns),
+                Value::String(ag),
+                Value::String(r),
+                Value::String(v),
+                _,
+            ] = t.as_slice()
             {
                 Some((p.clone(), ns.clone(), ag.clone(), r.clone(), v.clone()))
             } else {
@@ -275,8 +324,12 @@ pub fn compute_subject_in_rb(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Vec<Vec<
     let mut result: HashSet<(String, String, String)> = HashSet::new();
 
     for t in scan("rolebinding_subject_sa") {
-        if let [Value::String(b_ns), Value::String(b_name), Value::String(sa_ns), Value::String(sa_name)] =
-            t.as_slice()
+        if let [
+            Value::String(b_ns),
+            Value::String(b_name),
+            Value::String(sa_ns),
+            Value::String(sa_name),
+        ] = t.as_slice()
         {
             let p = format!("system:serviceaccount:{sa_ns}:{sa_name}");
             result.insert((p, b_ns.clone(), b_name.clone()));
@@ -284,7 +337,12 @@ pub fn compute_subject_in_rb(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Vec<Vec<
     }
 
     for t in scan("rolebinding_subject_user") {
-        if let [Value::String(b_ns), Value::String(b_name), Value::String(user)] = t.as_slice() {
+        if let [
+            Value::String(b_ns),
+            Value::String(b_name),
+            Value::String(user),
+        ] = t.as_slice()
+        {
             result.insert((user.clone(), b_ns.clone(), b_name.clone()));
         }
     }
@@ -292,7 +350,12 @@ pub fn compute_subject_in_rb(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Vec<Vec<
     let group_bindings: Vec<(String, String, String)> = scan("rolebinding_subject_group")
         .into_iter()
         .filter_map(|t| {
-            if let [Value::String(b_ns), Value::String(b_name), Value::String(group)] = t.as_slice() {
+            if let [
+                Value::String(b_ns),
+                Value::String(b_name),
+                Value::String(group),
+            ] = t.as_slice()
+            {
                 Some((b_ns.clone(), b_name.clone(), group.clone()))
             } else {
                 None
@@ -331,7 +394,12 @@ pub fn compute_subject_in_crb(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Vec<Vec
     let mut result: HashSet<(String, String)> = HashSet::new();
 
     for t in scan("clusterrolebinding_subject_sa") {
-        if let [Value::String(b_name), Value::String(sa_ns), Value::String(sa_name)] = t.as_slice() {
+        if let [
+            Value::String(b_name),
+            Value::String(sa_ns),
+            Value::String(sa_name),
+        ] = t.as_slice()
+        {
             let p = format!("system:serviceaccount:{sa_ns}:{sa_name}");
             result.insert((p, b_name.clone()));
         }

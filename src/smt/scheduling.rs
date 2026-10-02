@@ -4,8 +4,8 @@
 use std::collections::{HashMap, HashSet};
 
 use mangle_common::Value;
-use z3::ast::{Ast, Bool, BV, String as Z3String};
 use z3::SatResult;
+use z3::ast::{Ast, BV, Bool, String as Z3String};
 
 use crate::engine::EvalStore;
 
@@ -20,9 +20,12 @@ pub fn check_node_selector(store: &EvalStore) -> Vec<UnschedulablePod> {
     let mut pod_reqs: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
     for tuple in store.scan("pod_node_selector") {
         let (ns, name, key, val) = match tuple.as_slice() {
-            [Value::String(ns), Value::String(name), Value::String(k), Value::String(v)] => {
-                (ns, name, k, v)
-            }
+            [
+                Value::String(ns),
+                Value::String(name),
+                Value::String(k),
+                Value::String(v),
+            ] => (ns, name, k, v),
             _ => continue,
         };
         pod_reqs
@@ -38,11 +41,14 @@ pub fn check_node_selector(store: &EvalStore) -> Vec<UnschedulablePod> {
     let mut node_labels: HashMap<String, HashSet<(String, String)>> = HashMap::new();
     for tuple in store.scan("object_label") {
         let (node_name, key, val) = match tuple.as_slice() {
-            [Value::String(av), Value::String(k), Value::String(_ns), Value::String(name), Value::String(lk), Value::String(lv)]
-                if k == "Node" && av == "v1" =>
-            {
-                (name, lk, lv)
-            }
+            [
+                Value::String(av),
+                Value::String(k),
+                Value::String(_ns),
+                Value::String(name),
+                Value::String(lk),
+                Value::String(lv),
+            ] if k == "Node" && av == "v1" => (name, lk, lv),
             _ => continue,
         };
         node_labels
@@ -64,7 +70,10 @@ pub fn check_node_selector(store: &EvalStore) -> Vec<UnschedulablePod> {
             .collect();
 
         if node_vars.is_empty() {
-            unschedulable.push(UnschedulablePod { namespace: ns.clone(), name: name.clone() });
+            unschedulable.push(UnschedulablePod {
+                namespace: ns.clone(),
+                name: name.clone(),
+            });
             continue;
         }
 
@@ -82,7 +91,10 @@ pub fn check_node_selector(store: &EvalStore) -> Vec<UnschedulablePod> {
         solver.assert(&Bool::or(&ctx, &node_var_refs));
 
         if solver.check() != SatResult::Sat {
-            unschedulable.push(UnschedulablePod { namespace: ns.clone(), name: name.clone() });
+            unschedulable.push(UnschedulablePod {
+                namespace: ns.clone(),
+                name: name.clone(),
+            });
         }
     }
 
@@ -108,8 +120,13 @@ pub fn check_anti_affinity_placement(store: &EvalStore) -> PlacementResult {
     let nodes: Vec<String> = {
         let mut seen = HashSet::new();
         for tuple in store.scan("object_label") {
-            if let [Value::String(av), Value::String(k), Value::String(_ns), Value::String(name), ..] =
-                tuple.as_slice()
+            if let [
+                Value::String(av),
+                Value::String(k),
+                Value::String(_ns),
+                Value::String(name),
+                ..,
+            ] = tuple.as_slice()
             {
                 if av == "v1" && k == "Node" {
                     seen.insert(name.clone());
@@ -138,11 +155,14 @@ pub fn check_anti_affinity_placement(store: &EvalStore) -> PlacementResult {
     let mut pod_labels: HashMap<(String, String), HashSet<(String, String)>> = HashMap::new();
     for tuple in store.scan("object_label") {
         let (ns, name, key, val) = match tuple.as_slice() {
-            [Value::String(av), Value::String(k), Value::String(ns), Value::String(name), Value::String(lk), Value::String(lv)]
-                if av == "v1" && k == "Pod" =>
-            {
-                (ns, name, lk, lv)
-            }
+            [
+                Value::String(av),
+                Value::String(k),
+                Value::String(ns),
+                Value::String(name),
+                Value::String(lk),
+                Value::String(lv),
+            ] if av == "v1" && k == "Pod" => (ns, name, lk, lv),
             _ => continue,
         };
         pod_labels
@@ -157,9 +177,13 @@ pub fn check_anti_affinity_placement(store: &EvalStore) -> PlacementResult {
     let mut conflicts: HashSet<(String, String, String, String)> = HashSet::new();
     for tuple in store.scan("pod_anti_affinity_req") {
         let (ns_a, name_a, match_key, match_val) = match tuple.as_slice() {
-            [Value::String(ns), Value::String(name), Value::String(k), Value::String(v), Value::String(_topo)] => {
-                (ns, name, k, v)
-            }
+            [
+                Value::String(ns),
+                Value::String(name),
+                Value::String(k),
+                Value::String(v),
+                Value::String(_topo),
+            ] => (ns, name, k, v),
             _ => continue,
         };
 
@@ -190,7 +214,11 @@ pub fn check_anti_affinity_placement(store: &EvalStore) -> PlacementResult {
         pods.insert(a.clone());
         pods.insert(b.clone());
     }
-    let pods: Vec<String> = { let mut v: Vec<_> = pods.into_iter().collect(); v.sort(); v };
+    let pods: Vec<String> = {
+        let mut v: Vec<_> = pods.into_iter().collect();
+        v.sort();
+        v
+    };
 
     let cfg = z3::Config::new();
     let ctx = z3::Context::new(&cfg);
@@ -257,8 +285,12 @@ pub fn find_karpenter_coverage_gaps(store: &EvalStore, max_gaps: usize) -> Vec<C
 
     let mut pool_reqs: HashMap<String, HashMap<String, PoolReq>> = HashMap::new();
     for tuple in store.scan("nodepool_requirement") {
-        if let [Value::String(pool), Value::String(key), Value::String(op), Value::String(val)] =
-            tuple.as_slice()
+        if let [
+            Value::String(pool),
+            Value::String(key),
+            Value::String(op),
+            Value::String(val),
+        ] = tuple.as_slice()
         {
             let entry = pool_reqs
                 .entry(pool.clone())
@@ -271,10 +303,18 @@ pub fn find_karpenter_coverage_gaps(store: &EvalStore, max_gaps: usize) -> Vec<C
                     does_not_exist: false,
                 });
             match op.as_str() {
-                "In" => { entry.in_values.insert(val.clone()); }
-                "NotIn" => { entry.notin_values.insert(val.clone()); }
-                "Exists" => { entry.exists = true; }
-                "DoesNotExist" => { entry.does_not_exist = true; }
+                "In" => {
+                    entry.in_values.insert(val.clone());
+                }
+                "NotIn" => {
+                    entry.notin_values.insert(val.clone());
+                }
+                "Exists" => {
+                    entry.exists = true;
+                }
+                "DoesNotExist" => {
+                    entry.does_not_exist = true;
+                }
                 _ => {}
             }
         }
@@ -423,9 +463,7 @@ pub fn find_karpenter_coverage_gaps(store: &EvalStore, max_gaps: usize) -> Vec<C
                         );
                     }
                     if let Some(&gv) = guaranteed.get(key.as_str()) {
-                        conditions.push(
-                            val_var._eq(&Z3String::from_str(&ctx, gv).unwrap()),
-                        );
+                        conditions.push(val_var._eq(&Z3String::from_str(&ctx, gv).unwrap()));
                     }
                     if conditions.is_empty() {
                         Bool::from_bool(&ctx, true)
@@ -472,10 +510,13 @@ pub fn find_karpenter_coverage_gaps(store: &EvalStore, max_gaps: usize) -> Vec<C
             if selected {
                 if let Some(val) = model.eval(val_var, true).and_then(|v| v.as_string()) {
                     blocking.push(
-                        Bool::and(&ctx, &[
-                            req_var,
-                            &val_var._eq(&Z3String::from_str(&ctx, &val).unwrap()),
-                        ])
+                        Bool::and(
+                            &ctx,
+                            &[
+                                req_var,
+                                &val_var._eq(&Z3String::from_str(&ctx, &val).unwrap()),
+                            ],
+                        )
                         .not(),
                     );
                     labels.push((key.clone(), val));

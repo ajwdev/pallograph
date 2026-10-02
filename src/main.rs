@@ -6,9 +6,9 @@
 mod config;
 mod dd;
 mod edb;
-mod selector;
 mod engine;
 mod load;
+mod selector;
 // mod op_printer;
 mod query;
 mod repl;
@@ -66,25 +66,30 @@ async fn load_datasource(edb: &mut MemStore, name: &str, ds: &config::Datasource
             // Profilers (samply) inject DYLD_INSERT_LIBRARIES; keep it out of the
             // exec auth plugin or dyld aborts on arm64e binaries.
             if let Some(exec) = config.auth_info.exec.as_mut() {
-                exec.drop_env.get_or_insert_with(Vec::new)
+                exec.drop_env
+                    .get_or_insert_with(Vec::new)
                     .push("DYLD_INSERT_LIBRARIES".into());
             }
             let client = kube::Client::try_from(config)?;
             edb::load_from_cluster(edb, client).await?;
         }
         SourceKind::File => {
-            let paths = ds.paths.as_ref()
+            let paths = ds
+                .paths
+                .as_ref()
                 .with_context(|| format!("datasource '{name}': source=\"file\" requires paths"))?;
-            let content = ds.content.as_ref()
-                .with_context(|| format!("datasource '{name}': source=\"file\" requires content"))?;
+            let content = ds.content.as_ref().with_context(|| {
+                format!("datasource '{name}': source=\"file\" requires content")
+            })?;
             match content {
                 ContentKind::K8sManifests => {
                     eprintln!("  {name}: file ({}) → k8s-manifests", paths.join(", "));
                     edb::load_from_manifests(edb, paths.clone())?;
                 }
                 ContentKind::JsonTuples => {
-                    let relation = ds.relation.as_deref()
-                        .with_context(|| format!("datasource '{name}': content=\"json-tuples\" requires a relation"))?;
+                    let relation = ds.relation.as_deref().with_context(|| {
+                        format!("datasource '{name}': content=\"json-tuples\" requires a relation")
+                    })?;
                     for path in paths {
                         eprintln!("  {name}: file ({path}) → json-tuples:{relation}");
                         load::load_tuples_into_store(edb, relation, path)?;
@@ -93,18 +98,21 @@ async fn load_datasource(edb: &mut MemStore, name: &str, ds: &config::Datasource
             }
         }
         SourceKind::Shell => {
-            let command = ds.command.as_deref()
-                .with_context(|| format!("datasource '{name}': source=\"shell\" requires a command"))?;
-            let content = ds.content.as_ref()
-                .with_context(|| format!("datasource '{name}': source=\"shell\" requires content"))?;
+            let command = ds.command.as_deref().with_context(|| {
+                format!("datasource '{name}': source=\"shell\" requires a command")
+            })?;
+            let content = ds.content.as_ref().with_context(|| {
+                format!("datasource '{name}': source=\"shell\" requires content")
+            })?;
             match content {
                 ContentKind::K8sManifests => {
                     eprintln!("  {name}: shell → k8s-manifests");
                     edb::load_k8s_from_command(edb, command)?;
                 }
                 ContentKind::JsonTuples => {
-                    let relation = ds.relation.as_deref()
-                        .with_context(|| format!("datasource '{name}': content=\"json-tuples\" requires a relation"))?;
+                    let relation = ds.relation.as_deref().with_context(|| {
+                        format!("datasource '{name}': content=\"json-tuples\" requires a relation")
+                    })?;
                     eprintln!("  {name}: shell → json-tuples:{relation}");
                     load::load_tuples_into_store(edb, relation, &format!("! {command}"))?;
                 }
@@ -123,15 +131,20 @@ async fn main() -> Result<()> {
     let mut edb = MemStore::new();
     match config::load_config(cli.config.as_deref())? {
         Some(cfg) => {
-            let profile_name = cli.profile
+            let profile_name = cli
+                .profile
                 .as_deref()
                 .or(cfg.default_profile.as_deref())
                 .context("no --profile given and no default_profile in config")?;
-            let profile = cfg.profiles.get(profile_name)
+            let profile = cfg
+                .profiles
+                .get(profile_name)
                 .with_context(|| format!("profile '{profile_name}' not found in config"))?;
             eprintln!("datasource: profile \"{profile_name}\"");
             for name in &profile.sources {
-                let ds = cfg.datasources.get(name.as_str())
+                let ds = cfg
+                    .datasources
+                    .get(name.as_str())
                     .with_context(|| format!("datasource '{name}' not found in config"))?;
                 load_datasource(&mut edb, name, ds).await?;
             }

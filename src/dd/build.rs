@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use differential_dataflow::VecCollection;
 use timely::progress::Timestamp;
 
@@ -17,7 +17,7 @@ use mangle_common::Value;
 use mangle_interpreter::eval_function;
 
 use crate::dd::lower::{CmpOp, LoweredAggregate, LoweredRule, OwnedExpr, Slot, Step};
-use crate::dd::value::{CompoundKindMirror, OrdF64, Val, Row};
+use crate::dd::value::{CompoundKindMirror, OrdF64, Row, Val};
 
 // ---------------------------------------------------------------------------
 // Slot helper
@@ -55,8 +55,8 @@ fn eval_expr(expr: &OwnedExpr, row: &Row) -> Val {
         OwnedExpr::Value(slot) => slot_val(slot, row),
         OwnedExpr::Call { func, args } => {
             let vals: Vec<Value> = args.iter().map(|s| slot_val(s, row).into()).collect();
-            let result = eval_function(func, &vals)
-                .unwrap_or_else(|e| panic!("Let fn:{func} failed: {e}"));
+            let result =
+                eval_function(func, &vals).unwrap_or_else(|e| panic!("Let fn:{func} failed: {e}"));
             Val::from(&result)
         }
     }
@@ -127,7 +127,12 @@ fn eval_call_filter(func: &str, args: &[Slot], row: &Row) -> Result<bool> {
 fn eval_aggregate(agg: &LoweredAggregate, input: &[(&Row, isize)]) -> Val {
     // Helper: read the aggregate argument from a row (Col index or Const value).
     let arg = |row: &Row| -> Val {
-        slot_val(agg.arg_slot.as_ref().expect("aggregate requires 1 argument"), row)
+        slot_val(
+            agg.arg_slot
+                .as_ref()
+                .expect("aggregate requires 1 argument"),
+            row,
+        )
     };
     match agg.func.as_str() {
         "fn:count" => {
@@ -246,8 +251,15 @@ where
             // assemble the extended row.  Zero shared vars → cross product
             // (key = empty Row), which is correct but O(n²).
             // ---------------------------------------------------------------
-            Step::Join { rel, left_key_cols, right_key_cols, right_new_cols } => {
-                let left = curr.take().ok_or_else(|| anyhow::anyhow!("Join before Scan"))?;
+            Step::Join {
+                rel,
+                left_key_cols,
+                right_key_cols,
+                right_new_cols,
+            } => {
+                let left = curr
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("Join before Scan"))?;
                 let right = rels
                     .get(rel)
                     .ok_or_else(|| anyhow::anyhow!("relation `{rel}` not found in rels"))?
@@ -270,16 +282,21 @@ where
                     (key, new_vals)
                 });
 
-                curr = Some(left_keyed.join_map(right_keyed, |_key, left_full: &Row, right_new: &Row| {
-                    left_full.appended(right_new.0.iter().cloned())
-                }));
+                curr = Some(left_keyed.join_map(
+                    right_keyed,
+                    |_key, left_full: &Row, right_new: &Row| {
+                        left_full.appended(right_new.0.iter().cloned())
+                    },
+                ));
             }
 
             // ---------------------------------------------------------------
             // Cmp — row-wise comparison filter.
             // ---------------------------------------------------------------
             Step::Cmp { op, left, right } => {
-                let pipeline = curr.take().ok_or_else(|| anyhow::anyhow!("Cmp before Scan"))?;
+                let pipeline = curr
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("Cmp before Scan"))?;
                 let op = *op;
                 let left = left.clone();
                 let right = right.clone();
@@ -295,8 +312,15 @@ where
             // right_key_cols are the parallel column positions in neg_rel itself.
             // const_filters filter neg_rel before building its key projection.
             // ---------------------------------------------------------------
-            Step::Antijoin { rel, left_key_slots, right_key_cols, const_filters } => {
-                let pipeline = curr.take().ok_or_else(|| anyhow::anyhow!("Antijoin before Scan"))?;
+            Step::Antijoin {
+                rel,
+                left_key_slots,
+                right_key_cols,
+                const_filters,
+            } => {
+                let pipeline = curr
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("Antijoin before Scan"))?;
                 let neg_rel = rels
                     .get(rel)
                     .ok_or_else(|| anyhow::anyhow!("antijoin relation `{rel}` not found"))?
@@ -307,11 +331,10 @@ where
                 let cf = const_filters.clone();
 
                 // Project left pipeline to (key, full_row).
-                let keyed_input: VecCollection<'scope, T, (Row, Row)> =
-                    pipeline.map(move |row| {
-                        let key = Row(lks.iter().map(|s| slot_val(s, &row)).collect());
-                        (key, row)
-                    });
+                let keyed_input: VecCollection<'scope, T, (Row, Row)> = pipeline.map(move |row| {
+                    let key = Row(lks.iter().map(|s| slot_val(s, &row)).collect());
+                    (key, row)
+                });
 
                 // Filter neg_rel by constant args, then project to key columns.
                 let neg_keys: VecCollection<'scope, T, Row> = neg_rel.flat_map(move |row| {
@@ -330,7 +353,9 @@ where
             // CallFilter — Phase 2 string builtins.
             // ---------------------------------------------------------------
             Step::CallFilter { func, args } => {
-                let pipeline = curr.take().ok_or_else(|| anyhow::anyhow!("CallFilter before Scan"))?;
+                let pipeline = curr
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("CallFilter before Scan"))?;
                 // Validate at build time: an unsupported/typo'd builtin would
                 // otherwise be swallowed by `.unwrap_or(false)` in the filter
                 // closure, silently dropping every row. Fail loudly instead.
@@ -339,16 +364,19 @@ where
                 }
                 let func = func.clone();
                 let args = args.clone();
-                curr = Some(pipeline.filter(move |row| {
-                    eval_call_filter(&func, &args, row).unwrap_or(false)
-                }));
+                curr = Some(
+                    pipeline
+                        .filter(move |row| eval_call_filter(&func, &args, row).unwrap_or(false)),
+                );
             }
 
             // ---------------------------------------------------------------
             // Let — append a computed column. Phase 4.
             // ---------------------------------------------------------------
             Step::Let { expr } => {
-                let pipeline = curr.take().ok_or_else(|| anyhow::anyhow!("Let before Scan"))?;
+                let pipeline = curr
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("Let before Scan"))?;
                 let expr = expr.clone();
                 curr = Some(pipeline.map(move |row| {
                     let v = eval_expr(&expr, &row);
@@ -360,7 +388,9 @@ where
             // MatchField — flat_map over struct fields. Phase 4.
             // ---------------------------------------------------------------
             Step::MatchField { struct_slot, field } => {
-                let pipeline = curr.take().ok_or_else(|| anyhow::anyhow!("MatchField before Scan"))?;
+                let pipeline = curr
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("MatchField before Scan"))?;
                 let struct_slot = struct_slot.clone();
                 let field = field.clone();
                 curr = Some(pipeline.flat_map(move |row| {
@@ -386,7 +416,9 @@ where
             // IterateList — flat_map over list elements. Phase 4.
             // ---------------------------------------------------------------
             Step::IterateList { source_slot } => {
-                let pipeline = curr.take().ok_or_else(|| anyhow::anyhow!("IterateList before Scan"))?;
+                let pipeline = curr
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("IterateList before Scan"))?;
                 let source_slot = source_slot.clone();
                 curr = Some(pipeline.flat_map(move |row| {
                     let sv = slot_val(&source_slot, &row);
@@ -408,9 +440,13 @@ where
             // `key_cols`, then reduce over each group to compute the aggregates.
             // The output row is key ++ [agg_result ...] with multiplicity 1.
             // ---------------------------------------------------------------
-            Step::Reduce { key_cols, aggregates } => {
-                let pipeline =
-                    curr.take().ok_or_else(|| anyhow::anyhow!("Reduce before Scan"))?;
+            Step::Reduce {
+                key_cols,
+                aggregates,
+            } => {
+                let pipeline = curr
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("Reduce before Scan"))?;
                 let kc = key_cols.clone();
                 let aggs = aggregates.clone();
 
@@ -422,28 +458,32 @@ where
 
                 // reduce: for each group compute aggregates and push V2 = Row(agg_vals).
                 // DD's reduce output is Collection<T, (K, V2), R2> = (key_Row, agg_Row).
-                let reduced: VecCollection<'scope, T, (Row, Row)> =
-                    keyed.reduce(move |_key, input: &[(&Row, isize)], output: &mut Vec<(Row, isize)>| {
+                let reduced: VecCollection<'scope, T, (Row, Row)> = keyed.reduce(
+                    move |_key, input: &[(&Row, isize)], output: &mut Vec<(Row, isize)>| {
                         let agg_vals: Vec<Val> =
                             aggs.iter().map(|a| eval_aggregate(a, input)).collect();
                         output.push((Row(agg_vals.into()), 1));
-                    });
+                    },
+                );
 
                 // Flatten (key_Row, agg_Row) into a single Row: key ++ aggs.
-                curr = Some(reduced.map(|(key, aggs)| {
-                    Row(key.0.iter().chain(aggs.0.iter()).cloned().collect())
-                }));
+                curr =
+                    Some(reduced.map(|(key, aggs)| {
+                        Row(key.0.iter().chain(aggs.0.iter()).cloned().collect())
+                    }));
             }
 
             // ---------------------------------------------------------------
             // Insert — final projection into the head relation's tuple shape.
             // ---------------------------------------------------------------
             Step::Insert { head_rel: _, proj } => {
-                let pipeline = curr.take().ok_or_else(|| anyhow::anyhow!("Insert before Scan"))?;
+                let pipeline = curr
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("Insert before Scan"))?;
                 let proj = proj.clone();
-                curr = Some(pipeline.map(move |row| {
-                    Row(proj.iter().map(|s| slot_val(s, &row)).collect())
-                }));
+                curr = Some(
+                    pipeline.map(move |row| Row(proj.iter().map(|s| slot_val(s, &row)).collect())),
+                );
             }
         }
     }

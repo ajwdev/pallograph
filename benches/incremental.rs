@@ -35,7 +35,7 @@
 
 use std::time::{Duration, Instant};
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use mangle_common::Value;
 use pallograph::engine::{DdBackend, Engine, InterpreterBackend, load_bench_fixtures};
 
@@ -62,7 +62,8 @@ fn interpreter_add_fact(c: &mut Criterion) {
         b.iter_custom(|iters| {
             // Build a fresh engine once per sample — not per iteration.
             let mut engine =
-                Engine::from_parts(edb.clone(), rules.clone(), Box::new(InterpreterBackend)).expect("engine");
+                Engine::from_parts(edb.clone(), rules.clone(), Box::new(InterpreterBackend))
+                    .expect("engine");
             let start = Instant::now();
             for i in 0..iters {
                 let (rel, tuple) = bench_fact(i);
@@ -79,8 +80,8 @@ fn dd_add_fact(c: &mut Criterion) {
     c.bench_function("incremental/dd_add_fact", |b| {
         b.iter_custom(|iters| {
             // Session startup is setup, not measurement.
-            let mut engine =
-                Engine::from_parts(edb.clone(), rules.clone(), Box::new(DdBackend)).expect("engine");
+            let mut engine = Engine::from_parts(edb.clone(), rules.clone(), Box::new(DdBackend))
+                .expect("engine");
             let start = Instant::now();
             for i in 0..iters {
                 let (rel, tuple) = bench_fact(i);
@@ -101,7 +102,8 @@ fn interpreter_retract_fact(c: &mut Criterion) {
         b.iter_custom(|iters| {
             // Pre-insert the facts during setup (not timed), then retract them.
             let mut engine =
-                Engine::from_parts(edb.clone(), rules.clone(), Box::new(InterpreterBackend)).expect("engine");
+                Engine::from_parts(edb.clone(), rules.clone(), Box::new(InterpreterBackend))
+                    .expect("engine");
             for i in 0..iters {
                 let (rel, tuple) = bench_fact(i);
                 engine.add_fact(rel, tuple);
@@ -122,8 +124,8 @@ fn dd_retract_fact(c: &mut Criterion) {
     c.bench_function("incremental/dd_retract_fact", |b| {
         b.iter_custom(|iters| {
             // Pre-insert the facts during setup (not timed), then retract them.
-            let mut engine =
-                Engine::from_parts(edb.clone(), rules.clone(), Box::new(DdBackend)).expect("engine");
+            let mut engine = Engine::from_parts(edb.clone(), rules.clone(), Box::new(DdBackend))
+                .expect("engine");
             for i in 0..iters {
                 let (rel, tuple) = bench_fact(i);
                 engine.add_fact(rel, tuple);

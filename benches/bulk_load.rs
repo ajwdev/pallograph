@@ -20,7 +20,7 @@
 //!
 //! Run:  cargo bench --bench bulk_load
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use pallograph::engine::{Backend, DdBackend, Engine, InterpreterBackend, load_bench_fixtures};
 
 fn interpreter_evaluate(c: &mut Criterion) {

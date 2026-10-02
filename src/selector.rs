@@ -21,7 +21,7 @@
 
 use std::collections::BTreeSet;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use kube::core::labels::Expression;
 
 /// Parse a kubectl-style label selector string into a list of `Expression`s.

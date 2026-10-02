@@ -175,9 +175,7 @@ impl Ord for Val {
             // Cross-type: Time vs Number compare as raw i64 nanoseconds.
             (Val::Time(a), Val::Number(b)) => a.cmp(b),
             (Val::Number(a), Val::Time(b)) => a.cmp(b),
-            (Val::Compound(ka, a), Val::Compound(kb, b)) => {
-                ka.cmp(kb).then_with(|| a.cmp(b))
-            }
+            (Val::Compound(ka, a), Val::Compound(kb, b)) => ka.cmp(kb).then_with(|| a.cmp(b)),
             (Val::Null, Val::Null) => std::cmp::Ordering::Equal,
             // Cross-variant ordering: Number/Float < String < Name < Time < Duration < Compound < Null
             (Val::Number(_) | Val::Float(_), _) => std::cmp::Ordering::Less,
@@ -223,9 +221,10 @@ impl From<Val> for Value {
             Val::Name(s) => Value::Name(s.to_string()),
             Val::Time(t) => Value::Time(t),
             Val::Duration(d) => Value::Duration(d),
-            Val::Compound(k, elems) => {
-                Value::Compound(CompoundKind::from(k), elems.into_iter().map(Value::from).collect())
-            }
+            Val::Compound(k, elems) => Value::Compound(
+                CompoundKind::from(k),
+                elems.into_iter().map(Value::from).collect(),
+            ),
             Val::Null => Value::Null,
         }
     }
@@ -280,8 +279,14 @@ mod tests {
     fn round_trip_scalars() {
         assert_eq!(round_trip(Value::Number(42)), Value::Number(42));
         assert_eq!(round_trip(Value::Float(3.14)), Value::Float(3.14));
-        assert_eq!(round_trip(Value::String("hello".into())), Value::String("hello".into()));
-        assert_eq!(round_trip(Value::Name("/foo/bar".into())), Value::Name("/foo/bar".into()));
+        assert_eq!(
+            round_trip(Value::String("hello".into())),
+            Value::String("hello".into())
+        );
+        assert_eq!(
+            round_trip(Value::Name("/foo/bar".into())),
+            Value::Name("/foo/bar".into())
+        );
         assert_eq!(round_trip(Value::Time(1_000_000)), Value::Time(1_000_000));
         assert_eq!(round_trip(Value::Duration(500)), Value::Duration(500));
         assert_eq!(round_trip(Value::Null), Value::Null);
@@ -331,7 +336,10 @@ mod tests {
             (Value::String("x".into()), Value::Name("/a".into())),
             (Value::Name("/a".into()), Value::Time(100)),
             (Value::Time(100), Value::Duration(100)),
-            (Value::Duration(100), Value::Compound(CompoundKind::List, vec![])),
+            (
+                Value::Duration(100),
+                Value::Compound(CompoundKind::List, vec![]),
+            ),
             (Value::Compound(CompoundKind::List, vec![]), Value::Null),
             // Duration/Time vs Number
             (Value::Duration(5), Value::Number(10)),
@@ -340,13 +348,7 @@ mod tests {
         for (a, b) in cases {
             let va = Val::from(a);
             let vb = Val::from(b);
-            assert_eq!(
-                a.cmp(b),
-                va.cmp(&vb),
-                "Ord mismatch: {:?} vs {:?}",
-                a,
-                b
-            );
+            assert_eq!(a.cmp(b), va.cmp(&vb), "Ord mismatch: {:?} vs {:?}", a, b);
         }
     }
 
