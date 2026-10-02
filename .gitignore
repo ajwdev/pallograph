@@ -6,3 +6,7 @@ pallograph
 *.mapping.json
 # Local denylist for the anonymizer (internal names). Never commit.
 *.local.txt
+
+# Optional real-cluster dump used by the real_* benchmarks in place of
+# testdata/. Never commit real workload data.
+/testdata-real
