@@ -106,8 +106,13 @@ pub enum Step {
         const_filters: Vec<(usize, Val)>,
     },
 
-    /// String-builtin filter (`:string:starts_with`, etc.).
-    CallFilter { func: String, args: Vec<Slot> },
+    /// Built-in predicate filter (`:string:starts_with`, etc.). With `negate`
+    /// set, keeps rows where the predicate is false.
+    CallFilter {
+        func: String,
+        args: Vec<Slot>,
+        negate: bool,
+    },
 
     /// Let-binding: append one computed column to each row.
     Let { expr: OwnedExpr },
@@ -265,6 +270,90 @@ fn lower_aggregate(agg: &Aggregate, ir: &Ir, schema: &[String]) -> Result<Lowere
     Ok(LoweredAggregate { func, arg_slot })
 }
 
+/// Lower one filter condition into `steps`.
+///
+/// `negate` is set under `Condition::Not`. The planner only emits `Not` around
+/// built-in checks (`Cmp` and `Call`) whose arguments are all bound, so the
+/// negated form is still a plain row filter: comparisons flip their operator
+/// (exact, since both `Val` and `Value` orderings are total) and calls carry a
+/// `negate` flag evaluated at runtime.
+fn lower_cond(
+    cond: &Condition,
+    negate: bool,
+    ir: &Ir,
+    schema: &[String],
+    steps: &mut Vec<Step>,
+) -> Result<()> {
+    match cond {
+        Condition::Cmp { op, left, right } => {
+            use mangle_ir::physical::CmpOp as MiCmpOp;
+            let my_op = match (op, negate) {
+                (MiCmpOp::Eq, false) | (MiCmpOp::Neq, true) => CmpOp::Eq,
+                (MiCmpOp::Neq, false) | (MiCmpOp::Eq, true) => CmpOp::Neq,
+                (MiCmpOp::Lt, false) | (MiCmpOp::Ge, true) => CmpOp::Lt,
+                (MiCmpOp::Le, false) | (MiCmpOp::Gt, true) => CmpOp::Le,
+                (MiCmpOp::Gt, false) | (MiCmpOp::Le, true) => CmpOp::Gt,
+                (MiCmpOp::Ge, false) | (MiCmpOp::Lt, true) => CmpOp::Ge,
+            };
+            let left_slot = resolve_operand(left, ir, schema)?;
+            let right_slot = resolve_operand(right, ir, schema)?;
+            steps.push(Step::Cmp {
+                op: my_op,
+                left: left_slot,
+                right: right_slot,
+            });
+        }
+        Condition::Negation { .. } if negate => {
+            // Double negation of a relation lookup is a semi-join; the planner
+            // never emits it.
+            bail!("negated relation negation is not supported by the DD backend: !{cond:?}")
+        }
+        Condition::Negation { relation, args } => {
+            let rel_name = ir.resolve_name(*relation).to_string();
+            let mut left_key_slots = Vec::new();
+            let mut right_key_cols = Vec::new();
+            let mut const_filters = Vec::new();
+
+            for (right_col, arg) in args.iter().enumerate() {
+                match arg {
+                    Operand::Var(name_id) => {
+                        let name = ir.resolve_name(*name_id);
+                        if let Some(left_pos) = schema.iter().position(|v| v == name) {
+                            // Shared variable: join on it.
+                            left_key_slots.push(Slot::Col(left_pos));
+                            right_key_cols.push(right_col);
+                        }
+                        // Anonymous/wildcard var (not in schema) → no constraint.
+                    }
+                    Operand::Const(c) => {
+                        const_filters.push((right_col, resolve_constant(c, ir)));
+                    }
+                }
+            }
+            steps.push(Step::Antijoin {
+                rel: rel_name,
+                left_key_slots,
+                right_key_cols,
+                const_filters,
+            });
+        }
+        Condition::Call { function, args } => {
+            let func_name = ir.resolve_name(*function).to_string();
+            let arg_slots: Result<Vec<_>> = args
+                .iter()
+                .map(|a| resolve_operand(a, ir, schema))
+                .collect();
+            steps.push(Step::CallFilter {
+                func: func_name,
+                args: arg_slots?,
+                negate,
+            });
+        }
+        Condition::Not(inner) => lower_cond(inner, !negate, ir, schema, steps)?,
+    }
+    Ok(())
+}
+
 fn lower_inner(
     op: &Op,
     ir: &Ir,
@@ -359,66 +448,7 @@ fn lower_inner(
         }
 
         Op::Filter { cond, body } => {
-            match cond {
-                Condition::Cmp { op, left, right } => {
-                    use mangle_ir::physical::CmpOp as MiCmpOp;
-                    let my_op = match op {
-                        MiCmpOp::Eq => CmpOp::Eq,
-                        MiCmpOp::Neq => CmpOp::Neq,
-                        MiCmpOp::Lt => CmpOp::Lt,
-                        MiCmpOp::Le => CmpOp::Le,
-                        MiCmpOp::Gt => CmpOp::Gt,
-                        MiCmpOp::Ge => CmpOp::Ge,
-                    };
-                    let left_slot = resolve_operand(left, ir, schema)?;
-                    let right_slot = resolve_operand(right, ir, schema)?;
-                    steps.push(Step::Cmp {
-                        op: my_op,
-                        left: left_slot,
-                        right: right_slot,
-                    });
-                }
-                Condition::Negation { relation, args } => {
-                    let rel_name = ir.resolve_name(*relation).to_string();
-                    let mut left_key_slots = Vec::new();
-                    let mut right_key_cols = Vec::new();
-                    let mut const_filters = Vec::new();
-
-                    for (right_col, arg) in args.iter().enumerate() {
-                        match arg {
-                            Operand::Var(name_id) => {
-                                let name = ir.resolve_name(*name_id);
-                                if let Some(left_pos) = schema.iter().position(|v| v == name) {
-                                    // Shared variable: join on it.
-                                    left_key_slots.push(Slot::Col(left_pos));
-                                    right_key_cols.push(right_col);
-                                }
-                                // Anonymous/wildcard var (not in schema) → no constraint.
-                            }
-                            Operand::Const(c) => {
-                                const_filters.push((right_col, resolve_constant(c, ir)));
-                            }
-                        }
-                    }
-                    steps.push(Step::Antijoin {
-                        rel: rel_name,
-                        left_key_slots,
-                        right_key_cols,
-                        const_filters,
-                    });
-                }
-                Condition::Call { function, args } => {
-                    let func_name = ir.resolve_name(*function).to_string();
-                    let arg_slots: Result<Vec<_>> = args
-                        .iter()
-                        .map(|a| resolve_operand(a, ir, schema))
-                        .collect();
-                    steps.push(Step::CallFilter {
-                        func: func_name,
-                        args: arg_slots?,
-                    });
-                }
-            }
+            lower_cond(cond, false, ir, schema, steps)?;
             lower_inner(body, ir, schema, steps, head_rel)
         }
 

@@ -80,14 +80,17 @@ pub enum Command {
     /// Snapshot a relation from the sink and send it back.
     /// Milestone A: the worker reads the mutex on behalf of the caller so
     /// the API is uniform; Milestone B will cursor the trace instead.
+    ///
+    /// Responds with `Err` while any rule has live evaluation errors.
     Query {
         rel: String,
-        resp: Sender<Vec<Vec<Value>>>,
+        resp: Sender<std::result::Result<Vec<Vec<Value>>, String>>,
     },
     /// Snapshot EVERY relation's current contents (EDB + IDB) and send them back.
     /// Used by the batch `DdBackend::evaluate` path.
+    /// Responds with `Err` while any rule has live evaluation errors.
     SnapshotAll {
-        resp: Sender<HashMap<String, Vec<Vec<Value>>>>,
+        resp: Sender<std::result::Result<HashMap<String, Vec<Vec<Value>>>, String>>,
     },
     /// Attempt to add new IDB rules by layering a fresh dataflow.
     ///
@@ -148,6 +151,44 @@ fn drain_trace(trace: &mut RowTrace) -> Vec<Vec<Value>> {
         cursor.step_key(&storage);
     }
     result
+}
+
+/// Concatenate a dataflow's runtime error collections and arrange them.
+///
+/// Always returns a trace (empty when no rule can error) so the caller can
+/// treat every dataflow uniformly.
+fn arrange_errors<'scope>(
+    error_colls: Vec<VecCollection<'scope, u64, Row>>,
+    unit_coll: &VecCollection<'scope, u64, Row>,
+    probe: &timely::dataflow::ProbeHandle<u64>,
+) -> RowTrace {
+    let errors = error_colls
+        .into_iter()
+        .reduce(|a, b| a.concat(b))
+        .unwrap_or_else(|| unit_coll.clone().filter(|_| false));
+    errors.distinct().probe_with(probe).arrange_by_self().trace
+}
+
+/// `Err` with every distinct live evaluation error, if there are any.
+///
+/// The interpreter fails the whole evaluation on the first such error; a
+/// dataflow can't stop mid-flight, so instead reads are refused for as long
+/// as any error row is live.
+fn live_errors(error_traces: &mut [RowTrace]) -> std::result::Result<(), String> {
+    let mut msgs: Vec<String> = error_traces
+        .iter_mut()
+        .flat_map(drain_trace)
+        .map(|row| match row.first() {
+            Some(Value::String(m)) => m.clone(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    if msgs.is_empty() {
+        return Ok(());
+    }
+    msgs.sort();
+    msgs.dedup();
+    Err(format!("evaluation error: {}", msgs.join("\n")))
 }
 
 // ---------------------------------------------------------------------------
@@ -235,178 +276,193 @@ impl DdSession {
             let input_rels = Arc::clone(&input_rels);
             let edb_by_rel = Arc::clone(&edb_by_rel);
 
-            let (mut handles, mut traces, build_errors) = worker.dataflow::<u64, _, _>({
-                let input_rels = Arc::clone(&input_rels);
-                let probe_ref = probe.clone();
+            let (mut handles, mut traces, build_errors, error_trace) = worker
+                .dataflow::<u64, _, _>({
+                    let input_rels = Arc::clone(&input_rels);
+                    let probe_ref = probe.clone();
 
-                move |scope| {
-                    let mut handles: HashMap<String, InputSession<u64, Row, isize>> =
-                        HashMap::new();
-                    let mut rels: HashMap<String, VecCollection<'_, u64, Row>> = HashMap::new();
-                    // Any rule the DD builder can't translate is collected here and
-                    // reported back to spawn() so it fails loudly rather than
-                    // silently dropping the rule (which would yield wrong results).
-                    let mut build_errors: Vec<String> = Vec::new();
+                    move |scope| {
+                        let mut handles: HashMap<String, InputSession<u64, Row, isize>> =
+                            HashMap::new();
+                        let mut rels: HashMap<String, VecCollection<'_, u64, Row>> = HashMap::new();
+                        // Any rule the DD builder can't translate is collected here and
+                        // reported back to spawn() so it fails loudly rather than
+                        // silently dropping the rule (which would yield wrong results).
+                        let mut build_errors: Vec<String> = Vec::new();
+                        // Runtime evaluation errors from every rule (see
+                        // `build_rule`), arranged below into `error_trace`.
+                        let mut error_colls: Vec<VecCollection<'_, u64, Row>> = Vec::new();
 
-                    for rel in input_rels.iter() {
-                        let (handle, coll) = scope.new_collection::<Row, isize>();
-                        rels.insert(rel.clone(), coll);
-                        handles.insert(rel.clone(), handle);
-                    }
-
-                    let unit_coll = scope.new_collection_from(vec![Row::empty()]).1;
-
-                    for stratum in strata_work.iter() {
-                        if stratum.rules.is_empty() {
-                            continue;
+                        for rel in input_rels.iter() {
+                            let (handle, coll) = scope.new_collection::<Row, isize>();
+                            rels.insert(rel.clone(), coll);
+                            handles.insert(rel.clone(), handle);
                         }
 
-                        if stratum.is_recursive {
-                            let head_preds: std::collections::HashSet<String> =
-                                stratum.rules.iter().map(|r| r.head_rel.clone()).collect();
+                        let unit_coll = scope.new_collection_from(vec![Row::empty()]).1;
 
-                            let results: HashMap<String, VecCollection<'_, u64, Row>> = scope
-                                .iterative::<u32, _, _>(|nested| {
-                                    let summary = Product::new(Default::default(), 1u32);
-
-                                    let mut inner_rels: HashMap<
-                                        String,
-                                        VecCollection<'_, Product<u64, u32>, Row>,
-                                    > = rels
-                                        .iter()
-                                        .map(|(k, v)| (k.clone(), v.clone().enter(nested)))
-                                        .collect();
-                                    let inner_unit = unit_coll.clone().enter(nested);
-
-                                    let mut vars: HashMap<
-                                        String,
-                                        VecVariable<'_, Product<u64, u32>, Row, isize>,
-                                    > = HashMap::new();
-                                    let mut var_colls: HashMap<
-                                        String,
-                                        VecCollection<'_, Product<u64, u32>, Row>,
-                                    > = HashMap::new();
-                                    for pred in &head_preds {
-                                        if let Some(seed) = inner_rels.remove(pred) {
-                                            let (var, coll) = VecVariable::new_from(seed, summary);
-                                            vars.insert(pred.clone(), var);
-                                            var_colls.insert(pred.clone(), coll);
-                                        } else {
-                                            let (var, coll) = VecVariable::new(nested, summary);
-                                            vars.insert(pred.clone(), var);
-                                            var_colls.insert(pred.clone(), coll);
-                                        }
-                                    }
-                                    for (pred, coll) in &var_colls {
-                                        inner_rels.insert(pred.clone(), coll.clone());
-                                    }
-
-                                    let mut by_head: HashMap<
-                                        String,
-                                        Vec<VecCollection<'_, Product<u64, u32>, Row>>,
-                                    > = HashMap::new();
-                                    for rule in &stratum.rules {
-                                        match build_rule(rule, &inner_rels, &inner_unit) {
-                                            Ok(coll) => {
-                                                by_head
-                                                    .entry(rule.head_rel.clone())
-                                                    .or_default()
-                                                    .push(coll);
-                                            }
-                                            Err(e) => {
-                                                build_errors.push(format!(
-                                                    "rule for `{}`: {e}",
-                                                    rule.head_rel
-                                                ));
-                                            }
-                                        }
-                                    }
-
-                                    let mut out: HashMap<String, VecCollection<'_, u64, Row>> =
-                                        HashMap::new();
-                                    for (pred, var) in vars {
-                                        let curr = var_colls.remove(&pred).unwrap();
-                                        let full = match by_head.remove(&pred) {
-                                            Some(colls) => {
-                                                let new_facts = colls
-                                                    .into_iter()
-                                                    .reduce(|a, b| a.concat(b))
-                                                    .unwrap();
-                                                curr.concat(new_facts).distinct()
-                                            }
-                                            None => curr.distinct(),
-                                        };
-                                        var.set(full.clone());
-                                        out.insert(pred, full.leave(scope));
-                                    }
-                                    out
-                                });
-
-                            for (pred, coll) in results {
-                                match rels.entry(pred) {
-                                    std::collections::hash_map::Entry::Occupied(mut e) => {
-                                        let old = e.get().clone();
-                                        *e.get_mut() = old.concat(coll).distinct();
-                                    }
-                                    std::collections::hash_map::Entry::Vacant(e) => {
-                                        e.insert(coll);
-                                    }
-                                }
-                            }
-                        } else {
-                            let mut by_head: HashMap<String, Vec<VecCollection<'_, u64, Row>>> =
-                                HashMap::new();
-
-                            for rule in &stratum.rules {
-                                match build_rule(rule, &rels, &unit_coll) {
-                                    Ok(coll) => {
-                                        by_head
-                                            .entry(rule.head_rel.clone())
-                                            .or_default()
-                                            .push(coll);
-                                    }
-                                    Err(e) => {
-                                        build_errors
-                                            .push(format!("rule for `{}`: {e}", rule.head_rel));
-                                    }
-                                }
+                        for stratum in strata_work.iter() {
+                            if stratum.rules.is_empty() {
+                                continue;
                             }
 
-                            for (head_rel, colls) in by_head {
-                                let idb = colls
-                                    .into_iter()
-                                    .reduce(|a, b| a.concat(b))
-                                    .unwrap()
-                                    .distinct();
-                                match rels.entry(head_rel) {
-                                    std::collections::hash_map::Entry::Occupied(mut e) => {
-                                        let old = e.get().clone();
-                                        *e.get_mut() = old.concat(idb).distinct();
+                            if stratum.is_recursive {
+                                let head_preds: std::collections::HashSet<String> =
+                                    stratum.rules.iter().map(|r| r.head_rel.clone()).collect();
+
+                                let results: HashMap<String, VecCollection<'_, u64, Row>> =
+                                    scope.iterative::<u32, _, _>(|nested| {
+                                        let summary = Product::new(Default::default(), 1u32);
+
+                                        let mut inner_rels: HashMap<
+                                            String,
+                                            VecCollection<'_, Product<u64, u32>, Row>,
+                                        > = rels
+                                            .iter()
+                                            .map(|(k, v)| (k.clone(), v.clone().enter(nested)))
+                                            .collect();
+                                        let inner_unit = unit_coll.clone().enter(nested);
+
+                                        let mut vars: HashMap<
+                                            String,
+                                            VecVariable<'_, Product<u64, u32>, Row, isize>,
+                                        > = HashMap::new();
+                                        let mut var_colls: HashMap<
+                                            String,
+                                            VecCollection<'_, Product<u64, u32>, Row>,
+                                        > = HashMap::new();
+                                        for pred in &head_preds {
+                                            if let Some(seed) = inner_rels.remove(pred) {
+                                                let (var, coll) =
+                                                    VecVariable::new_from(seed, summary);
+                                                vars.insert(pred.clone(), var);
+                                                var_colls.insert(pred.clone(), coll);
+                                            } else {
+                                                let (var, coll) = VecVariable::new(nested, summary);
+                                                vars.insert(pred.clone(), var);
+                                                var_colls.insert(pred.clone(), coll);
+                                            }
+                                        }
+                                        for (pred, coll) in &var_colls {
+                                            inner_rels.insert(pred.clone(), coll.clone());
+                                        }
+
+                                        let mut by_head: HashMap<
+                                            String,
+                                            Vec<VecCollection<'_, Product<u64, u32>, Row>>,
+                                        > = HashMap::new();
+                                        let mut inner_errors = Vec::new();
+                                        for rule in &stratum.rules {
+                                            match build_rule(
+                                                rule,
+                                                &inner_rels,
+                                                &inner_unit,
+                                                &mut inner_errors,
+                                            ) {
+                                                Ok(coll) => {
+                                                    by_head
+                                                        .entry(rule.head_rel.clone())
+                                                        .or_default()
+                                                        .push(coll);
+                                                }
+                                                Err(e) => {
+                                                    build_errors.push(format!(
+                                                        "rule for `{}`: {e}",
+                                                        rule.head_rel
+                                                    ));
+                                                }
+                                            }
+                                        }
+
+                                        let mut out: HashMap<String, VecCollection<'_, u64, Row>> =
+                                            HashMap::new();
+                                        for (pred, var) in vars {
+                                            let curr = var_colls.remove(&pred).unwrap();
+                                            let full = match by_head.remove(&pred) {
+                                                Some(colls) => {
+                                                    let new_facts = colls
+                                                        .into_iter()
+                                                        .reduce(|a, b| a.concat(b))
+                                                        .unwrap();
+                                                    curr.concat(new_facts).distinct()
+                                                }
+                                                None => curr.distinct(),
+                                            };
+                                            var.set(full.clone());
+                                            out.insert(pred, full.leave(scope));
+                                        }
+                                        error_colls.extend(
+                                            inner_errors.into_iter().map(|e| e.leave(scope)),
+                                        );
+                                        out
+                                    });
+
+                                for (pred, coll) in results {
+                                    match rels.entry(pred) {
+                                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                                            let old = e.get().clone();
+                                            *e.get_mut() = old.concat(coll).distinct();
+                                        }
+                                        std::collections::hash_map::Entry::Vacant(e) => {
+                                            e.insert(coll);
+                                        }
                                     }
-                                    std::collections::hash_map::Entry::Vacant(e) => {
-                                        e.insert(idb);
+                                }
+                            } else {
+                                let mut by_head: HashMap<String, Vec<VecCollection<'_, u64, Row>>> =
+                                    HashMap::new();
+
+                                for rule in &stratum.rules {
+                                    match build_rule(rule, &rels, &unit_coll, &mut error_colls) {
+                                        Ok(coll) => {
+                                            by_head
+                                                .entry(rule.head_rel.clone())
+                                                .or_default()
+                                                .push(coll);
+                                        }
+                                        Err(e) => {
+                                            build_errors
+                                                .push(format!("rule for `{}`: {e}", rule.head_rel));
+                                        }
+                                    }
+                                }
+
+                                for (head_rel, colls) in by_head {
+                                    let idb = colls
+                                        .into_iter()
+                                        .reduce(|a, b| a.concat(b))
+                                        .unwrap()
+                                        .distinct();
+                                    match rels.entry(head_rel) {
+                                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                                            let old = e.get().clone();
+                                            *e.get_mut() = old.concat(idb).distinct();
+                                        }
+                                        std::collections::hash_map::Entry::Vacant(e) => {
+                                            e.insert(idb);
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    // Arrange each output collection.
-                    //
-                    // `arrange_by_self` writes every update into an ordered, on-worker
-                    // trace (TraceAgent).  Queries cursor the trace at the current
-                    // frontier; compaction keeps memory bounded after each commit.
-                    // probe_with is called before arranging so the ProbeHandle
-                    // registers this edge in the dataflow graph.
-                    let mut traces = HashMap::new();
-                    for (rel_name, coll) in rels {
-                        let arranged = coll.probe_with(&probe_ref).arrange_by_self();
-                        traces.insert(rel_name, arranged.trace);
-                    }
+                        // Arrange each output collection.
+                        //
+                        // `arrange_by_self` writes every update into an ordered, on-worker
+                        // trace (TraceAgent).  Queries cursor the trace at the current
+                        // frontier; compaction keeps memory bounded after each commit.
+                        // probe_with is called before arranging so the ProbeHandle
+                        // registers this edge in the dataflow graph.
+                        let mut traces = HashMap::new();
+                        for (rel_name, coll) in rels {
+                            let arranged = coll.probe_with(&probe_ref).arrange_by_self();
+                            traces.insert(rel_name, arranged.trace);
+                        }
+                        let error_trace = arrange_errors(error_colls, &unit_coll, &probe_ref);
 
-                    (handles, traces, build_errors)
-                }
-            });
+                        (handles, traces, build_errors, error_trace)
+                    }
+                });
 
             // If any rule failed to translate, abandon the (unrun) dataflow and
             // report the failure to spawn() instead of silently proceeding with
@@ -444,6 +500,8 @@ impl DdSession {
             // diffs into the InputSession; Commit advances the epoch and steps
             // the worker until the probe clears, then acks.  Shutdown exits.
             let mut epoch: u64 = 1;
+            // One error trace per dataflow (the initial one plus each layer).
+            let mut error_traces: Vec<RowTrace> = vec![error_trace];
 
             loop {
                 match rx.recv() {
@@ -470,22 +528,27 @@ impl DdSession {
                             // and memory stays bounded (we never do time-travel queries).
                             let frontier_elems = [epoch];
                             let frontier = AntichainRef::new(&frontier_elems);
-                            for trace in traces.values_mut() {
+                            for trace in traces.values_mut().chain(error_traces.iter_mut()) {
                                 trace.set_logical_compaction(frontier);
                                 trace.set_physical_compaction(frontier);
                             }
                             let _ = ack.send(());
                         }
                         Command::Query { rel, resp } => {
-                            let rows = traces.get_mut(&rel).map(drain_trace).unwrap_or_default();
-                            let _ = resp.send(rows);
+                            let result = live_errors(&mut error_traces).map(|()| {
+                                traces.get_mut(&rel).map(drain_trace).unwrap_or_default()
+                            });
+                            let _ = resp.send(result);
                         }
                         Command::SnapshotAll { resp } => {
-                            let mut out: HashMap<String, Vec<Vec<Value>>> = HashMap::new();
-                            for (rel, trace) in traces.iter_mut() {
-                                out.insert(rel.clone(), drain_trace(trace));
-                            }
-                            let _ = resp.send(out);
+                            let result = live_errors(&mut error_traces).map(|()| {
+                                let mut out: HashMap<String, Vec<Vec<Value>>> = HashMap::new();
+                                for (rel, trace) in traces.iter_mut() {
+                                    out.insert(rel.clone(), drain_trace(trace));
+                                }
+                                out
+                            });
+                            let _ = resp.send(result);
                         }
                         Command::AddRules {
                             all_rule_sources,
@@ -538,8 +601,8 @@ impl DdSession {
                                 traces.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                             let probe_ref = probe.clone();
 
-                            let (mut new_traces, layer_errors) =
-                                worker.dataflow::<u64, _, _>(move |scope| {
+                            let (mut new_traces, layer_errors, mut layer_error_trace) = worker
+                                .dataflow::<u64, _, _>(move |scope| {
                                     // Import each existing trace as a VecCollection.
                                     let mut rels: HashMap<String, VecCollection<'_, u64, Row>> =
                                         imported_traces
@@ -555,6 +618,7 @@ impl DdSession {
                                     let unit_coll = scope.new_collection_from(vec![Row::empty()]).1;
                                     let mut new_inner: HashMap<String, _> = HashMap::new();
                                     let mut layer_errors: Vec<String> = Vec::new();
+                                    let mut layer_error_colls = Vec::new();
 
                                     for stratum in &to_layer {
                                         let mut by_head: HashMap<
@@ -562,7 +626,12 @@ impl DdSession {
                                             Vec<VecCollection<'_, u64, Row>>,
                                         > = HashMap::new();
                                         for rule in &stratum.rules {
-                                            match build_rule(rule, &rels, &unit_coll) {
+                                            match build_rule(
+                                                rule,
+                                                &rels,
+                                                &unit_coll,
+                                                &mut layer_error_colls,
+                                            ) {
                                                 Ok(coll) => {
                                                     by_head
                                                         .entry(rule.head_rel.clone())
@@ -591,7 +660,9 @@ impl DdSession {
                                         }
                                     }
 
-                                    (new_inner, layer_errors)
+                                    let layer_error_trace =
+                                        arrange_errors(layer_error_colls, &unit_coll, &probe_ref);
+                                    (new_inner, layer_errors, layer_error_trace)
                                 });
 
                             // A rule failed to translate: reject the addition and keep
@@ -608,13 +679,17 @@ impl DdSession {
                             // Compact to the current frontier so history stays bounded.
                             let frontier_elems = [epoch];
                             let frontier = AntichainRef::new(&frontier_elems);
-                            for trace in new_traces.values_mut() {
+                            for trace in new_traces
+                                .values_mut()
+                                .chain(std::iter::once(&mut layer_error_trace))
+                            {
                                 trace.set_logical_compaction(frontier);
                                 trace.set_physical_compaction(frontier);
                             }
 
                             // Merge new relation traces into the session.
                             traces.extend(new_traces);
+                            error_traces.push(layer_error_trace);
                             let _ = ack.send(AddOutcome::Layered);
                         }
                         Command::Shutdown { ack } => {
@@ -687,23 +762,34 @@ impl DdSession {
     ///
     /// Milestone A: reads the `Arc<Mutex>` sink via the worker (uniform API).
     /// Milestone B: will cursor a TraceAgent on the worker thread instead.
-    pub fn query(&self, rel: &str) -> Vec<Vec<Value>> {
+    ///
+    /// Fails while any rule has live evaluation errors (e.g. a `:string:*`
+    /// built-in applied to a non-string), mirroring the interpreter.
+    pub fn query(&self, rel: &str) -> Result<Vec<Vec<Value>>> {
         let (resp_tx, resp_rx) = bounded(1);
         let _ = self.tx.send(Command::Query {
             rel: rel.to_string(),
             resp: resp_tx,
         });
-        resp_rx.recv().unwrap_or_default()
+        resp_rx
+            .recv()
+            .unwrap_or_else(|_| Ok(Vec::new()))
+            .map_err(anyhow::Error::msg)
     }
 
     /// Snapshot every relation (EDB + all derived IDB) at the current frontier.
     ///
     /// Used by the batch `DdBackend::evaluate` path: spawn a session, snapshot,
     /// then drop.  Mirrors `query()` but returns all relations at once.
-    pub fn snapshot_all(&self) -> HashMap<String, Vec<Vec<Value>>> {
+    ///
+    /// Fails while any rule has live evaluation errors, like [`Self::query`].
+    pub fn snapshot_all(&self) -> Result<HashMap<String, Vec<Vec<Value>>>> {
         let (resp_tx, resp_rx) = bounded(1);
         let _ = self.tx.send(Command::SnapshotAll { resp: resp_tx });
-        resp_rx.recv().unwrap_or_default()
+        resp_rx
+            .recv()
+            .unwrap_or_else(|_| Ok(HashMap::new()))
+            .map_err(anyhow::Error::msg)
     }
 
     /// Attempt to add a new IDB rule by layering a fresh dataflow on top of the
@@ -844,7 +930,7 @@ mod tests {
         ];
 
         let session = DdSession::spawn(&edb, &rules).expect("spawn");
-        let mut results = session.query("path");
+        let mut results = session.query("path").unwrap();
         results.sort();
         assert_eq!(
             results,
@@ -865,14 +951,14 @@ mod tests {
         let session = DdSession::spawn(&edb, &rules).expect("spawn");
 
         // Before insert: only a→b
-        let before = session.query("path");
+        let before = session.query("path").unwrap();
         assert_eq!(before.len(), 1);
 
         // Insert b→c, commit, then check
         session.insert("edge".to_string(), Row::from(&[v_str("b"), v_str("c")][..]));
         session.commit();
 
-        let mut after = session.query("path");
+        let mut after = session.query("path").unwrap();
         after.sort();
         assert_eq!(
             after,
@@ -895,13 +981,13 @@ mod tests {
         let session = DdSession::spawn(&edb, &rules).expect("spawn");
 
         // Both edges visible initially
-        assert_eq!(session.query("path").len(), 2);
+        assert_eq!(session.query("path").unwrap().len(), 2);
 
         // Retract b→c
         session.retract("edge".to_string(), Row::from(&[v_str("b"), v_str("c")][..]));
         session.commit();
 
-        let after = session.query("path");
+        let after = session.query("path").unwrap();
         assert_eq!(after, vec![vec![v_str("a"), v_str("b")]]);
     }
 
@@ -942,7 +1028,7 @@ mod tests {
             .add_idb(Some("view"), &edb, &all_rules)
             .expect("add_idb");
 
-        let mut results = session.query("view");
+        let mut results = session.query("view").unwrap();
         results.sort();
         // view should contain the source nodes of every path edge: a and b
         assert_eq!(results, vec![vec![v_str("a")], vec![v_str("b")]]);
@@ -967,14 +1053,14 @@ mod tests {
             .expect("add_idb");
 
         // Before insert: only a
-        let before = session.query("view");
+        let before = session.query("view").unwrap();
         assert_eq!(before, vec![vec![v_str("a")]]);
 
         // Insert b→c, commit — view should now also contain b.
         session.insert("edge".to_string(), Row::from(&[v_str("b"), v_str("c")][..]));
         session.commit();
 
-        let mut after = session.query("view");
+        let mut after = session.query("view").unwrap();
         after.sort();
         assert_eq!(after, vec![vec![v_str("a")], vec![v_str("b")]]);
     }
@@ -1007,7 +1093,7 @@ mod tests {
             .add_idb(Some("view2"), &edb, &rules_v2)
             .expect("add_idb view2");
 
-        let mut results = session.query("view2");
+        let mut results = session.query("view2").unwrap();
         results.sort();
         assert_eq!(results, vec![vec![v_str("a")], vec![v_str("b")]]);
     }
@@ -1033,7 +1119,7 @@ mod tests {
             .expect("add_idb fallback");
 
         // After rebuild, path should include both original edges and the reflexive pairs.
-        let mut results = session.query("path");
+        let mut results = session.query("path").unwrap();
         results.sort();
         assert!(
             results.contains(&vec![v_str("a"), v_str("b")]),
@@ -1067,6 +1153,9 @@ mod tests {
         assert!(is_supported_call_filter(":string:ends_with"));
         assert!(is_supported_call_filter(":string:contains"));
         assert!(is_supported_call_filter(":match_prefix"));
+        // Check modes, reached only via negation.
+        assert!(is_supported_call_filter(":list:member"));
+        assert!(is_supported_call_filter(":match_field"));
         // A typo / not-yet-implemented builtin must be rejected.
         assert!(!is_supported_call_filter(":string:startswith"));
         assert!(!is_supported_call_filter(":string:matches"));
@@ -1087,8 +1176,71 @@ mod tests {
         ];
 
         let session = DdSession::spawn(&edb, &rules).expect("spawn with valid builtin");
-        let mut results = session.query("hit");
+        let mut results = session.query("hit").unwrap();
         results.sort();
         assert_eq!(results, vec![vec![v_str("alpha")]]);
+    }
+
+    /// A negated built-in stays correct as facts are inserted and retracted.
+    #[test]
+    fn session_negated_builtin_incremental() {
+        let edb: Vec<(String, Vec<Value>)> = vec![
+            ("name".to_string(), vec![v_str("alpha")]),
+            ("name".to_string(), vec![v_str("beta")]),
+        ];
+        let rules = vec![
+            "Decl name(N).\nDecl miss(N).\nmiss(N) :- name(N), !:string:starts_with(N, \"al\")."
+                .to_string(),
+        ];
+
+        let session = DdSession::spawn(&edb, &rules).expect("spawn");
+        assert_eq!(session.query("miss").unwrap(), vec![vec![v_str("beta")]]);
+
+        session.insert("name".to_string(), Row::from(&[v_str("gamma")][..]));
+        session.insert("name".to_string(), Row::from(&[v_str("alps")][..]));
+        session.commit();
+        let mut after_insert = session.query("miss").unwrap();
+        after_insert.sort();
+        assert_eq!(
+            after_insert,
+            vec![vec![v_str("beta")], vec![v_str("gamma")]]
+        );
+
+        session.retract("name".to_string(), Row::from(&[v_str("beta")][..]));
+        session.commit();
+        assert_eq!(session.query("miss").unwrap(), vec![vec![v_str("gamma")]]);
+    }
+
+    /// A built-in type error makes reads fail while the offending fact is
+    /// live, and retracting it makes reads succeed again.
+    #[test]
+    fn session_eval_error_tracks_offending_fact() {
+        let edb: Vec<(String, Vec<Value>)> = vec![
+            ("name".to_string(), vec![v_str("alpha")]),
+            ("name".to_string(), vec![v_str("beta")]),
+        ];
+        let rules = vec![
+            "Decl name(N).\nDecl miss(N).\nmiss(N) :- name(N), !:string:starts_with(N, \"al\")."
+                .to_string(),
+        ];
+
+        let session = DdSession::spawn(&edb, &rules).expect("spawn");
+        assert_eq!(session.query("miss").unwrap(), vec![vec![v_str("beta")]]);
+
+        let bad = Row::from(&[Value::Number(5)][..]);
+        session.insert("name".to_string(), bad.clone());
+        session.commit();
+        let err = session
+            .query("miss")
+            .expect_err("type error should fail the read");
+        assert!(
+            format!("{err:#}").contains(":string:starts_with: expected string arguments"),
+            "unexpected error: {err:#}"
+        );
+        assert!(session.snapshot_all().is_err());
+
+        session.retract("name".to_string(), bad);
+        session.commit();
+        assert_eq!(session.query("miss").unwrap(), vec![vec![v_str("beta")]]);
     }
 }

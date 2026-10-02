@@ -2256,7 +2256,13 @@ fn list_tuples(
 ) {
     let live: Vec<Vec<Value>>;
     let rows: &[Vec<Value>] = if engine.has_session() {
-        live = engine.query_live(rel);
+        live = match engine.query_live(rel) {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!("Error: {e:#}");
+                return;
+            }
+        };
         &live
     } else {
         store.scan(rel)

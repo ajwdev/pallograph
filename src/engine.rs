@@ -317,6 +317,9 @@ impl CompiledProgram {
                             args,
                         )?;
                     }
+                    Condition::Not(inner) => {
+                        writeln!(w, "{}Not {:?}", prop_prefix, inner)?;
+                    }
                 }
 
                 self.fprint_op(w, body, level + 1)
@@ -472,7 +475,7 @@ impl Backend for DdBackend {
         // sees fully-derived state.  Dropping the session shuts the worker down.
         let session =
             crate::dd::session::DdSession::spawn(edb, rule_sources).context("spawn dd session")?;
-        let facts = session.snapshot_all();
+        let facts = session.snapshot_all()?;
         Ok(EvalStore {
             facts,
             provenance: vec![],
@@ -758,11 +761,12 @@ impl Engine {
 
     /// Query a relation from the live DD session.
     ///
-    /// Returns an empty vec if no session is active or the relation is unknown.
-    pub fn query_live(&self, rel: &str) -> Vec<Vec<Value>> {
+    /// Returns an empty vec if no session is active or the relation is unknown,
+    /// and an error while any rule has live evaluation errors.
+    pub fn query_live(&self, rel: &str) -> Result<Vec<Vec<Value>>> {
         match &self.session {
             Some(s) => s.query(rel),
-            None => vec![],
+            None => Ok(vec![]),
         }
     }
 
@@ -906,7 +910,7 @@ impl Engine {
         // rather than spawning (and settling) a second dataflow.
         if let Some(s) = &self.session {
             return Ok(EvalStore {
-                facts: s.snapshot_all(),
+                facts: s.snapshot_all()?,
                 provenance: vec![],
             });
         }
@@ -1078,7 +1082,7 @@ mod tests {
         assert!(dd.has_session());
         assert!(dd.add_fact("brand_new".into(), vec![Value::String("x".into())]));
 
-        let live = dd.query_live("brand_new");
+        let live = dd.query_live("brand_new").unwrap();
         assert_eq!(live, vec![vec![Value::String("x".into())]]);
 
         let mut interp = Engine::from_parts(vec![], rules, Box::new(InterpreterBackend)).unwrap();
@@ -1097,12 +1101,324 @@ mod tests {
     fn dd_declared_but_empty_relation_is_queryable() {
         let rules = vec!["Decl lonely(X).".to_string()];
         let mut dd = Engine::from_parts(vec![], rules, Box::new(DdBackend)).unwrap();
-        assert!(dd.query_live("lonely").is_empty());
+        assert!(dd.query_live("lonely").unwrap().is_empty());
         dd.add_rule("Decl seen(X).\nseen(X) :- lonely(X).".to_string())
             .expect("rule over declared-but-empty relation");
-        assert!(dd.query_live("seen").is_empty());
+        assert!(dd.query_live("seen").unwrap().is_empty());
         let store = dd.evaluate().unwrap();
         assert!(store.scan("lonely").is_empty());
         assert!(store.scan("seen").is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Negated built-in predicates (Condition::Not)
+    //
+    // Each case runs on both backends and is checked against a hand-written
+    // expectation, not just backend-vs-backend: before mangle-rs 0.9.1 both
+    // backends planned `!:builtin(..)` as a lookup of a never-populated
+    // relation, so they agreed with each other while both being wrong.
+    // -----------------------------------------------------------------------
+
+    use mangle_common::CompoundKind;
+
+    fn num(n: i64) -> Value {
+        Value::Number(n)
+    }
+    fn st(s: &str) -> Value {
+        Value::String(s.to_string())
+    }
+    fn nm(s: &str) -> Value {
+        Value::Name(s.to_string())
+    }
+    fn list(vs: Vec<Value>) -> Value {
+        Value::Compound(CompoundKind::List, vs)
+    }
+    /// Struct layout is interleaved: [k1, v1, k2, v2, ...].
+    fn strukt(fields: &[(&str, Value)]) -> Value {
+        let mut kvs = Vec::new();
+        for (k, v) in fields {
+            kvs.push(nm(k));
+            kvs.push(v.clone());
+        }
+        Value::Compound(CompoundKind::Struct, kvs)
+    }
+
+    fn facts(rel: &str, rows: Vec<Vec<Value>>) -> Vec<(String, Vec<Value>)> {
+        rows.into_iter().map(|r| (rel.to_string(), r)).collect()
+    }
+
+    /// Evaluate `rules` on both backends and assert each yields exactly
+    /// `expected` for `rel`.
+    fn assert_both(
+        edb: &[(String, Vec<Value>)],
+        rules: &str,
+        rel: &str,
+        mut expected: Vec<Vec<Value>>,
+    ) {
+        expected.sort();
+        let rules = vec![rules.to_string()];
+        let backends: [(&str, &dyn Backend); 2] =
+            [("interpreter", &InterpreterBackend), ("dd", &DdBackend)];
+        for (name, backend) in backends {
+            let store = backend
+                .evaluate(edb, &rules)
+                .unwrap_or_else(|e| panic!("{name} failed: {e:#}"));
+            let mut got = store.scan(rel).to_vec();
+            got.sort();
+            assert_eq!(got, expected, "{name} backend, relation {rel}");
+        }
+    }
+
+    #[test]
+    fn negated_cmp_builtins() {
+        let edb = facts(
+            "np_pair",
+            vec![
+                vec![num(1), num(2)],
+                vec![num(4), num(4)],
+                vec![num(5), num(3)],
+            ],
+        );
+        let lt = vec![vec![num(4), num(4)], vec![num(5), num(3)]];
+        let le = vec![vec![num(5), num(3)]];
+        let gt = vec![vec![num(1), num(2)], vec![num(4), num(4)]];
+        let ge = vec![vec![num(1), num(2)]];
+        for (op, expected) in [("lt", lt), ("le", le), ("gt", gt), ("ge", ge)] {
+            let rules =
+                format!("Decl np_pair(X, Y).\nnp_out(X, Y) :- np_pair(X, Y), !:{op}(X, Y).");
+            assert_both(&edb, &rules, "np_out", expected);
+        }
+    }
+
+    #[test]
+    fn negated_cmp_against_constant() {
+        let edb = facts("np_num", vec![vec![num(1)], vec![num(3)], vec![num(5)]]);
+        assert_both(
+            &edb,
+            "Decl np_num(X).\nnp_out(X) :- np_num(X), !:lt(X, 3).",
+            "np_out",
+            vec![vec![num(3)], vec![num(5)]],
+        );
+    }
+
+    #[test]
+    fn negated_time_and_duration_cmp() {
+        let edb = vec![
+            ("np_t".to_string(), vec![Value::Time(10), Value::Time(20)]),
+            ("np_t".to_string(), vec![Value::Time(30), Value::Time(20)]),
+            (
+                "np_d".to_string(),
+                vec![Value::Duration(5), Value::Duration(5)],
+            ),
+            (
+                "np_d".to_string(),
+                vec![Value::Duration(9), Value::Duration(5)],
+            ),
+        ];
+        assert_both(
+            &edb,
+            "Decl np_t(A, B).\nnp_tout(A) :- np_t(A, B), !:time:lt(A, B).",
+            "np_tout",
+            vec![vec![Value::Time(30)]],
+        );
+        assert_both(
+            &edb,
+            "Decl np_d(A, B).\nnp_dout(A) :- np_d(A, B), !:duration:gt(A, B).",
+            "np_dout",
+            vec![vec![Value::Duration(5)]],
+        );
+    }
+
+    #[test]
+    fn negated_string_builtins() {
+        let edb = facts(
+            "np_s",
+            vec![vec![st("alpha")], vec![st("beta")], vec![st("gamma")]],
+        );
+        let cases = [
+            (
+                r#"!:string:starts_with(S, "al")"#,
+                vec![st("beta"), st("gamma")],
+            ),
+            (
+                r#"!:string:ends_with(S, "ta")"#,
+                vec![st("alpha"), st("gamma")],
+            ),
+            (
+                r#"!:string:contains(S, "mm")"#,
+                vec![st("alpha"), st("beta")],
+            ),
+        ];
+        for (premise, expected) in cases {
+            let rules = format!("Decl np_s(S).\nnp_out(S) :- np_s(S), {premise}.");
+            let expected = expected.into_iter().map(|v| vec![v]).collect();
+            assert_both(&edb, &rules, "np_out", expected);
+        }
+    }
+
+    /// `:match_prefix` requires the name to be strictly longer than the
+    /// prefix, so `/a` does not match itself and survives the negation.
+    #[test]
+    fn negated_match_prefix() {
+        let edb = facts(
+            "np_n",
+            vec![vec![nm("/a")], vec![nm("/a/b")], vec![nm("/c/d")]],
+        );
+        assert_both(
+            &edb,
+            "Decl np_n(N).\nnp_out(N) :- np_n(N), !:match_prefix(N, /a).",
+            "np_out",
+            vec![vec![nm("/a")], vec![nm("/c/d")]],
+        );
+    }
+
+    /// Positive form of the same strictness rule.
+    #[test]
+    fn match_prefix_excludes_exact_match() {
+        let edb = facts(
+            "np_n",
+            vec![vec![nm("/a")], vec![nm("/a/b")], vec![nm("/c/d")]],
+        );
+        assert_both(
+            &edb,
+            "Decl np_n(N).\nnp_out(N) :- np_n(N), :match_prefix(N, /a).",
+            "np_out",
+            vec![vec![nm("/a/b")]],
+        );
+    }
+
+    /// A non-list second argument makes the check false, so the negation
+    /// keeps the row.
+    #[test]
+    fn negated_list_member() {
+        let edb = [
+            facts(
+                "np_holder",
+                vec![
+                    vec![list(vec![num(1), num(2)])],
+                    vec![list(vec![])],
+                    vec![st("not a list")],
+                ],
+            ),
+            facts("np_elem", vec![vec![num(1)], vec![num(3)]]),
+        ]
+        .concat();
+        let rules = "Decl np_holder(L).\nDecl np_elem(E).\n\
+                     np_out(E, L) :- np_holder(L), np_elem(E), !:list:member(E, L).";
+        assert_both(
+            &edb,
+            rules,
+            "np_out",
+            vec![
+                vec![num(3), list(vec![num(1), num(2)])],
+                vec![num(1), list(vec![])],
+                vec![num(3), list(vec![])],
+                vec![num(1), st("not a list")],
+                vec![num(3), st("not a list")],
+            ],
+        );
+    }
+
+    /// Evaluate `rules` on both backends and assert each fails with an error
+    /// mentioning `needle`.
+    fn assert_both_err(edb: &[(String, Vec<Value>)], rules: &str, needle: &str) {
+        let rules = vec![rules.to_string()];
+        let backends: [(&str, &dyn Backend); 2] =
+            [("interpreter", &InterpreterBackend), ("dd", &DdBackend)];
+        for (name, backend) in backends {
+            match backend.evaluate(edb, &rules) {
+                Ok(_) => {
+                    panic!("{name} backend succeeded, expected an error containing {needle:?}")
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    assert!(
+                        msg.contains(needle),
+                        "{name} backend error {msg:?} lacks {needle:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Following upstream mangle, a `:string:*` built-in on a non-string fails
+    /// the whole evaluation, in both the positive and negated forms.
+    #[test]
+    fn string_builtin_type_error_fails_both_backends() {
+        let edb = facts(
+            "np_s",
+            vec![vec![st("alpha")], vec![Value::Null], vec![num(5)]],
+        );
+        for premise in [
+            r#":string:starts_with(S, "al")"#,
+            r#"!:string:starts_with(S, "al")"#,
+        ] {
+            let rules = format!("Decl np_s(S).\nnp_out(S) :- np_s(S), {premise}.");
+            assert_both_err(
+                &edb,
+                &rules,
+                ":string:starts_with: expected string arguments",
+            );
+        }
+    }
+
+    /// The error also surfaces from inside a recursive stratum.
+    #[test]
+    fn builtin_type_error_in_recursive_rule_fails_both_backends() {
+        let edb = [
+            facts("np_start", vec![vec![st("n1")]]),
+            facts(
+                "np_edge",
+                vec![vec![st("n1"), st("n2")], vec![st("n2"), num(3)]],
+            ),
+        ]
+        .concat();
+        let rules = "Decl np_start(X).\nDecl np_edge(X, Y).\n\
+                     np_reach(X) :- np_start(X).\n\
+                     np_reach(Y) :- np_reach(X), np_edge(X, Y), :string:starts_with(Y, \"n\").";
+        assert_both_err(
+            &edb,
+            rules,
+            ":string:starts_with: expected string arguments",
+        );
+    }
+
+    /// Same for `:match_prefix` on a non-name.
+    #[test]
+    fn match_prefix_type_error_fails_both_backends() {
+        let edb = facts("np_n", vec![vec![nm("/a/b")], vec![st("/a/c")]]);
+        assert_both_err(
+            &edb,
+            "Decl np_n(N).\nnp_out(N) :- np_n(N), !:match_prefix(N, /a).",
+            ":match_prefix: expected name arguments",
+        );
+    }
+
+    /// A missing field or a non-struct scrutinee makes the check false, so
+    /// the negation keeps the row.
+    #[test]
+    fn negated_match_field() {
+        let matching = strukt(&[("/kind", st("a"))]);
+        let other_value = strukt(&[("/kind", st("b"))]);
+        let missing_field = strukt(&[("/other", st("a"))]);
+        let edb = facts(
+            "np_obj",
+            vec![
+                vec![matching],
+                vec![other_value.clone()],
+                vec![missing_field.clone()],
+                vec![st("not a struct")],
+            ],
+        );
+        assert_both(
+            &edb,
+            "Decl np_obj(S).\nnp_out(S) :- np_obj(S), !:match_field(S, /kind, \"a\").",
+            "np_out",
+            vec![
+                vec![other_value],
+                vec![missing_field],
+                vec![st("not a struct")],
+            ],
+        );
     }
 }
