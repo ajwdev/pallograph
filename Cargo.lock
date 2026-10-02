@@ -1102,8 +1102,9 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "mangle-analysis"
-version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#914de0c05f69de13d011d2691c4d5c71be4bb94e"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d125cc3d936c7032f3114869b1f0f1b9424b73cd1ac43e8f2bbbed0e7fbf5627"
 dependencies = [
  "anyhow",
  "googletest",
@@ -1115,8 +1116,9 @@ dependencies = [
 
 [[package]]
 name = "mangle-ast"
-version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#914de0c05f69de13d011d2691c4d5c71be4bb94e"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e18df1a428f1345bfadb4ee53098ab00773d13ae7aeb77758c7e93874f25e4b"
 dependencies = [
  "bumpalo",
  "googletest",
@@ -1125,8 +1127,9 @@ dependencies = [
 
 [[package]]
 name = "mangle-codegen"
-version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#914de0c05f69de13d011d2691c4d5c71be4bb94e"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77b4bd4ef94859715d9208c07d977ab86a84446d4c159e4da77ba728368b590e"
 dependencies = [
  "anyhow",
  "mangle-analysis",
@@ -1138,8 +1141,9 @@ dependencies = [
 
 [[package]]
 name = "mangle-common"
-version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#914de0c05f69de13d011d2691c4d5c71be4bb94e"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bb54b86e00dcb774dd2aeba6606fe80ffb804c8e8cbd614f97e5ae1d9e0949d"
 dependencies = [
  "anyhow",
  "mangle-ast",
@@ -1148,8 +1152,9 @@ dependencies = [
 
 [[package]]
 name = "mangle-driver"
-version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#914de0c05f69de13d011d2691c4d5c71be4bb94e"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e04aeeb55bea36c5e3266d715f1e4146f19ef5d8204baba7cb16bcea1cc3a42"
 dependencies = [
  "anyhow",
  "mangle-analysis",
@@ -1163,8 +1168,9 @@ dependencies = [
 
 [[package]]
 name = "mangle-interpreter"
-version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#914de0c05f69de13d011d2691c4d5c71be4bb94e"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b8130ccb090fa514e75eb0142f4a8221ff3e6e120d19cc582b959173811f15e"
 dependencies = [
  "anyhow",
  "mangle-ast",
@@ -1174,13 +1180,15 @@ dependencies = [
 
 [[package]]
 name = "mangle-ir"
-version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#914de0c05f69de13d011d2691c4d5c71be4bb94e"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd10e9ef415e853ee61988a502da8776fcbcc55ca8818962261a007b0e3b8b73"
 
 [[package]]
 name = "mangle-parse"
-version = "0.9.0"
-source = "git+https://codeberg.org/ajwdev/mangle-rs.git?branch=indexed-store#914de0c05f69de13d011d2691c4d5c71be4bb94e"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c832749116021c7ac9db30c75b68f20ef82e6cbf2a0f9b1b1e1e7d94ca7aaa60"
 dependencies = [
  "anyhow",
  "googletest",
