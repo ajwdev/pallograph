@@ -12,8 +12,8 @@
 //!
 //! - `interpreter`  — `InterpreterBackend::evaluate`, the baseline
 //! - `dd_session`   — `Engine::from_parts`, which builds the dataflow graph,
-//!                    spawns the persistent worker, and feeds + settles the
-//!                    initial EDB; this is the real DD startup cost
+//!   spawns the persistent worker, and feeds + settles the
+//!   initial EDB; this is the real DD startup cost
 //!
 //! (`DdBackend::evaluate` now just spawns + snapshots + drops a session, so a
 //! separate batch bench would duplicate `dd_session`.)
@@ -40,9 +40,7 @@ fn dd_session_spawn(c: &mut Criterion) {
             // settle the full initial EDB.  Worker shutdown happens at drop,
             // outside the timed window.
             |(edb_c, rules_c)| {
-                let engine =
-                    Engine::from_parts(edb_c, rules_c, Box::new(DdBackend)).expect("engine");
-                engine
+                Engine::from_parts(edb_c, rules_c, Box::new(DdBackend)).expect("engine")
             },
             BatchSize::SmallInput,
         )

@@ -237,7 +237,7 @@ where
             // ---------------------------------------------------------------
             // Scan — seeds the pipeline from an EDB/IDB relation.
             // ---------------------------------------------------------------
-            Step::Scan { rel, n_cols: _ } => {
+            Step::Scan { rel } => {
                 let base = rels
                     .get(rel)
                     .ok_or_else(|| anyhow::anyhow!("relation `{rel}` not found in rels"))?;
@@ -476,7 +476,7 @@ where
             // ---------------------------------------------------------------
             // Insert — final projection into the head relation's tuple shape.
             // ---------------------------------------------------------------
-            Step::Insert { head_rel: _, proj } => {
+            Step::Insert { proj } => {
                 let pipeline = curr
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("Insert before Scan"))?;

@@ -149,7 +149,6 @@ fn format_tuple(tuple: &[Value]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
 
     use mangle_interpreter::MemStore;
 

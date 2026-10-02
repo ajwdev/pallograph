@@ -127,10 +127,10 @@ pub fn check_anti_affinity_placement(store: &EvalStore) -> PlacementResult {
                 Value::String(name),
                 ..,
             ] = tuple.as_slice()
+                && av == "v1"
+                && k == "Node"
             {
-                if av == "v1" && k == "Node" {
-                    seen.insert(name.clone());
-                }
+                seen.insert(name.clone());
             }
         }
         // Fall back to node_allocatable if object_label has no nodes.
@@ -507,20 +507,18 @@ pub fn find_karpenter_coverage_gaps(store: &EvalStore, max_gaps: usize) -> Vec<C
                 .eval(req_var, true)
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if selected {
-                if let Some(val) = model.eval(val_var, true).and_then(|v| v.as_string()) {
-                    blocking.push(
-                        Bool::and(
-                            &ctx,
-                            &[
-                                req_var,
-                                &val_var._eq(&Z3String::from_str(&ctx, &val).unwrap()),
-                            ],
-                        )
-                        .not(),
-                    );
-                    labels.push((key.clone(), val));
-                }
+            if selected && let Some(val) = model.eval(val_var, true).and_then(|v| v.as_string()) {
+                blocking.push(
+                    Bool::and(
+                        &ctx,
+                        &[
+                            req_var,
+                            &val_var._eq(&Z3String::from_str(&ctx, &val).unwrap()),
+                        ],
+                    )
+                    .not(),
+                );
+                labels.push((key.clone(), val));
             }
         }
 

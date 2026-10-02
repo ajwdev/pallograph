@@ -306,7 +306,7 @@ fn run_match(
         .iter()
         .filter(|row| row.len() == 8 && row[0..4] == owner[..])
         .filter(|row| row[6] == ns_val)
-        .filter(|row| kind.map_or(true, |k| row[5] == Value::String(k.to_string())))
+        .filter(|row| kind.is_none_or(|k| row[5] == Value::String(k.to_string())))
         .collect();
     matched.sort();
 
@@ -380,8 +380,8 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     continue;
                 }
                 // Normalize \ meta-prefix to :: so all existing dispatch keeps working.
-                let line = if line.starts_with('\\') {
-                    format!("::{}", &line[1..])
+                let line = if let Some(rest) = line.strip_prefix('\\') {
+                    format!("::{rest}")
                 } else {
                     line
                 };
@@ -406,8 +406,8 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 // Rewrite snapshot->relation references to snapshot__relation before parsing.
                 let line = rewrite_snapshot_refs(&line);
 
-                if line.starts_with('!') {
-                    let cmd = line[1..].trim();
+                if let Some(cmd) = line.strip_prefix('!') {
+                    let cmd = cmd.trim();
                     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
                     let shell_name = std::path::Path::new(&shell)
                         .file_name()
@@ -830,8 +830,8 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 if let Some(rest) = line.strip_prefix("::load-k8s ") {
                     let rest = rest.trim();
                     let source_result: anyhow::Result<Box<dyn crate::edb::FactSource>> =
-                        if rest.starts_with('!') {
-                            let command = rest[1..].trim().to_string();
+                        if let Some(command) = rest.strip_prefix('!') {
+                            let command = command.trim().to_string();
                             Ok(Box::new(ShellSource { command }))
                         } else {
                             Ok(Box::new(K8sManifestsSource {
@@ -877,8 +877,8 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
 
                 // ~pred(old...). pred(new...).  — atomic replace (retract + insert, one eval)
-                if line.starts_with('~') {
-                    let rest = line[1..].trim();
+                if let Some(rest) = line.strip_prefix('~') {
+                    let rest = rest.trim();
                     // Split into two atoms at the boundary between "). " and the next predicate.
                     match split_two_atoms(rest) {
                         Some((old_atom, new_atom)) => {
@@ -887,14 +887,14 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             });
                             match result {
                                 Ok(((old_rel, old_tuple), (new_rel, new_tuple))) => {
-                                    if let Some(arity) = engine.relation_arity(&new_rel) {
-                                        if new_tuple.len() != arity {
-                                            eprintln!(
-                                                "arity mismatch: {new_rel}/{arity} expects {arity} arg(s), got {}",
-                                                new_tuple.len()
-                                            );
-                                            continue;
-                                        }
+                                    if let Some(arity) = engine.relation_arity(&new_rel)
+                                        && new_tuple.len() != arity
+                                    {
+                                        eprintln!(
+                                            "arity mismatch: {new_rel}/{arity} expects {arity} arg(s), got {}",
+                                            new_tuple.len()
+                                        );
+                                        continue;
                                     }
                                     let removed = engine.retract_fact(&old_rel, &old_tuple);
                                     engine.add_fact(new_rel, new_tuple);
@@ -931,18 +931,18 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
 
                 // +pred(args).  — insert ground fact
-                if line.starts_with('+') {
-                    let inner = line[1..].trim_end_matches('.').trim();
+                if let Some(inner) = line.strip_prefix('+') {
+                    let inner = inner.trim_end_matches('.').trim();
                     match parse_ground_tuple(inner) {
                         Ok((rel, tuple)) => {
-                            if let Some(arity) = engine.relation_arity(&rel) {
-                                if tuple.len() != arity {
-                                    eprintln!(
-                                        "arity mismatch: {rel}/{arity} expects {arity} arg(s), got {}",
-                                        tuple.len()
-                                    );
-                                    continue;
-                                }
+                            if let Some(arity) = engine.relation_arity(&rel)
+                                && tuple.len() != arity
+                            {
+                                eprintln!(
+                                    "arity mismatch: {rel}/{arity} expects {arity} arg(s), got {}",
+                                    tuple.len()
+                                );
+                                continue;
                             }
                             if engine.add_fact(rel, tuple) {
                                 if engine.has_session() {
@@ -966,8 +966,8 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
 
                 // -pred(args).  — retract ground fact
-                if line.starts_with('-') {
-                    let inner = line[1..].trim_end_matches('.').trim();
+                if let Some(inner) = line.strip_prefix('-') {
+                    let inner = inner.trim_end_matches('.').trim();
                     match parse_ground_tuple(inner) {
                         Ok((rel, tuple)) => {
                             if engine.retract_fact(&rel, &tuple) {
@@ -1122,7 +1122,7 @@ fn collapse_string_newlines(input: &str) -> String {
             '\n' if in_string => {
                 while chars
                     .peek()
-                    .map_or(false, |c| c.is_ascii_whitespace() && *c != '\n')
+                    .is_some_and(|c| c.is_ascii_whitespace() && *c != '\n')
                 {
                     chars.next();
                 }
@@ -1546,7 +1546,7 @@ fn smt_command(input: &str, store: &EvalStore) {
         "reaches" | "cluster-admin" => {
             // Parse --direct flag out of the token stream before positional args.
             let tokens: Vec<&str> = rest.split_whitespace().collect();
-            let include_direct = tokens.iter().any(|t| *t == "--direct");
+            let include_direct = tokens.contains(&"--direct");
             let mut token_iter = tokens.iter().filter(|t| **t != "--direct").copied();
 
             let (namespace, apigroup, resource, verb, expected) = if subcommand == "cluster-admin" {
@@ -1744,10 +1744,10 @@ fn pretty_format_atom(s: &str) -> String {
                             if c == '"' {
                                 break;
                             }
-                            if c == '\\' {
-                                if let Some(esc) = chars.next() {
-                                    b.push(esc);
-                                }
+                            if c == '\\'
+                                && let Some(esc) = chars.next()
+                            {
+                                b.push(esc);
                             }
                         }
                     }
@@ -1812,8 +1812,7 @@ fn auto_complete_partial(body: &str, store: &EvalStore) -> Option<(String, Vec<S
     } else {
         // Partial call — pad trailing positions with _ so Mangle sees the right arity,
         // but keep the head vars exactly as the user specified.
-        let padding = std::iter::repeat("_")
-            .take(arity - given)
+        let padding = std::iter::repeat_n("_", arity - given)
             .collect::<Vec<_>>()
             .join(", ");
         let new_body = format!("{}({}, {})", rel, inner, padding);

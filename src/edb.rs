@@ -438,15 +438,16 @@ fn emit_selector_requirements(store: &mut MemStore, owner: Vec<Value>, selector:
     }
 
     // Flat selector (Service-style: no matchLabels/matchExpressions) → matchLabels
-    if match_labels.is_none() && match_exprs.is_none() {
-        if let Some(flat) = selector.as_object() {
-            for (k, v) in flat {
-                if let Json::String(vs) = v {
-                    let mut args = owner.clone();
-                    args.push(Value::String(k.clone()));
-                    args.push(Value::String(vs.clone()));
-                    store.add_fact("selector_match_label", args);
-                }
+    if match_labels.is_none()
+        && match_exprs.is_none()
+        && let Some(flat) = selector.as_object()
+    {
+        for (k, v) in flat {
+            if let Json::String(vs) = v {
+                let mut args = owner.clone();
+                args.push(Value::String(k.clone()));
+                args.push(Value::String(vs.clone()));
+                store.add_fact("selector_match_label", args);
             }
         }
     }

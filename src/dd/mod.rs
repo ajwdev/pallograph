@@ -84,12 +84,11 @@ pub fn build_strata(rule_sources: &[String]) -> Result<(Vec<StratumWork>, Vec<St
 
         let mut rule_ids: Vec<InstId> = Vec::new();
         for (i, inst) in ir.insts.iter().enumerate() {
-            if let Inst::Rule { head, .. } = inst {
-                if let Inst::Atom { predicate, .. } = ir.get(*head) {
-                    if stratum_pred_names.contains(ir.resolve_name(*predicate)) {
-                        rule_ids.push(InstId::new(i));
-                    }
-                }
+            if let Inst::Rule { head, .. } = inst
+                && let Inst::Atom { predicate, .. } = ir.get(*head)
+                && stratum_pred_names.contains(ir.resolve_name(*predicate))
+            {
+                rule_ids.push(InstId::new(i));
             }
         }
 
@@ -105,11 +104,11 @@ pub fn build_strata(rule_sources: &[String]) -> Result<(Vec<StratumWork>, Vec<St
         'outer: for &rule_id in &rule_ids {
             if let Inst::Rule { premises, .. } = ir.get(rule_id) {
                 for &premise in premises {
-                    if let Inst::Atom { predicate, .. } = ir.get(premise) {
-                        if stratum_pred_names.contains(ir.resolve_name(*predicate)) {
-                            is_recursive = true;
-                            break 'outer;
-                        }
+                    if let Inst::Atom { predicate, .. } = ir.get(premise)
+                        && stratum_pred_names.contains(ir.resolve_name(*predicate))
+                    {
+                        is_recursive = true;
+                        break 'outer;
                     }
                 }
             }

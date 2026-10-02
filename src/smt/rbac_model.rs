@@ -44,12 +44,6 @@ impl<'ctx> SmtEncoder<'ctx> {
         self.assert_rbac_axioms_named(|rel| store.scan(rel).to_vec(), "");
     }
 
-    /// Same as `assert_rbac_axioms` but reads from a saved `Snapshot` instead
-    /// of a live eval store. Useful for differential access analysis.
-    pub fn assert_rbac_axioms_from_snapshot(&mut self, snap: &crate::snapshot::Snapshot) {
-        self.assert_rbac_axioms_named(|rel| snap.scan_rel(rel), "");
-    }
-
     /// Like `assert_rbac_axioms` but registers all predicates under a name suffix.
     /// Defines `can_<suffix>` and `effective_can_<suffix>` instead of bare names.
     /// Enables two snapshots to coexist in one solver for differential queries.
@@ -57,7 +51,8 @@ impl<'ctx> SmtEncoder<'ctx> {
         self.assert_rbac_axioms_named(|rel| store.scan(rel).to_vec(), suffix);
     }
 
-    /// Like `assert_rbac_axioms_from_snapshot` but registers predicates under a suffix.
+    /// Like `assert_rbac_axioms_as` but reads from a saved `Snapshot` instead of a
+    /// live eval store. Useful for differential access analysis.
     pub fn assert_rbac_axioms_from_snapshot_as(
         &mut self,
         snap: &crate::snapshot::Snapshot,
