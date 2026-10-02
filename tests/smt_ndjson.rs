@@ -112,7 +112,7 @@ fn passing_check_emits_pass_line_and_exits_0() {
 
 #[test]
 fn plain_output_annotates_user_principals_and_exits_1() {
-    let out = run_session("::smt cluster-admin\n::quit\n", "plain");
+    let out = run_session("::smt cluster-admin\n::quit\n", "default");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.contains("admin@example.com (user)"),

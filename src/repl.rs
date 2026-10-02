@@ -91,22 +91,29 @@ fn print_relation_detail(name: &str, store: &EvalStore, doc: Option<&RelationDoc
     }
 }
 
-/// How result-set tuples are rendered. `Plain` and `Pretty` are the original
-/// human display (compact / indented). `Ndjson` emits one JSON object per tuple
-/// on its own line, for piping into `jq`, DuckDB, etc.
+/// How result-set tuples are rendered. `Plain`, named `default` on the command
+/// line and in `\format`, prints `Column = value` pairs, `Compact` prints bare
+/// `rel(a, b, ...)` tuples and `Pretty` indents nested values. `Table` prints
+/// an aligned table with a header row. `Ndjson` emits one JSON object per
+/// tuple on its own line, for piping into `jq`, DuckDB, etc.
 #[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
     #[default]
+    #[value(name = "default")]
     Plain,
+    Compact,
     Pretty,
+    Table,
     Ndjson,
 }
 
 impl OutputFormat {
     fn label(self) -> &'static str {
         match self {
-            OutputFormat::Plain => "plain",
+            OutputFormat::Plain => "default",
+            OutputFormat::Compact => "compact",
             OutputFormat::Pretty => "pretty",
+            OutputFormat::Table => "table",
             OutputFormat::Ndjson => "ndjson",
         }
     }
@@ -141,9 +148,12 @@ fn print_help() {
     println!("\n=== Interactive Query Mode ===");
     println!();
     println!("Querying");
-    println!("  <predicate>                            — show all tuples for a relation");
+    println!("  ?- <predicate>                         - list all tuples for a relation");
     println!(
-        "  <predicate>(arg, _, ...)               — filter by constants (_ or uppercase vars match any)"
+        "  ?- <predicate>(arg, _, ...)            - list tuples matching the constants (_ and missing trailing args match any)"
+    );
+    println!(
+        "  ?- <atom>, <atom>, ...                 - conjunctive query; name variables with uppercase (X) to see their bindings"
     );
     println!(
         "  \\show                                  — list documented relations (arity + description)"
@@ -154,7 +164,7 @@ fn print_help() {
     println!(
         "  \\show <rel...>                         — describe relations (columns, types, docs)"
     );
-    println!("  \\query <body>  / ?- <body>             — evaluate a one-shot conjunctive query");
+    println!("  \\query <body>  / ?- <body>             - same as ?- (\\query is the long form)");
     println!("  \\why <pred>(<args>...)                 — show derivation tree for a fact");
     println!(
         "  \\match <Kind> <ns> <selector>          — objects of <Kind> in <ns> matching a kubectl selector (ns \"\" = cluster-scoped)"
@@ -225,9 +235,9 @@ fn print_help() {
     println!("  \\smtlib <rel> [rel...]                 — dump SMT-LIB 2 encoding of relations");
     println!();
     println!("Session");
-    println!("  \\pretty                                — toggle compact/pretty tuple display");
+    println!("  \\pretty                                - toggle default/pretty tuple display");
     println!(
-        "  \\format plain|pretty|ndjson            — set output format (ndjson = one JSON object per row, for piping)"
+        "  \\format default|compact|pretty|table|ndjson - set output format (compact = bare tuples, table = aligned columns, ndjson = one JSON object per row)"
     );
     println!(
         "  \\reset                                 — clear session state (_N results, \\define rules, + facts), re-evaluate"
@@ -446,7 +456,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     continue;
                 }
                 if line == "::pretty" {
-                    // Shortcut: toggle between plain and pretty display.
+                    // Shortcut: toggle between default and pretty display.
                     format = if format == OutputFormat::Pretty {
                         OutputFormat::Plain
                     } else {
@@ -458,12 +468,16 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 if line == "::format" || line.starts_with("::format ") {
                     let arg = line.strip_prefix("::format").unwrap_or("").trim();
                     match arg {
-                        "plain" => format = OutputFormat::Plain,
+                        "default" => format = OutputFormat::Plain,
+                        "compact" => format = OutputFormat::Compact,
                         "pretty" => format = OutputFormat::Pretty,
+                        "table" => format = OutputFormat::Table,
                         "ndjson" => format = OutputFormat::Ndjson,
                         "" => {} // no arg: just report the current format
                         other => {
-                            eprintln!("Unknown format '{other}'. Use: plain | pretty | ndjson.");
+                            eprintln!(
+                                "Unknown format '{other}'. Use: default | compact | pretty | table | ndjson."
+                            );
                             continue;
                         }
                     }
@@ -531,22 +545,55 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     .or_else(|| line.strip_prefix("?- "))
                 {
                     let raw_body = raw_body.trim();
-                    let (body, vars) = {
-                        let existing = extract_vars(raw_body);
-                        match auto_complete_partial(raw_body, &current_store) {
-                            Some((new_body, added)) => {
-                                let mut all_vars = existing;
-                                all_vars.extend(added);
-                                (new_body, all_vars)
+                    // A typo'd relation is an empty result on the interpreter and
+                    // an opaque error on DD; catch it up front either way.
+                    let mut known = engine.known_relations();
+                    known.extend(current_store.relation_names().map(str::to_string));
+                    let unknown: Vec<String> = body_relations(raw_body)
+                        .into_iter()
+                        .filter(|r| !known.contains(r))
+                        .collect();
+                    if !unknown.is_empty() {
+                        for r in &unknown {
+                            match suggest(r, &known) {
+                                s if s.is_empty() => eprintln!("Unknown relation '{r}'."),
+                                s => eprintln!(
+                                    "Unknown relation '{r}'. Did you mean: {}?",
+                                    s.join(", ")
+                                ),
                             }
-                            None if existing.is_empty() => {
-                                eprintln!(
-                                    "No variables found — use uppercase names for variables."
-                                );
-                                continue;
-                            }
-                            None => (raw_body.to_string(), existing),
                         }
+                        continue;
+                    }
+                    let existing = extract_vars(raw_body);
+                    let single = single_atom(raw_body);
+                    let cols = single.map(|r| column_keys(engine, r)).unwrap_or_default();
+                    if let Some(rel) = single {
+                        let given = split_atom(raw_body)
+                            .map_or(0, |(_, inner)| count_top_level_args(inner));
+                        if let Some(arity) = relation_arity(&current_store, rel, &cols)
+                            && given > arity
+                        {
+                            eprintln!("{rel} has {arity} columns, got {given} arguments.");
+                            continue;
+                        }
+                        // No named variables: list whole tuples, not bindings.
+                        if existing.is_empty() {
+                            list_tuples(engine, &current_store, format, rel, raw_body, &cols);
+                            continue;
+                        }
+                    } else if existing.is_empty() {
+                        eprintln!("No variables to bind. Name one (e.g. X).");
+                        continue;
+                    }
+                    let (body, vars) = match auto_complete_partial(raw_body, &current_store, &cols)
+                    {
+                        Some((new_body, added)) => {
+                            let mut all = existing;
+                            all.extend(added);
+                            (new_body, all)
+                        }
+                        None => (raw_body.to_string(), existing),
                     };
                     let body = body.as_str();
                     let result_name = format!("_{query_counter}");
@@ -564,8 +611,17 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 eprintln!("No results.");
                                 engine.remove_rules_for(&result_name);
                             } else {
+                                if format == OutputFormat::Table {
+                                    let rows: Vec<Vec<String>> = tuples
+                                        .iter()
+                                        .map(|t| t.iter().map(|v| v.to_string()).collect())
+                                        .collect();
+                                    print!("{}", render_table(&vars, &rows));
+                                }
                                 for tuple in &tuples {
-                                    if format == OutputFormat::Ndjson {
+                                    if format == OutputFormat::Table {
+                                        // Printed above as one table.
+                                    } else if format == OutputFormat::Ndjson {
                                         // Keys are the query's variable names.
                                         println!("{}", ndjson_row(tuple, |i| vars.get(i).cloned()));
                                     } else {
@@ -1028,78 +1084,11 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     continue;
                 }
 
-                if line.contains('(') {
-                    match query::parse_query(&line) {
-                        Ok(q) => {
-                            let live: Vec<Vec<mangle_common::Value>>;
-                            let rows: &[Vec<mangle_common::Value>] = if engine.has_session() {
-                                live = engine.query_live(&q.predicate);
-                                &live
-                            } else {
-                                current_store.scan(&q.predicate)
-                            };
-                            let matched = query::filter_tuples(rows, &q);
-                            let pred = &q.predicate;
-                            if matched.is_empty() {
-                                eprintln!("No entries for '{pred}'.");
-                            } else {
-                                let count = matched.len();
-                                let cols = column_keys(engine, pred);
-                                for tuple in matched {
-                                    if format == OutputFormat::Ndjson {
-                                        println!("{}", ndjson_row(tuple, |i| cols.get(i).cloned()));
-                                    } else {
-                                        let args: Vec<String> = tuple
-                                            .iter()
-                                            .map(|v| {
-                                                if format == OutputFormat::Pretty {
-                                                    format_pretty(v)
-                                                } else {
-                                                    v.to_string()
-                                                }
-                                            })
-                                            .collect();
-                                        println!("  {pred}({})", args.join(", "));
-                                    }
-                                }
-                                eprintln!("Found {} entries:", count);
-                            }
-                        }
-                        Err(e) => eprintln!("Parse error: {e}"),
-                    }
+                // Everything else is not a command. Queries go through `?-`.
+                if line.starts_with("::") {
+                    eprintln!("Unknown command: {line} (try \\help)");
                 } else {
-                    // Bare predicate name (with optional arity like pred/3 stripped)
-                    let pred = line.split('/').next().unwrap_or(&line).trim();
-                    let live: Vec<Vec<mangle_common::Value>>;
-                    let tuples: &[Vec<mangle_common::Value>] = if engine.has_session() {
-                        live = engine.query_live(pred);
-                        &live
-                    } else {
-                        current_store.scan(pred)
-                    };
-                    if tuples.is_empty() {
-                        eprintln!("No entries for '{pred}'.");
-                    } else {
-                        let cols = column_keys(engine, pred);
-                        for tuple in tuples {
-                            if format == OutputFormat::Ndjson {
-                                println!("{}", ndjson_row(tuple, |i| cols.get(i).cloned()));
-                            } else {
-                                let args: Vec<String> = tuple
-                                    .iter()
-                                    .map(|v| {
-                                        if format == OutputFormat::Pretty {
-                                            format_pretty(v)
-                                        } else {
-                                            v.to_string()
-                                        }
-                                    })
-                                    .collect();
-                                println!("  {pred}({})", args.join(", "));
-                            }
-                        }
-                        eprintln!("Found {} entries:", tuples.len());
-                    }
+                    eprintln!("Not a command. Queries start with ?-, e.g. ?- {line}");
                 }
             }
             Err(ReadlineError::Interrupted) => continue,
@@ -1974,42 +1963,25 @@ fn pretty_format_atom(s: &str) -> String {
     b
 }
 
-/// If `body` is a single partial-application atom with no free variables,
-/// infer the remaining arity from the store and append generated vars.
-/// Returns (new_body, vars) or None if the relation isn't in the store.
-fn auto_complete_partial(body: &str, store: &EvalStore) -> Option<(String, Vec<String>)> {
-    let (rel, inner) = if let Some(paren) = body.find('(') {
-        let inner = body[paren + 1..].trim_end_matches(')').trim();
-        (body[..paren].trim(), inner)
-    } else {
-        (body.trim(), "")
-    };
-
-    let arity = store.scan(rel).first().map(|t| t.len())?;
-    let given = if inner.is_empty() {
-        0
-    } else {
-        count_top_level_args(inner)
-    };
-
-    if given >= arity {
+/// If `body` is a single atom with named variables but fewer arguments than the
+/// relation has columns, pad the rest with `_` so Mangle sees the right arity.
+/// Returns (new_body, extra_vars) or None if no padding is needed or the arity
+/// is unknown.
+fn auto_complete_partial(
+    body: &str,
+    store: &EvalStore,
+    cols: &[String],
+) -> Option<(String, Vec<String>)> {
+    let (rel, inner) = split_atom(body)?;
+    let arity = relation_arity(store, rel, cols)?;
+    let given = count_top_level_args(inner);
+    if given == 0 || given >= arity {
         return None;
     }
-
-    if given == 0 {
-        // Bare call — generate named vars for all positions so the head has something to bind.
-        let auto_vars: Vec<String> = (0..arity).map(|i| format!("V{i}")).collect();
-        let new_body = format!("{}({})", rel, auto_vars.join(", "));
-        Some((new_body, auto_vars))
-    } else {
-        // Partial call — pad trailing positions with _ so Mangle sees the right arity,
-        // but keep the head vars exactly as the user specified.
-        let padding = std::iter::repeat_n("_", arity - given)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let new_body = format!("{}({}, {})", rel, inner, padding);
-        Some((new_body, vec![]))
-    }
+    let padding = std::iter::repeat_n("_", arity - given)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some((format!("{rel}({inner}, {padding})"), vec![]))
 }
 
 /// Build a map from (relation, tuple) → list of premise-sets that derived it.
@@ -2159,22 +2131,348 @@ fn rewrite_snapshot_refs(s: &str) -> String {
 }
 
 fn count_top_level_args(s: &str) -> usize {
+    split_top_level_args(s).len()
+}
+
+/// Split an argument list on top-level commas (not inside strings or brackets).
+fn split_top_level_args(s: &str) -> Vec<&str> {
     if s.trim().is_empty() {
-        return 0;
+        return Vec::new();
     }
     let mut depth: usize = 0;
     let mut in_string = false;
-    let mut count = 1usize;
-    for ch in s.chars() {
+    let mut start = 0;
+    let mut out = Vec::new();
+    for (i, ch) in s.char_indices() {
         match ch {
             '"' => in_string = !in_string,
             '(' | '[' | '{' if !in_string => depth += 1,
             ')' | ']' | '}' if !in_string => depth = depth.saturating_sub(1),
-            ',' if !in_string && depth == 0 => count += 1,
+            ',' if !in_string && depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
             _ => {}
         }
     }
-    count
+    out.push(&s[start..]);
+    out
+}
+
+/// Split `rel(args)` into the relation name and the text between the outer
+/// parentheses. None unless the body is a single atom.
+fn split_atom(body: &str) -> Option<(&str, &str)> {
+    let body = body.trim();
+    let open = body.find('(')?;
+    // The paren opened here must close at the very end, or this is a conjunction.
+    let mut depth = 0usize;
+    let mut in_string = false;
+    for (i, ch) in body[open..].char_indices() {
+        match ch {
+            '"' => in_string = !in_string,
+            '(' if !in_string => depth += 1,
+            ')' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return (open + i + 1 == body.len())
+                        .then(|| (body[..open].trim(), &body[open + 1..open + i]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The relation name when `body` is exactly one plain atom (`rel`, `rel()` or
+/// `rel(args)`), not a conjunction, negation or builtin call.
+fn single_atom(body: &str) -> Option<&str> {
+    let body = body.trim();
+    let rel = if body.contains('(') {
+        split_atom(body)?.0
+    } else {
+        body
+    };
+    (body_relations(body) == [rel]).then_some(rel)
+}
+
+/// Longest cell, in characters, before it is cut with a trailing `…`.
+const TABLE_MAX_WIDTH: usize = 64;
+
+/// Render `rows` as a left-aligned table with a header row and a dashed
+/// separator. Cells are clipped to `TABLE_MAX_WIDTH` and newlines are escaped
+/// so every row stays on one line.
+fn render_table(headers: &[String], rows: &[Vec<String>]) -> String {
+    let clip = |s: &str| {
+        let s = s.replace('\n', "\\n");
+        if s.chars().count() > TABLE_MAX_WIDTH {
+            let head: String = s.chars().take(TABLE_MAX_WIDTH - 1).collect();
+            format!("{head}…")
+        } else {
+            s
+        }
+    };
+    let headers: Vec<String> = headers.iter().map(|h| clip(h)).collect();
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| r.iter().map(|c| clip(c)).collect())
+        .collect();
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i >= widths.len() {
+                widths.push(0);
+            }
+            widths[i] = widths[i].max(cell.chars().count());
+        }
+    }
+    let line = |cells: &[String]| {
+        let parts: Vec<String> = widths
+            .iter()
+            .enumerate()
+            .map(|(i, w)| format!("{:<w$}", cells.get(i).map_or("", String::as_str), w = *w))
+            .collect();
+        format!("  {}\n", parts.join("  ").trim_end())
+    };
+    let mut out = line(&headers);
+    let rule: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
+    out.push_str(&line(&rule));
+    for row in &rows {
+        out.push_str(&line(row));
+    }
+    out
+}
+
+/// Print the tuples of `rel` matching the constants in `body`, one row per
+/// line (`Column = value, ...`, or `rel(a, b, ...)` in compact format). `_` and
+/// missing trailing arguments match anything.
+fn list_tuples(
+    engine: &Engine,
+    store: &EvalStore,
+    format: OutputFormat,
+    rel: &str,
+    body: &str,
+    cols: &[String],
+) {
+    let live: Vec<Vec<Value>>;
+    let rows: &[Vec<Value>] = if engine.has_session() {
+        live = engine.query_live(rel);
+        &live
+    } else {
+        store.scan(rel)
+    };
+    let q = match split_atom(body) {
+        Some((_, inner)) if !inner.trim().is_empty() => match query::parse_query(body) {
+            Ok(q) => q,
+            Err(e) => {
+                eprintln!("Parse error: {e}");
+                return;
+            }
+        },
+        _ => query::ParsedQuery {
+            predicate: rel.to_string(),
+            args: vec![],
+        },
+    };
+    let matched = query::filter_tuples(rows, &q);
+    if matched.is_empty() {
+        eprintln!("No results.");
+        return;
+    }
+    if format == OutputFormat::Table {
+        let width = matched.iter().map(|t| t.len()).max().unwrap_or(0);
+        let headers: Vec<String> = (0..width)
+            .map(|i| cols.get(i).cloned().unwrap_or_else(|| format!("c{i}")))
+            .collect();
+        let rows: Vec<Vec<String>> = matched
+            .iter()
+            .map(|t| t.iter().map(|v| v.to_string()).collect())
+            .collect();
+        print!("{}", render_table(&headers, &rows));
+        eprintln!("Found {} result(s).", matched.len());
+        return;
+    }
+    let show = |v: &Value| {
+        if format == OutputFormat::Pretty {
+            format_pretty(v)
+        } else {
+            v.to_string()
+        }
+    };
+    for tuple in &matched {
+        match format {
+            OutputFormat::Ndjson => println!("{}", ndjson_row(tuple, |i| cols.get(i).cloned())),
+            OutputFormat::Compact => {
+                let args: Vec<String> = tuple.iter().map(show).collect();
+                println!("  {rel}({})", args.join(", "));
+            }
+            // Default and Pretty name each column, like a Prolog answer.
+            _ => {
+                let parts: Vec<String> = tuple
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let name = cols.get(i).cloned().unwrap_or_else(|| format!("c{i}"));
+                        format!("{name} = {}", show(v))
+                    })
+                    .collect();
+                println!("  {}", parts.join(", "));
+            }
+        }
+    }
+    eprintln!("Found {} result(s).", matched.len());
+}
+
+/// Column count of `rel`: from a stored row, else from its Decl.
+fn relation_arity(store: &EvalStore, rel: &str, cols: &[String]) -> Option<usize> {
+    store
+        .scan(rel)
+        .first()
+        .map(|t| t.len())
+        .or_else(|| (!cols.is_empty()).then_some(cols.len()))
+}
+
+/// Relation names a query body refers to: identifiers directly followed by `(`,
+/// or the whole body when it is a bare name. Builtins (`:string:contains`) and
+/// functions (`fn:plus`) contain `:` and are skipped, as are variables.
+fn body_relations(body: &str) -> Vec<String> {
+    let body = body.trim();
+    let name_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | ':');
+    let is_relation = |t: &str| {
+        !t.contains(':')
+            && t.chars()
+                .next()
+                .is_some_and(|c| c.is_lowercase() || c == '_')
+    };
+    let mut out: Vec<String> = Vec::new();
+    let push = |t: &str, out: &mut Vec<String>| {
+        if is_relation(t) && !out.iter().any(|o| o == t) {
+            out.push(t.to_string());
+        }
+    };
+    if body.chars().all(name_char) {
+        push(body, &mut out);
+        return out;
+    }
+    let mut in_string = false;
+    let mut token = String::new();
+    for ch in body.chars() {
+        match ch {
+            '"' => {
+                in_string = !in_string;
+                token.clear();
+            }
+            _ if in_string => {}
+            '(' => {
+                push(&token, &mut out);
+                token.clear();
+            }
+            c if name_char(c) => token.push(c),
+            _ => token.clear(),
+        }
+    }
+    out
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let sub = prev[j] + usize::from(ca != *cb);
+            cur.push(sub.min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// Up to three known relations close to `name`, nearest first. Query results
+/// (`_N`) and snapshot copies (`x__rel`) are not suggested.
+fn suggest(name: &str, known: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut scored: Vec<(usize, &String)> = known
+        .iter()
+        .filter(|k| !k.starts_with('_') && !k.contains("__"))
+        .map(|k| (edit_distance(name, k), k))
+        .filter(|(d, _)| *d <= 2.max(name.len() / 4))
+        .collect();
+    scored.sort();
+    scored.into_iter().take(3).map(|(_, k)| k.clone()).collect()
+}
+
+#[cfg(test)]
+mod query_helper_tests {
+    use super::*;
+
+    #[test]
+    fn finds_relations_in_bodies() {
+        assert_eq!(body_relations("direct_perms"), ["direct_perms"]);
+        assert_eq!(body_relations("direct_perms()"), ["direct_perms"]);
+        assert_eq!(
+            body_relations(
+                r#"pkg.hop(R, P, I, Id, M), :string:contains(M, "x(y"), !foo(X), fn:plus(1, 2) = Z"#
+            ),
+            ["pkg.hop", "foo"]
+        );
+        assert!(body_relations("X").is_empty());
+    }
+
+    #[test]
+    fn suggests_near_names_only() {
+        let known: std::collections::HashSet<String> = [
+            "direct_perm",
+            "indirect_perm",
+            "pod",
+            "_0",
+            "a__direct_perm",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            suggest("direct_perms", &known),
+            ["direct_perm", "indirect_perm"]
+        );
+        assert!(suggest("zzzzzzzz", &known).is_empty());
+    }
+
+    #[test]
+    fn splits_args_outside_strings_and_brackets() {
+        assert_eq!(
+            split_top_level_args(r#"_, "a, b", [1, 2], f(x, y)"#).len(),
+            4
+        );
+        assert!(split_top_level_args("  ").is_empty());
+    }
+
+    #[test]
+    fn table_aligns_clips_and_escapes() {
+        let w = TABLE_MAX_WIDTH;
+        let headers = vec!["Name".to_string(), "Verb".to_string()];
+        let rows = vec![
+            vec!["\"a\"".to_string(), "get".to_string()],
+            vec!["x".repeat(w + 8), "line\nbreak".to_string()],
+        ];
+        let out = render_table(&headers, &rows);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], format!("  Name{}  Verb", " ".repeat(w - 4)));
+        assert_eq!(lines[1], format!("  {}  {}", "-".repeat(w), "-".repeat(11)));
+        assert_eq!(lines[2], format!("  \"a\"{}  get", " ".repeat(w - 3)));
+        assert_eq!(lines[3], format!("  {}…  line\\nbreak", "x".repeat(w - 1)));
+        assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn single_atom_detection() {
+        assert_eq!(single_atom("direct_perm"), Some("direct_perm"));
+        assert_eq!(single_atom("direct_perm()"), Some("direct_perm"));
+        assert_eq!(single_atom(r#"pkg.hop(_, _, "x")"#), Some("pkg.hop"));
+        assert_eq!(single_atom("a(X), b(Y)"), None);
+        assert_eq!(single_atom("!a(X)"), None);
+        assert_eq!(single_atom(r#":string:contains("a", "b")"#), None);
+        assert_eq!(single_atom("X"), None);
+    }
 }
 
 #[cfg(test)]
