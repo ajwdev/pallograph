@@ -86,6 +86,10 @@ impl<'ctx> SmtEncoder<'ctx> {
         // paths_for_principal always finds them regardless of which snapshot is current.
         self.facts.insert("rolebinding_roleref".to_string(), scan("rolebinding_roleref"));
         self.facts.insert("clusterrolebinding_roleref".to_string(), scan("clusterrolebinding_roleref"));
+        // Role permission tables: used by collect_binding_paths to filter displayed
+        // bindings to only those that actually grant the queried permission.
+        self.facts.insert("role_perm".to_string(), scan("role_perm"));
+        self.facts.insert("clusterrole_perm".to_string(), scan("clusterrole_perm"));
         for rel in &["exec_reachable_sa", "token_accessible_sa", "pod_creatable_sa", "impersonatable_sa", "escalation_hop"] {
             self.facts.insert(rel.to_string(), scan(rel));
         }

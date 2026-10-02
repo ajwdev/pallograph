@@ -1071,25 +1071,75 @@ fn extract_vars(body: &str) -> Vec<String> {
     vars
 }
 
+fn fmt_binding(p: &smt::AccessPath) -> String {
+    let ns = if p.binding_namespace.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", p.binding_namespace)
+    };
+    format!("{} {}{} → {} {}", p.binding_kind, ns, p.binding_name, p.role_kind, p.role_name)
+}
+
+fn mech_str(mech: &str) -> String {
+    if mech.is_empty() { String::new() } else { format!(" [{mech}]") }
+}
+
+/// Serialize an access path to a stable string key for grouping.
+fn path_sig(p: &smt::AccessPath) -> String {
+    let hops: String = p.hops.iter().map(|(a, b)| format!("{a}#{b}")).collect::<Vec<_>>().join(",");
+    format!("{}|{}|{}|{}", hops, p.binding_kind, p.binding_namespace, p.binding_name)
+}
+
 fn print_violation_paths(paths: &[smt::AccessPath]) {
+    // Group paths by identical hop chain: print "via X [mech]" once, then list
+    // all bindings of the target underneath it rather than repeating the header.
+    let mut by_hops: BTreeMap<&Vec<(String, String)>, Vec<&smt::AccessPath>> = BTreeMap::new();
     for p in paths {
-        let binding = format!(
-            "{} {}/{} → {} {}",
-            p.binding_kind, p.binding_namespace, p.binding_name, p.role_kind, p.role_name
-        );
-        if p.hops.is_empty() {
-            println!("          {binding}");
-        } else {
-            // First hop printed as "via <identity> [mechanism]"
-            let (id, mech) = &p.hops[0];
-            let mech_s = if mech.is_empty() { String::new() } else { format!(" [{mech}]") };
-            println!("          via {id}{mech_s}");
-            // Subsequent hops each get a "  → via" prefix
-            for (id, mech) in &p.hops[1..] {
-                let mech_s = if mech.is_empty() { String::new() } else { format!(" [{mech}]") };
-                println!("            → via {id}{mech_s}");
+        by_hops.entry(&p.hops).or_default().push(p);
+    }
+    for (hops, group) in &by_hops {
+        if hops.is_empty() {
+            for p in group {
+                println!("          {}", fmt_binding(p));
             }
-            println!("            → {binding}");
+        } else {
+            let (id, mech) = &hops[0];
+            println!("          via {id}{}", mech_str(mech));
+            for (id, mech) in hops[1..].iter() {
+                println!("            → via {id}{}", mech_str(mech));
+            }
+            for p in group {
+                println!("            → {}", fmt_binding(p));
+            }
+        }
+    }
+}
+
+/// Print reaches/cluster-admin violations path-first: show each distinct
+/// escalation path once and list the principals that can use it underneath.
+/// This avoids repeating the same path for every one of N principals.
+fn print_reaches_grouped(violations: &[smt::Violation]) {
+    // Preserve first-seen order for paths; use a Vec<key> + BTreeMap for lookup.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: BTreeMap<String, (Vec<smt::AccessPath>, Vec<String>)> = BTreeMap::new();
+    for v in violations {
+        let sig: String = {
+            let mut parts: Vec<String> = v.paths.iter().map(path_sig).collect();
+            parts.sort();
+            parts.join(";")
+        };
+        if !groups.contains_key(&sig) {
+            order.push(sig.clone());
+        }
+        let entry = groups.entry(sig).or_insert_with(|| (v.paths.clone(), Vec::new()));
+        entry.1.push(v.principal.clone());
+    }
+    for sig in &order {
+        let (paths, principals) = &groups[sig];
+        print_violation_paths(paths);
+        println!("          {} principal(s):", principals.len());
+        for p in principals {
+            println!("            {p}");
         }
     }
 }
@@ -1333,17 +1383,22 @@ fn smt_command(input: &str, store: &EvalStore) {
             let mut enc = smt::SmtEncoder::new(&ctx);
             enc.assert_rbac_axioms(store);
 
-            let violations = enc.check_reaches(namespace, apigroup, resource, verb, &expected, include_direct);
-            if violations.is_empty() {
+            let direct = enc.direct_violations(namespace, apigroup, resource, verb);
+            let via = enc.check_reaches(namespace, apigroup, resource, verb, &expected, include_direct);
+
+            if direct.is_empty() && via.is_empty() {
                 println!("PASS  effective_can(_, {namespace:?}, {apigroup:?}, {resource:?}, {verb:?})");
             } else {
-                println!(
-                    "FAIL  {} principal(s) can reach ({namespace:?}, {apigroup:?}, {resource:?}, {verb:?}):",
-                    violations.len()
-                );
-                for v in &violations {
-                    println!("        {}", v.principal);
-                    print_violation_paths(&v.paths);
+                let total = direct.len() + via.len();
+                println!("FAIL  {total} principal(s) can reach ({namespace:?}, {apigroup:?}, {resource:?}, {verb:?}):");
+                if !direct.is_empty() {
+                    println!("  direct ({}):", direct.len());
+                    print_reaches_grouped(&direct);
+                }
+                if !via.is_empty() {
+                    println!();
+                    println!("  via escalation ({}):", via.len());
+                    print_reaches_grouped(&via);
                 }
             }
         }
@@ -1678,6 +1733,35 @@ fn count_top_level_args(s: &str) -> usize {
         }
     }
     count
+}
+
+#[cfg(test)]
+mod binding_format_tests {
+    use super::fmt_binding;
+    use crate::smt::AccessPath;
+
+    fn path(binding_kind: &'static str, ns: &str, role_kind: &'static str) -> AccessPath {
+        AccessPath {
+            binding_kind,
+            binding_namespace: ns.into(),
+            binding_name: "b".into(),
+            role_kind,
+            role_name: "r".into(),
+            hops: vec![],
+        }
+    }
+
+    #[test]
+    fn cluster_scoped_binding_has_no_leading_slash() {
+        let p = path("ClusterRoleBinding", "", "ClusterRole");
+        assert_eq!(fmt_binding(&p), "ClusterRoleBinding b → ClusterRole r");
+    }
+
+    #[test]
+    fn namespaced_binding_is_prefixed_with_its_namespace() {
+        let p = path("RoleBinding", "kube-system", "Role");
+        assert_eq!(fmt_binding(&p), "RoleBinding kube-system/b → Role r");
+    }
 }
 
 #[cfg(test)]
