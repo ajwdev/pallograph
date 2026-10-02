@@ -1,8 +1,6 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-#![feature(iter_intersperse)]
-
 //! Pallograph library crate — exposes the engine and evaluation backend for
 //! integration tests and benchmarks.  The binary entry point is `main.rs`.
 

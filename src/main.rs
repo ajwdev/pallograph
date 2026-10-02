@@ -1,8 +1,6 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-#![feature(iter_intersperse)]
-
 mod config;
 mod dd;
 mod edb;

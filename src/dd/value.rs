@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn round_trip_scalars() {
         assert_eq!(round_trip(Value::Number(42)), Value::Number(42));
-        assert_eq!(round_trip(Value::Float(3.14)), Value::Float(3.14));
+        assert_eq!(round_trip(Value::Float(2.5)), Value::Float(2.5));
         assert_eq!(
             round_trip(Value::String("hello".into())),
             Value::String("hello".into())

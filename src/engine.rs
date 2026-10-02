@@ -188,8 +188,8 @@ impl CompiledProgram {
             vars.iter()
                 .map(|v| self.ir.resolve_name(*v))
                 .map(|v| { if v.starts_with("_Anon") { "_" } else { v } })
-                .intersperse_with(|| ", ")
-                .collect::<String>()
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     }
 
@@ -290,8 +290,8 @@ impl CompiledProgram {
                             self.ir.resolve_name(*relation),
                             args.iter()
                                 .map(|arg| self.format_operand(arg))
-                                .intersperse_with(|| ", ".to_string())
-                                .collect::<String>()
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         )?;
                     }
                     Condition::Call { function, args } => {
@@ -314,8 +314,8 @@ impl CompiledProgram {
                 self.ir.resolve_name(*relation),
                 args.iter()
                     .map(|arg| self.format_operand(arg))
-                    .intersperse_with(|| ", ".to_string())
-                    .collect::<String>()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )?),
             Op::MatchField {
                 struct_op,
@@ -360,8 +360,8 @@ impl CompiledProgram {
                 pred_names
                     .iter()
                     .map(|s| format!("`{}`", s))
-                    .intersperse_with(|| ", ".to_string())
-                    .collect::<String>()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
 
             // Step B: collect rule_ids — must finish before calling Planner (&mut ir)
