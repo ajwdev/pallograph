@@ -14,14 +14,14 @@
   in {
     devShell = pkgs.mkShell {
       buildInputs = with pkgs; [
-        (rust.latest.withComponents [
+        (rust.stable.withComponents [
           "cargo"
           "clippy"
           "rust-src"
           "rustc"
           "rustfmt"
         ])
-        rust.latest.rust-analyzer
+        rust.stable.rust-analyzer
         pkg-config
         kind
         kubectl
