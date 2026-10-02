@@ -208,6 +208,9 @@ fn print_help() {
         "  \\smt cluster-admin [p...]              — shorthand for reaches \"\" \"*\" \"*\" \"*\""
     );
     println!(
+        "                                           reaches/cluster-admin flags: --direct (also list principals with a direct grant), --all (include built-in k8s/EKS principals, hidden by default)"
+    );
+    println!(
         "  \\smt node_selector                     — find pods whose nodeSelector no node satisfies"
     );
     println!(
@@ -1547,7 +1550,11 @@ fn smt_command(input: &str, store: &EvalStore) {
             // Parse --direct flag out of the token stream before positional args.
             let tokens: Vec<&str> = rest.split_whitespace().collect();
             let include_direct = tokens.contains(&"--direct");
-            let mut token_iter = tokens.iter().filter(|t| **t != "--direct").copied();
+            let include_builtins = tokens.contains(&"--all");
+            let mut token_iter = tokens
+                .iter()
+                .filter(|t| !matches!(**t, "--direct" | "--all"))
+                .copied();
 
             let (namespace, apigroup, resource, verb, expected) = if subcommand == "cluster-admin" {
                 let expected_owned: Vec<String> = token_iter
@@ -1563,10 +1570,10 @@ fn smt_command(input: &str, store: &EvalStore) {
                     token_iter.next(),
                 ) else {
                     eprintln!(
-                        "Usage: ::smt reaches <namespace> <apigroup> <resource> <verb> [--direct] [expected ...]"
+                        "Usage: ::smt reaches <namespace> <apigroup> <resource> <verb> [--direct] [--all] [expected ...]"
                     );
                     eprintln!(
-                        "       Use ::smt cluster-admin [--direct] to check for cluster-admin level access."
+                        "       Use ::smt cluster-admin [--direct] [--all] to check for cluster-admin level access."
                     );
                     return;
                 };
@@ -1589,6 +1596,7 @@ fn smt_command(input: &str, store: &EvalStore) {
             let mut enc = smt::SmtEncoder::new(&ctx);
             enc.assert_rbac_axioms(store);
 
+            enc.include_builtins = include_builtins;
             let direct = enc.direct_violations(namespace, apigroup, resource, verb);
             let via = enc.check_reaches(
                 namespace,

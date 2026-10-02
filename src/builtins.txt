@@ -1,0 +1,76 @@
+# Built-in Kubernetes and EKS system principals.
+#
+# These are filtered from SMT output by default: their elevated permissions
+# are granted by the platform, not by user configuration, and surfacing them
+# as findings adds noise without insight.
+#
+# Syntax:
+#   pattern*   - prefix match (everything starting with "pattern")
+#   pattern    - exact match
+#
+# Use ::smt cluster-admin --all to include builtins.
+#
+# Controller list generated from upstream k8s via:
+#   ast-grep run -p 'saRolePrefix + $STR' -l go --json controller_policy.go \
+#     | jq -r '.[].metaVariables.single.STR.text' | tr -d '"'
+
+# ---- EKS system principals ----
+eks:*
+
+# ---- Kubernetes system users ----
+system:kube-controller-manager
+system:kube-scheduler
+system:kube-proxy
+system:node-proxier
+
+# ---- Kubernetes system groups ----
+system:bootstrappers
+system:nodes
+system:monitoring
+
+# ---- Kubernetes built-in controller service accounts (kube-system) ----
+# Source: plugin/pkg/auth/authorizer/rbac/bootstrappolicy/controller_policy.go
+system:serviceaccount:kube-system:attachdetach-controller
+system:serviceaccount:kube-system:certificate-controller
+system:serviceaccount:kube-system:clusterrole-aggregation-controller
+system:serviceaccount:kube-system:cronjob-controller
+system:serviceaccount:kube-system:daemon-set-controller
+system:serviceaccount:kube-system:deployment-controller
+system:serviceaccount:kube-system:device-taint-eviction-controller
+system:serviceaccount:kube-system:disruption-controller
+system:serviceaccount:kube-system:endpoint-controller
+system:serviceaccount:kube-system:endpointslice-controller
+system:serviceaccount:kube-system:endpointslicemirroring-controller
+system:serviceaccount:kube-system:ephemeral-volume-controller
+system:serviceaccount:kube-system:expand-controller
+system:serviceaccount:kube-system:generic-garbage-collector
+system:serviceaccount:kube-system:horizontal-pod-autoscaler
+system:serviceaccount:kube-system:job-controller
+system:serviceaccount:kube-system:kube-apiserver-serving-clustertrustbundle-publisher
+system:serviceaccount:kube-system:legacy-service-account-token-cleaner
+system:serviceaccount:kube-system:namespace-controller
+system:serviceaccount:kube-system:node-controller
+system:serviceaccount:kube-system:persistent-volume-binder
+system:serviceaccount:kube-system:pod-garbage-collector
+system:serviceaccount:kube-system:podcertificaterequestcleaner
+system:serviceaccount:kube-system:podgroup-protection-controller
+system:serviceaccount:kube-system:pv-protection-controller
+system:serviceaccount:kube-system:pvc-protection-controller
+system:serviceaccount:kube-system:replicaset-controller
+system:serviceaccount:kube-system:replication-controller
+system:serviceaccount:kube-system:resource-claim-controller
+system:serviceaccount:kube-system:resourcepoolstatusrequest-controller
+system:serviceaccount:kube-system:resourcequota-controller
+system:serviceaccount:kube-system:root-ca-cert-publisher
+system:serviceaccount:kube-system:route-controller
+system:serviceaccount:kube-system:selinux-warning-controller
+system:serviceaccount:kube-system:service-account-controller
+system:serviceaccount:kube-system:service-cidrs-controller
+system:serviceaccount:kube-system:service-controller
+system:serviceaccount:kube-system:statefulset-controller
+system:serviceaccount:kube-system:storage-version-garbage-collector
+system:serviceaccount:kube-system:storage-version-migrator-controller
+system:serviceaccount:kube-system:ttl-after-finished-controller
+system:serviceaccount:kube-system:ttl-controller
+system:serviceaccount:kube-system:validatingadmissionpolicy-status-controller
+system:serviceaccount:kube-system:volumeattributesclass-protection-controller
