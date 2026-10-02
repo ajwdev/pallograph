@@ -52,5 +52,13 @@ harness = false
 name = "incremental"
 harness = false
 
+[[bench]]
+name = "real_bulk_load"
+harness = false
+
+[[bench]]
+name = "real_incremental"
+harness = false
+
 [features]
 z3-static = ["z3/static-link-z3"]
