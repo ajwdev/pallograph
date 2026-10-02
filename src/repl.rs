@@ -219,6 +219,9 @@ fn print_help() {
     println!(
         "  \\smt karpenter                         — find nodeSelector gaps in Karpenter NodePool coverage"
     );
+    println!(
+        "                                           (--format ndjson: one JSON object per result/violation; exit status 1 if any check FAILs)"
+    );
     println!("  \\smtlib <rel> [rel...]                 — dump SMT-LIB 2 encoding of relations");
     println!();
     println!("Session");
@@ -342,7 +345,9 @@ fn run_match(
     eprintln!("Found {} match(es).", matched.len());
 }
 
-pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Result<()> {
+/// Run the REPL until EOF or `::quit`. Returns `false` if any `::smt` check
+/// reported a failure during the session (the binary then exits with status 1).
+pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Result<bool> {
     // Banner is interactive chrome: skip it when stdout is redirected so a
     // piped session (e.g. `... | pallograph --format ndjson > out.json`) yields
     // clean data. Status/diagnostic lines go to stderr for the same reason.
@@ -364,6 +369,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
     let mut current_store = store;
     let mut format = format;
+    let mut had_failure = false;
     let mut query_counter: u32 = 0;
     let mut snapshot_counter: u64 = 0;
     let mut snapshot_names: HashMap<String, u64> = HashMap::new();
@@ -658,7 +664,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
 
                 if let Some(rest) = line.strip_prefix("::smt ") {
-                    smt_command(rest.trim(), &current_store);
+                    if !smt_command(rest.trim(), &current_store, format) {
+                        had_failure = true;
+                    }
                     continue;
                 }
 
@@ -1104,7 +1112,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
     }
 
     let _ = rl.save_history(&history_path);
-    Ok(())
+    Ok(!had_failure)
 }
 
 /// Split a multi-line pasted string into individual commands, keeping lines
@@ -1270,7 +1278,9 @@ fn print_violation_paths(paths: &[smt::AccessPath]) {
 /// Print reaches/cluster-admin violations path-first: show each distinct
 /// escalation path once and list the principals that can use it underneath.
 /// This avoids repeating the same path for every one of N principals.
-fn print_reaches_grouped(violations: &[smt::Violation]) {
+/// `kind_of` annotates non-serviceaccount principals with their subject kind.
+/// Pass `|_| ""` to suppress annotation.
+fn print_reaches_grouped(violations: &[smt::Violation], kind_of: &dyn Fn(&str) -> &'static str) {
     // Preserve first-seen order for paths; use a Vec<key> + BTreeMap for lookup.
     let mut order: Vec<String> = Vec::new();
     let mut groups: BTreeMap<String, (Vec<smt::AccessPath>, Vec<String>)> = BTreeMap::new();
@@ -1293,7 +1303,12 @@ fn print_reaches_grouped(violations: &[smt::Violation]) {
         print_violation_paths(paths);
         println!("          {} principal(s):", principals.len());
         for p in principals {
-            println!("            {p}");
+            let kind = kind_of(p);
+            if kind.is_empty() || kind == "serviceaccount" {
+                println!("            {p}");
+            } else {
+                println!("            {p} ({kind})");
+            }
         }
     }
 }
@@ -1497,7 +1512,31 @@ fn find_via_targets(
         .collect()
 }
 
-fn smt_command(input: &str, store: &EvalStore) {
+/// JSON form of a violation's explaining binding paths (ndjson output).
+fn paths_json(paths: &[smt::AccessPath]) -> Vec<serde_json::Value> {
+    paths
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "binding_kind": p.binding_kind,
+                "binding_namespace": p.binding_namespace,
+                "binding_name": p.binding_name,
+                "role_kind": p.role_kind,
+                "role_name": p.role_name,
+                "via": p.hops.iter()
+                    .map(|(id, mech)| serde_json::json!({"identity": id, "mechanism": mech}))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
+/// Run an `::smt` subcommand. Returns `false` when the check reported a
+/// failure (a `FAIL` line in plain output, `"result":"fail"` in ndjson), so the
+/// caller can turn it into a nonzero exit status. Usage errors and unknown
+/// subcommands return `true`: they are not check results.
+fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
+    let ndjson = format == OutputFormat::Ndjson;
     let mut tokens = input.splitn(2, ' ');
     let subcommand = tokens.next().unwrap_or("").trim();
     let rest = tokens.next().unwrap_or("").trim();
@@ -1512,7 +1551,7 @@ fn smt_command(input: &str, store: &EvalStore) {
                     "Usage: ::smt check_access <namespace> <resource> <verb> [expected_principal ...]"
                 );
                 eprintln!("       Use \"\" for namespace to check cluster-wide (CRB) grants.");
-                return;
+                return true;
             };
             let namespace = ns_raw.trim_matches('"');
             let resource = res_raw.trim_matches('"');
@@ -1531,19 +1570,45 @@ fn smt_command(input: &str, store: &EvalStore) {
 
             let violations = enc.check_access_invariant(namespace, resource, verb, &expected);
             if violations.is_empty() {
-                println!("PASS  can(_, {namespace:?}, {resource:?}, {verb:?})");
-            } else {
-                println!(
-                    "FAIL  can(_, {namespace:?}, {resource:?}, {verb:?}) — {} unexpected principal(s):",
-                    violations.len()
-                );
-                for v in &violations {
+                if ndjson {
                     println!(
-                        "        UNEXPECTED can({:?}, {:?}, {:?}, {:?})",
-                        v.principal, v.namespace, v.resource, v.verb
+                        "{}",
+                        serde_json::json!({"result":"pass","check":"check_access","namespace":namespace,"resource":resource,"verb":verb})
                     );
-                    print_violation_paths(&v.paths);
+                } else {
+                    println!("PASS  can(_, {namespace:?}, {resource:?}, {verb:?})");
                 }
+                true
+            } else {
+                if ndjson {
+                    for v in &violations {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "result": "fail",
+                                "check": "check_access",
+                                "principal": v.principal,
+                                "namespace": namespace,
+                                "resource": resource,
+                                "verb": verb,
+                                "paths": paths_json(&v.paths),
+                            })
+                        );
+                    }
+                } else {
+                    println!(
+                        "FAIL  can(_, {namespace:?}, {resource:?}, {verb:?}) — {} unexpected principal(s):",
+                        violations.len()
+                    );
+                    for v in &violations {
+                        println!(
+                            "        UNEXPECTED can({:?}, {:?}, {:?}, {:?})",
+                            v.principal, v.namespace, v.resource, v.verb
+                        );
+                        print_violation_paths(&v.paths);
+                    }
+                }
+                false
             }
         }
         "reaches" | "cluster-admin" => {
@@ -1575,7 +1640,7 @@ fn smt_command(input: &str, store: &EvalStore) {
                     eprintln!(
                         "       Use ::smt cluster-admin [--direct] [--all] to check for cluster-admin level access."
                     );
-                    return;
+                    return true;
                 };
                 let expected_owned: Vec<String> = token_iter
                     .filter(|s| !matches!(*s, "[]" | "[" | "]"))
@@ -1608,23 +1673,56 @@ fn smt_command(input: &str, store: &EvalStore) {
             );
 
             if direct.is_empty() && via.is_empty() {
-                println!(
-                    "PASS  effective_can(_, {namespace:?}, {apigroup:?}, {resource:?}, {verb:?})"
-                );
+                if ndjson {
+                    println!(
+                        "{}",
+                        serde_json::json!({"result":"pass","check":subcommand,"namespace":namespace,"apigroup":apigroup,"resource":resource,"verb":verb})
+                    );
+                } else {
+                    println!(
+                        "PASS  effective_can(_, {namespace:?}, {apigroup:?}, {resource:?}, {verb:?})"
+                    );
+                }
+                true
             } else {
-                let total = direct.len() + via.len();
-                println!(
-                    "FAIL  {total} principal(s) can reach ({namespace:?}, {apigroup:?}, {resource:?}, {verb:?}):"
-                );
-                if !direct.is_empty() {
-                    println!("  direct ({}):", direct.len());
-                    print_reaches_grouped(&direct);
+                if ndjson {
+                    let emit_violations = |violations: &[smt::Violation], kind: &str| {
+                        for v in violations {
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "result": "fail",
+                                    "check": subcommand,
+                                    "kind": kind,
+                                    "principal": v.principal,
+                                    "namespace": namespace,
+                                    "apigroup": apigroup,
+                                    "resource": resource,
+                                    "verb": verb,
+                                    "paths": paths_json(&v.paths),
+                                })
+                            );
+                        }
+                    };
+                    emit_violations(&direct, "direct");
+                    emit_violations(&via, "escalation");
+                } else {
+                    let total = direct.len() + via.len();
+                    println!(
+                        "FAIL  {total} principal(s) can reach ({namespace:?}, {apigroup:?}, {resource:?}, {verb:?}):"
+                    );
+                    let kind_of = |p: &str| enc.principal_kind(p);
+                    if !direct.is_empty() {
+                        println!("  direct ({}):", direct.len());
+                        print_reaches_grouped(&direct, &kind_of);
+                    }
+                    if !via.is_empty() {
+                        println!();
+                        println!("  via escalation ({}):", via.len());
+                        print_reaches_grouped(&via, &kind_of);
+                    }
                 }
-                if !via.is_empty() {
-                    println!();
-                    println!("  via escalation ({}):", via.len());
-                    print_reaches_grouped(&via);
-                }
+                false
             }
         }
         "check_isolation" => {
@@ -1634,7 +1732,7 @@ fn smt_command(input: &str, store: &EvalStore) {
                 eprintln!(
                     "       Proves that ONLY the listed principals have any access in <namespace>."
                 );
-                return;
+                return true;
             };
             let namespace = ns_raw.trim_matches('"');
             let allowed_owned: Vec<String> = args
@@ -1650,67 +1748,152 @@ fn smt_command(input: &str, store: &EvalStore) {
 
             let violations = enc.check_namespace_isolation(namespace, &allowed);
             if violations.is_empty() {
-                println!(
-                    "PASS  namespace {namespace:?} is isolated to the expected principals (Z3 UNSAT proof)"
-                );
-            } else {
-                println!(
-                    "FAIL  {} unexpected principal(s) have access in {namespace:?}:",
-                    violations.len()
-                );
-                for v in &violations {
+                if ndjson {
                     println!(
-                        "        UNEXPECTED can({:?}, {:?}, {:?}, {:?})",
-                        v.principal, v.namespace, v.resource, v.verb
+                        "{}",
+                        serde_json::json!({"result":"pass","check":"check_isolation","namespace":namespace})
+                    );
+                } else {
+                    println!(
+                        "PASS  namespace {namespace:?} is isolated to the expected principals (Z3 UNSAT proof)"
                     );
                 }
+                true
+            } else {
+                if ndjson {
+                    for v in &violations {
+                        println!(
+                            "{}",
+                            serde_json::json!({"result":"fail","check":"check_isolation","principal":v.principal,"namespace":v.namespace,"resource":v.resource,"verb":v.verb})
+                        );
+                    }
+                } else {
+                    println!(
+                        "FAIL  {} unexpected principal(s) have access in {namespace:?}:",
+                        violations.len()
+                    );
+                    for v in &violations {
+                        println!(
+                            "        UNEXPECTED can({:?}, {:?}, {:?}, {:?})",
+                            v.principal, v.namespace, v.resource, v.verb
+                        );
+                    }
+                }
+                false
             }
         }
         "node_selector" => {
             let unschedulable = smt::scheduling::check_node_selector(store);
             if unschedulable.is_empty() {
-                println!("PASS  all pods with nodeSelectors are schedulable");
-            } else {
-                println!("FAIL  {} unschedulable pod(s):", unschedulable.len());
-                for p in &unschedulable {
-                    println!("        {}/{}", p.namespace, p.name);
+                if ndjson {
+                    println!(
+                        "{}",
+                        serde_json::json!({"result":"pass","check":"node_selector"})
+                    );
+                } else {
+                    println!("PASS  all pods with nodeSelectors are schedulable");
                 }
+                true
+            } else {
+                if ndjson {
+                    for p in &unschedulable {
+                        println!(
+                            "{}",
+                            serde_json::json!({"result":"fail","check":"node_selector","namespace":p.namespace,"pod":p.name})
+                        );
+                    }
+                } else {
+                    println!("FAIL  {} unschedulable pod(s):", unschedulable.len());
+                    for p in &unschedulable {
+                        println!("        {}/{}", p.namespace, p.name);
+                    }
+                }
+                false
             }
         }
         "anti_affinity" => {
             use smt::scheduling::PlacementResult;
             match smt::scheduling::check_anti_affinity_placement(store) {
                 PlacementResult::Sat(assignment) if assignment.is_empty() => {
-                    println!("PASS  no anti-affinity conflicts found");
+                    if ndjson {
+                        println!(
+                            "{}",
+                            serde_json::json!({"result":"pass","check":"anti_affinity"})
+                        );
+                    } else {
+                        println!("PASS  no anti-affinity conflicts found");
+                    }
+                    true
                 }
                 PlacementResult::Sat(mut assignment) => {
                     assignment.sort_by(|a, b| a.0.cmp(&b.0));
-                    println!("PASS  valid placement found ({} pods):", assignment.len());
-                    for (pod, node) in &assignment {
-                        println!("        {pod} → {node}");
+                    if ndjson {
+                        for (pod, node) in &assignment {
+                            println!(
+                                "{}",
+                                serde_json::json!({"result":"pass","check":"anti_affinity","pod":pod,"node":node})
+                            );
+                        }
+                    } else {
+                        println!("PASS  valid placement found ({} pods):", assignment.len());
+                        for (pod, node) in &assignment {
+                            println!("        {pod} → {node}");
+                        }
                     }
+                    true
                 }
                 PlacementResult::Unsat => {
-                    println!(
-                        "FAIL  no valid placement exists — anti-affinity constraints unsatisfiable"
-                    );
+                    if ndjson {
+                        println!(
+                            "{}",
+                            serde_json::json!({"result":"fail","check":"anti_affinity"})
+                        );
+                    } else {
+                        println!(
+                            "FAIL  no valid placement exists — anti-affinity constraints unsatisfiable"
+                        );
+                    }
+                    false
                 }
             }
         }
         "karpenter" => {
             let gaps = smt::scheduling::find_karpenter_coverage_gaps(store, 5);
             if gaps.is_empty() {
-                println!("PASS  full coverage — no nodeSelector gap found (Z3 UNSAT)");
-            } else {
-                println!(
-                    "FAIL  {} coverage gap(s) found - nodeSelectors no NodePool can satisfy:",
-                    gaps.len()
-                );
-                for (i, gap) in gaps.iter().enumerate() {
-                    let labels: Vec<String> =
-                        gap.labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
-                    println!("  GAP {}  {}", i + 1, labels.join(", "));
+                if ndjson {
+                    println!(
+                        "{}",
+                        serde_json::json!({"result":"pass","check":"karpenter"})
+                    );
+                } else {
+                    println!("PASS  full coverage — no nodeSelector gap found (Z3 UNSAT)");
                 }
+                true
+            } else {
+                if ndjson {
+                    for gap in &gaps {
+                        let labels: serde_json::Map<String, serde_json::Value> = gap
+                            .labels
+                            .iter()
+                            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                            .collect();
+                        println!(
+                            "{}",
+                            serde_json::json!({"result":"fail","check":"karpenter","labels":labels})
+                        );
+                    }
+                } else {
+                    println!(
+                        "FAIL  {} coverage gap(s) found - nodeSelectors no NodePool can satisfy:",
+                        gaps.len()
+                    );
+                    for (i, gap) in gaps.iter().enumerate() {
+                        let labels: Vec<String> =
+                            gap.labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                        println!("  GAP {}  {}", i + 1, labels.join(", "));
+                    }
+                }
+                false
             }
         }
         _ => {
@@ -1718,6 +1901,7 @@ fn smt_command(input: &str, store: &EvalStore) {
             eprintln!(
                 "Available: check_access, reaches, cluster-admin, node_selector, anti_affinity, karpenter"
             );
+            true
         }
     }
 }

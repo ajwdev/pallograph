@@ -376,6 +376,27 @@ impl<'ctx> SmtEncoder<'ctx> {
         violations
     }
 
+    /// Return the RBAC subject kind for a principal: "serviceaccount", "group", or "user".
+    /// Checks the raw binding subject tables loaded from RBAC facts.
+    pub fn principal_kind(&self, p: &str) -> &'static str {
+        use mangle_common::Value;
+        if p.starts_with("system:serviceaccount:") {
+            return "serviceaccount";
+        }
+        // all_group_perm/all_user_perm are IDB relations with principal as column 0.
+        let in_rel = |rel: &str| {
+            self.facts.get(rel).is_some_and(|rows| {
+                rows.iter()
+                    .any(|t| t.first() == Some(&Value::String(p.to_string())))
+            })
+        };
+        if in_rel("all_group_perm") {
+            "group"
+        } else {
+            "user"
+        }
+    }
+
     /// Return all principals with a direct `can` entry matching (namespace, apigroup,
     /// resource, verb), along with their relevant binding paths.
     /// Used by `cluster-admin` and `reaches` output to show the direct-grant tier.

@@ -37,8 +37,9 @@ struct Cli {
     #[arg(long, value_enum, default_value = "interpreter")]
     backend: BackendKind,
 
-    /// Output format for query/relation results. `ndjson` emits one JSON object
-    /// per row, suitable for piping into jq, DuckDB, etc.
+    /// Output format for query/relation results and `::smt` checks. `ndjson`
+    /// emits one JSON object per row (or per violation), suitable for piping
+    /// into jq, DuckDB, etc. The process exits 1 if any `::smt` check failed.
     #[arg(long, value_enum, default_value = "plain")]
     format: OutputFormat,
 }
@@ -157,7 +158,9 @@ async fn main() -> Result<()> {
 
     let store = engine.evaluate()?;
 
-    repl::run(&mut engine, store, cli.format)?;
+    if !repl::run(&mut engine, store, cli.format)? {
+        std::process::exit(1);
+    }
 
     Ok(())
 }
