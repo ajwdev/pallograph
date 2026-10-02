@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Native rather than Nix: rustfmt is all it needs, so skip the Nix startup cost.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      # The dev shell is all substituted binaries, so caching the store saves
+      # downloads, not builds. Re-keys only when flake.lock changes.
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 2G
+      # Exports the devShells.ci environment to every later step, including
+      # rust-cache, which keys on `rustc -vV`.
+      - uses: nicknovitski/nix-develop@v1
+        with:
+          arguments: .#ci
+      - uses: Swatinem/rust-cache@v2
+      # Gates on clippy errors only. Raise to `-- -D warnings` once the
+      # dead-code warnings from main.rs re-declaring the lib modules are gone.
+      - run: cargo clippy --all-targets --locked
+      - run: cargo test --all-targets --locked
