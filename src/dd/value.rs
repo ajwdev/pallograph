@@ -264,6 +264,38 @@ impl From<&[Value]> for Row {
 }
 
 // ---------------------------------------------------------------------------
+// Annotated — the lazy (Soufflé-style) provenance element
+// ---------------------------------------------------------------------------
+
+/// Sentinel `rule_id` meaning "this is an EDB base fact, no rule produced it".
+/// EDB facts carry `height = 0` and this sentinel.
+pub const SENTINEL_EDB: u32 = u32::MAX;
+
+/// A per-IDB-tuple provenance annotation for the *lazy* Soufflé strategy: the
+/// fact tuple plus the two scalar annotations Soufflé stores — the id of the
+/// rule that achieved the minimal-height derivation, and the height of that
+/// minimal proof tree.
+///
+/// Rather than materialising *every* one-step derivation, the
+/// lazy strategy keeps exactly one `Annotated` per derived fact and reconstructs
+/// proof trees on demand at `::why` time by backward-chaining against arranged
+/// traces (see `docs/souffle-lazy-provenance-design.md`).
+///
+/// Derives the same trait set as [`Row`] so it can flow through
+/// DD's keyed operators (`arrange_by_self`, `reduce`, `distinct`) — which bottom
+/// out at `ExchangeData: Serialize + Deserialize`.
+///
+/// Note: the *side collection* keyed on the row is `(Row, (u32 rule_id, u32
+/// height))`; this struct is a convenience for seeding EDB annotations and for
+/// carrying results out. We deliberately do not widen `Row`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Annotated {
+    pub fact: Row,
+    pub rule_id: u32,
+    pub height: u32,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

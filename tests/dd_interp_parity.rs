@@ -85,7 +85,7 @@ fn assert_parity_impl(name: &str, e: &Edb, rules: &str, normalize_lists: bool) {
     let interp = InterpreterBackend
         .evaluate(e, &rules)
         .unwrap_or_else(|err| panic!("[{name}] interpreter failed: {err:#}"));
-    let dd = DdBackend
+    let dd = DdBackend { provenance: false }
         .evaluate(e, &rules)
         .unwrap_or_else(|err| panic!("[{name}] dd failed: {err:#}"));
 
