@@ -263,6 +263,11 @@ impl From<&[Value]> for Row {
     }
 }
 
+/// Lazy-provenance `rule_id` meaning "this is an EDB base fact, no rule
+/// produced it". EDB facts carry `height = 0` and this sentinel. See
+/// [`Annotation`](crate::dd::build::Annotation).
+pub const SENTINEL_EDB: u32 = u32::MAX;
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

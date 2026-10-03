@@ -80,8 +80,12 @@ fn dd_add_fact(c: &mut Criterion) {
     c.bench_function("incremental/dd_add_fact", |b| {
         b.iter_custom(|iters| {
             // Session startup is setup, not measurement.
-            let mut engine = Engine::from_parts(edb.clone(), rules.clone(), Box::new(DdBackend))
-                .expect("engine");
+            let mut engine = Engine::from_parts(
+                edb.clone(),
+                rules.clone(),
+                Box::new(DdBackend { provenance: false }),
+            )
+            .expect("engine");
             let start = Instant::now();
             for i in 0..iters {
                 let (rel, tuple) = bench_fact(i);
@@ -124,8 +128,12 @@ fn dd_retract_fact(c: &mut Criterion) {
     c.bench_function("incremental/dd_retract_fact", |b| {
         b.iter_custom(|iters| {
             // Pre-insert the facts during setup (not timed), then retract them.
-            let mut engine = Engine::from_parts(edb.clone(), rules.clone(), Box::new(DdBackend))
-                .expect("engine");
+            let mut engine = Engine::from_parts(
+                edb.clone(),
+                rules.clone(),
+                Box::new(DdBackend { provenance: false }),
+            )
+            .expect("engine");
             for i in 0..iters {
                 let (rel, tuple) = bench_fact(i);
                 engine.add_fact(rel, tuple);

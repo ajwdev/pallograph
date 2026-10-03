@@ -135,10 +135,14 @@ pub fn build_strata(rule_sources: &[String]) -> Result<(Vec<StratumWork>, Vec<St
         }
 
         let mut lowered = Vec::new();
-        for rule_id in rule_ids {
+        for inst_id in rule_ids {
+            // Use the rule's InstId index as its stable, globally-unique rule_id
+            // for lazy provenance. It is deterministic across
+            // runs and never collides across strata (insts are shared).
+            let rule_id = inst_id.index() as u32;
             let planner = mangle_analysis::Planner::new(&mut ir);
-            let op = planner.plan_rule(rule_id).context("plan rule")?;
-            lowered.push(lower_op(&op, &ir).context("lower rule")?);
+            let op = planner.plan_rule(inst_id).context("plan rule")?;
+            lowered.push(lower_op(&op, &ir, rule_id).context("lower rule")?);
         }
 
         strata.push(StratumWork {
