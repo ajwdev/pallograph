@@ -458,23 +458,47 @@ pub trait Backend {
     }
 }
 
-pub struct DdBackend;
+/// The differential-dataflow backend.
+///
+/// `provenance` builds lazy (Soufflé-style) `(rule_id, min_height)` annotations
+/// in the live session so `::why` can backward-chain a proof on demand; it is
+/// off by default because the annotations add operators to every rule.
+pub struct DdBackend {
+    pub provenance: bool,
+}
+
+impl DdBackend {
+    fn mode(&self) -> crate::dd::ProvenanceMode {
+        if self.provenance {
+            crate::dd::ProvenanceMode::Lazy
+        } else {
+            crate::dd::ProvenanceMode::Off
+        }
+    }
+}
 
 impl Backend for DdBackend {
+    fn supports_provenance(&self) -> bool {
+        self.provenance
+    }
+
     fn spawn_session(
         &self,
         edb: &[(String, Vec<Value>)],
         rule_sources: &[String],
     ) -> Result<Option<crate::dd::session::DdSession>> {
-        crate::dd::session::DdSession::spawn(edb, rule_sources).map(Some)
+        // `::why` queries this live session (see `Engine::provenance_session`).
+        crate::dd::session::DdSession::spawn_mode(edb, rule_sources, self.mode()).map(Some)
     }
 
     fn evaluate(&self, edb: &[(String, Vec<Value>)], rule_sources: &[String]) -> Result<EvalStore> {
         // Batch mode = spawn a persistent session, snapshot every relation, drop.
         // spawn() blocks until the worker is settled at epoch 1, so snapshot_all()
         // sees fully-derived state.  Dropping the session shuts the worker down.
-        let session =
-            crate::dd::session::DdSession::spawn(edb, rule_sources).context("spawn dd session")?;
+        // Lazy provenance lives in the session, not the snapshot, so
+        // `EvalStore::provenance` stays empty here.
+        let session = crate::dd::session::DdSession::spawn_mode(edb, rule_sources, self.mode())
+            .context("spawn dd session")?;
         let facts = session.snapshot_all()?;
         Ok(EvalStore {
             facts,
@@ -780,6 +804,12 @@ impl Engine {
         self.backend.supports_provenance()
     }
 
+    /// The live DD session, if it builds lazy provenance annotations. `::why`
+    /// backward-chains against it instead of reading `EvalStore::provenance`.
+    pub fn provenance_session(&self) -> Option<&crate::dd::session::DdSession> {
+        self.session.as_ref().filter(|s| s.has_provenance())
+    }
+
     /// Add a new rule (from the REPL) and mark state as dirty.
     ///
     /// When an incremental session is live, the rule is layered into it; a rule
@@ -1005,7 +1035,9 @@ mod tests {
 
         let t0 = std::time::Instant::now();
         for _ in 0..n {
-            DdBackend.evaluate(&edb, &rules).unwrap();
+            DdBackend { provenance: false }
+                .evaluate(&edb, &rules)
+                .unwrap();
         }
         let dd_avg = t0.elapsed() / n;
 
@@ -1026,7 +1058,9 @@ mod tests {
         let interp = InterpreterBackend
             .evaluate(&edb, &rules)
             .expect("interpreter failed");
-        let dd = DdBackend.evaluate(&edb, &rules).expect("dd failed");
+        let dd = DdBackend { provenance: false }
+            .evaluate(&edb, &rules)
+            .expect("dd failed");
 
         let all_rels: std::collections::HashSet<&str> =
             interp.relation_names().chain(dd.relation_names()).collect();
@@ -1073,12 +1107,202 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // DD lazy provenance (::why) tests
+    // -----------------------------------------------------------------------
+
+    fn s(x: &str) -> Value {
+        Value::String(x.to_string())
+    }
+
+    /// Diamond graph: a→b, a→c, b→d, c→d, with transitive closure over it.
+    fn diamond() -> (Vec<(String, Vec<Value>)>, Vec<String>) {
+        let edb = vec![
+            ("edge".into(), vec![s("a"), s("b")]),
+            ("edge".into(), vec![s("a"), s("c")]),
+            ("edge".into(), vec![s("b"), s("d")]),
+            ("edge".into(), vec![s("c"), s("d")]),
+        ];
+        let rules = vec![
+            "Decl edge(Src, Dst).\nDecl path(Src, Dst).\n\
+             path(X, Y) :- edge(X, Y).\n\
+             path(X, Z) :- path(X, Y), edge(Y, Z)."
+                .to_string(),
+        ];
+        (edb, rules)
+    }
+
+    /// `--provenance` gives `Engine` a live lazy session, and backward-chaining
+    /// path(a,d) yields one shortest proof whose premises are real facts with
+    /// strictly lower heights, bottoming out at EDB edges.
+    #[test]
+    fn dd_provenance_lazy_session_explains_fact() {
+        use crate::dd::value::{Row, SENTINEL_EDB};
+
+        let (edb, rules) = diamond();
+        let engine =
+            Engine::from_parts(edb, rules, Box::new(DdBackend { provenance: true })).unwrap();
+        let session = engine
+            .provenance_session()
+            .expect("provenance on => lazy session");
+
+        let ad = Row::from([s("a"), s("d")].as_slice());
+        let (rid, h) = session
+            .why_height("path", &ad)
+            .expect("path(a,d) annotated");
+        assert_eq!(h, 2, "path(a,d) shortest proof height");
+        let g = session
+            .why_step(rid, &ad, h)
+            .expect("grounding for path(a,d)");
+        assert_eq!(g.premises.len(), 2);
+        for p in &g.premises {
+            assert!(p.height < h, "premise {p:?} not strictly lower");
+            if p.rel == "edge" {
+                assert_eq!((p.rule_id, p.height), (SENTINEL_EDB, 0));
+            }
+        }
+    }
+
+    /// Adding a rule to a lazy session rebuilds it (layering builds no
+    /// annotations), so the new rule's facts are explainable too.
+    #[test]
+    fn dd_provenance_survives_add_rule() {
+        use crate::dd::value::Row;
+
+        let (edb, rules) = diamond();
+        let mut engine =
+            Engine::from_parts(edb, rules, Box::new(DdBackend { provenance: true })).unwrap();
+        engine
+            .add_rule("from_a(Y) :- path(\"a\", Y).".to_string())
+            .unwrap();
+        let session = engine.provenance_session().expect("still a lazy session");
+
+        let fd = Row::from([s("d")].as_slice());
+        let (rid, h) = session
+            .why_height("from_a", &fd)
+            .expect("from_a(d) annotated");
+        assert_eq!(h, 3, "from_a(d) = 1 + height of path(a,d)");
+        assert!(session.why_step(rid, &fd, h).is_some());
+    }
+
+    /// On the shipped k8s rules (struct/list access, builtins, negation,
+    /// aggregation, recursion), every derived fact has an annotation and a
+    /// one-step grounding whose premises are real facts with strictly lower
+    /// heights and matching annotations. Each premise is itself checked as a
+    /// fact, so by induction every full `::why` tree bottoms out at EDB.
+    #[test]
+    fn dd_provenance_explains_every_shipped_fact() {
+        use crate::dd::value::{Row, SENTINEL_EDB};
+
+        let (edb, rules) = load_fixtures().expect("load fixtures");
+        let plain = DdBackend { provenance: false }
+            .evaluate(&edb, &rules)
+            .expect("dd without provenance");
+        let engine =
+            Engine::from_parts(edb, rules, Box::new(DdBackend { provenance: true })).unwrap();
+        let session = engine
+            .provenance_session()
+            .expect("provenance on => lazy session");
+        let facts = session.snapshot_all().unwrap();
+
+        let mut derived = 0;
+        for (rel, tuples) in &facts {
+            if rel.starts_with('$') {
+                continue;
+            }
+            // Annotations must not change what gets derived.
+            let mut with: Vec<_> = tuples.clone();
+            let mut without: Vec<_> = plain.scan(rel).to_vec();
+            with.sort();
+            without.sort();
+            assert_eq!(with, without, "provenance changed facts of `{rel}`");
+
+            for t in tuples {
+                let row = Row::from(t.as_slice());
+                let (rid, h) = session
+                    .why_height(rel, &row)
+                    .unwrap_or_else(|| panic!("no annotation for {rel}{t:?}"));
+                if rid == SENTINEL_EDB {
+                    assert_eq!(h, 0, "EDB fact {rel}{t:?} must have height 0");
+                    continue;
+                }
+                derived += 1;
+                let g = session
+                    .why_step(rid, &row, h)
+                    .unwrap_or_else(|| panic!("no grounding for {rel}{t:?} (rule {rid}, h {h})"));
+                for p in &g.premises {
+                    assert!(p.height < h, "{rel}{t:?}: premise {p:?} not lower");
+                    let vals = p.row.clone().into_values();
+                    assert!(
+                        facts.get(&p.rel).is_some_and(|ts| ts.contains(&vals)),
+                        "{rel}{t:?}: premise {p:?} is not a fact"
+                    );
+                    assert_eq!(
+                        session.why_height(&p.rel, &p.row),
+                        Some((p.rule_id, p.height)),
+                        "{rel}{t:?}: premise {p:?} annotation mismatch"
+                    );
+                }
+            }
+        }
+        assert!(derived > 0, "fixtures derived no facts");
+        eprintln!("explained {derived} derived facts");
+    }
+
+    /// Heights track fact deltas in the live session: a shortcut edge lowers
+    /// path(a,d) to height 1, retracting it restores 2, and retracting one arm
+    /// of the diamond leaves a proof through the other.
+    #[test]
+    fn dd_provenance_heights_follow_deltas() {
+        use crate::dd::value::Row;
+
+        let (edb, rules) = diamond();
+        let mut engine =
+            Engine::from_parts(edb, rules, Box::new(DdBackend { provenance: true })).unwrap();
+        let ad = Row::from([s("a"), s("d")].as_slice());
+        let height = |e: &Engine| e.provenance_session().unwrap().why_height("path", &ad);
+
+        assert_eq!(height(&engine).map(|a| a.1), Some(2));
+        engine.add_fact("edge".into(), vec![s("a"), s("d")]);
+        assert_eq!(height(&engine).map(|a| a.1), Some(1), "shortcut edge");
+        engine.retract_fact("edge", &[s("a"), s("d")]);
+        assert_eq!(height(&engine).map(|a| a.1), Some(2), "shortcut retracted");
+
+        engine.retract_fact("edge", &[s("b"), s("d")]);
+        let session = engine.provenance_session().unwrap();
+        let (rid, h) = session
+            .why_height("path", &ad)
+            .expect("still derivable via c");
+        let g = session.why_step(rid, &ad, h).expect("grounding via c");
+        assert!(
+            g.premises
+                .iter()
+                .any(|p| p.row == Row::from([s("c"), s("d")].as_slice())),
+            "proof must go through c once b->d is gone: {g:?}"
+        );
+    }
+
+    /// With the flag off, the session builds no annotations.
+    #[test]
+    fn dd_provenance_off_has_no_provenance_session() {
+        let (edb, rules) = diamond();
+        let engine =
+            Engine::from_parts(edb, rules, Box::new(DdBackend { provenance: false })).unwrap();
+        assert!(engine.has_session());
+        assert!(engine.provenance_session().is_none());
+    }
+
     /// A fact for a relation the session did not start with must reach the
     /// dataflow (not be silently dropped) and match the interpreter.
     #[test]
     fn dd_add_fact_new_relation_is_visible() {
         let rules = vec!["Decl known(X).".to_string()];
-        let mut dd = Engine::from_parts(vec![], rules.clone(), Box::new(DdBackend)).unwrap();
+        let mut dd = Engine::from_parts(
+            vec![],
+            rules.clone(),
+            Box::new(DdBackend { provenance: false }),
+        )
+        .unwrap();
         assert!(dd.has_session());
         assert!(dd.add_fact("brand_new".into(), vec![Value::String("x".into())]));
 
@@ -1100,7 +1324,8 @@ mod tests {
     #[test]
     fn dd_declared_but_empty_relation_is_queryable() {
         let rules = vec!["Decl lonely(X).".to_string()];
-        let mut dd = Engine::from_parts(vec![], rules, Box::new(DdBackend)).unwrap();
+        let mut dd =
+            Engine::from_parts(vec![], rules, Box::new(DdBackend { provenance: false })).unwrap();
         assert!(dd.query_live("lonely").unwrap().is_empty());
         dd.add_rule("Decl seen(X).\nseen(X) :- lonely(X).".to_string())
             .expect("rule over declared-but-empty relation");
@@ -1157,8 +1382,10 @@ mod tests {
     ) {
         expected.sort();
         let rules = vec![rules.to_string()];
-        let backends: [(&str, &dyn Backend); 2] =
-            [("interpreter", &InterpreterBackend), ("dd", &DdBackend)];
+        let backends: [(&str, &dyn Backend); 2] = [
+            ("interpreter", &InterpreterBackend),
+            ("dd", &DdBackend { provenance: false }),
+        ];
         for (name, backend) in backends {
             let store = backend
                 .evaluate(edb, &rules)
@@ -1323,8 +1550,10 @@ mod tests {
     /// mentioning `needle`.
     fn assert_both_err(edb: &[(String, Vec<Value>)], rules: &str, needle: &str) {
         let rules = vec![rules.to_string()];
-        let backends: [(&str, &dyn Backend); 2] =
-            [("interpreter", &InterpreterBackend), ("dd", &DdBackend)];
+        let backends: [(&str, &dyn Backend); 2] = [
+            ("interpreter", &InterpreterBackend),
+            ("dd", &DdBackend { provenance: false }),
+        ];
         for (name, backend) in backends {
             match backend.evaluate(edb, &rules) {
                 Ok(_) => {

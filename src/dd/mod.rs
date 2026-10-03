@@ -36,6 +36,24 @@ pub struct StratumWork {
     pub rules: Vec<LoweredRule>,
 }
 
+/// Which provenance strategy (if any) the DD session should build.
+///
+/// - `Off`: no provenance collections — zero extra operators.
+/// - `Lazy`: Soufflé-style provenance (per-fact `(rule_id, min_height)`
+///   annotations computed in the fixpoint + on-demand backward-chaining at
+///   `::why` time). Covers every body step the DD backend lowers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvenanceMode {
+    Off,
+    Lazy,
+}
+
+impl ProvenanceMode {
+    pub fn lazy(&self) -> bool {
+        matches!(self, ProvenanceMode::Lazy)
+    }
+}
+
 /// Compile `rule_sources` into lowered, stratum-ordered rules.
 ///
 /// Returns `(strata, edb_relation_names)`.  All Ir/Arena lifetimes are resolved
@@ -135,10 +153,14 @@ pub fn build_strata(rule_sources: &[String]) -> Result<(Vec<StratumWork>, Vec<St
         }
 
         let mut lowered = Vec::new();
-        for rule_id in rule_ids {
+        for inst_id in rule_ids {
+            // Use the rule's InstId index as its stable, globally-unique rule_id
+            // for lazy (Soufflé-style) provenance. It is deterministic across
+            // runs and never collides across strata (insts are shared).
+            let rule_id = inst_id.index() as u32;
             let planner = mangle_analysis::Planner::new(&mut ir);
-            let op = planner.plan_rule(rule_id).context("plan rule")?;
-            lowered.push(lower_op(&op, &ir).context("lower rule")?);
+            let op = planner.plan_rule(inst_id).context("plan rule")?;
+            lowered.push(lower_op(&op, &ir, rule_id).context("lower rule")?);
         }
 
         strata.push(StratumWork {
