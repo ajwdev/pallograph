@@ -1,0 +1,258 @@
+# Hand-written smoke world for the RBAC compatibility harness. Each object
+# exercises one RBAC matching feature; the comment says which.
+
+# Plain namespaced Role bound to a User.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-reader
+  namespace: team-a
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alice-pod-reader
+  namespace: team-a
+subjects:
+- kind: User
+  name: alice
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pod-reader
+---
+# resourceNames: only the named ConfigMap.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: one-configmap
+  namespace: team-a
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["app-config"]
+  verbs: ["get", "update"]
+---
+# ServiceAccount subject with no namespace: defaults to the RoleBinding's.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: deployer-one-configmap
+  namespace: team-a
+subjects:
+- kind: ServiceAccount
+  name: deployer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: one-configmap
+---
+# Wildcard verbs and the "*/scale" subresource wildcard. "deployments/*"
+# is not a wildcard to the authorizer: it only matches the literal
+# subresource "*".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: scaler
+rules:
+- apiGroups: ["apps"]
+  resources: ["*/scale"]
+  verbs: ["*"]
+- apiGroups: ["apps"]
+  resources: ["deployments/*"]
+  verbs: ["get"]
+---
+# RoleBinding to a ClusterRole: grants only inside team-b.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bob-scaler
+  namespace: team-b
+subjects:
+- kind: User
+  name: bob
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: scaler
+---
+# nonResourceURLs: literal and prefix.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: metrics-scraper
+rules:
+- nonResourceURLs: ["/metrics", "/debug/*"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: monitoring-metrics
+subjects:
+- kind: Group
+  name: monitoring
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: metrics-scraper
+---
+# Implicit groups: every service account in team-b, and everyone
+# authenticated.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: namespace-viewer
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: team-b-serviceaccounts-namespace-viewer
+subjects:
+- kind: Group
+  name: system:serviceaccounts:team-b
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: namespace-viewer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: healthz
+rules:
+- nonResourceURLs: ["/healthz"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: authenticated-healthz
+subjects:
+- kind: Group
+  name: system:authenticated
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: healthz
+---
+# Aggregation. The aggregated role's own rules are replaced by the
+# controller, so its "secrets" rule never takes effect.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aggregate-edit
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      smoke.pallograph.dev/aggregate-to-edit: "true"
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: edit-services
+  labels:
+    smoke.pallograph.dev/aggregate-to-edit: "true"
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["create", "delete"]
+---
+# Chained aggregation: aggregate-edit-plus pulls in aggregate-edit.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aggregate-edit-plus
+  labels:
+    smoke.pallograph.dev/aggregate-to-plus: "true"
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      smoke.pallograph.dev/aggregate-to-plus-source: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: plus-source
+  labels:
+    smoke.pallograph.dev/aggregate-to-plus-source: "true"
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      smoke.pallograph.dev/aggregate-to-edit: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: carol-aggregate-edit-plus
+subjects:
+- kind: User
+  name: carol
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aggregate-edit-plus
+---
+# Empty selector: matches every ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aggregate-everything
+aggregationRule:
+  clusterRoleSelectors:
+  - {}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dave-aggregate-everything
+subjects:
+- kind: User
+  name: dave
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aggregate-everything
+---
+# Full wildcard, bound to a ServiceAccount in another namespace via
+# ClusterRoleBinding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: superuser
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+- nonResourceURLs: ["*"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ops-superuser
+subjects:
+- kind: ServiceAccount
+  name: ops
+  namespace: ops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: superuser
