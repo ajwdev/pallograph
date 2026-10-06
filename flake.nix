@@ -24,6 +24,9 @@
       pkg-config
       z3
       llvmPackages.libclang
+      # Builds tools/rbac-oracle, which generates the RBAC compatibility
+      # test data (hack/rbac-compat-gen.sh).
+      go
     ];
 
     env = {
@@ -40,8 +43,6 @@
       buildInputs = buildInputs ++ (with pkgs; [
         rust.stable.rust-analyzer
         kind
-        # The RBAC oracle (tools/rbac-oracle) and its scripts.
-        go
         kubectl
         kwok
         # Used to regenerate src/builtins.txt (see its header).

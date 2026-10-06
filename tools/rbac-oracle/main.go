@@ -5,8 +5,8 @@
 // A world is a directory holding rbac.yaml. Subcommands:
 //
 //	rbac-oracle gen-worlds -seed S -count N <dir>      writes N random worlds under <dir>
-//	rbac-oracle gen [-limit N] [-seed S] <world>...    writes <world>/requests.ndjson.zst
-//	rbac-oracle eval <world>...                        writes <world>/oracle.ndjson.zst
+//	rbac-oracle gen [-limit N] [-seed S] <world>...    writes <world>/requests.ndjson
+//	rbac-oracle eval <world>...                        writes <world>/oracle.ndjson
 //	rbac-oracle kind-verify [-context C] <world>...    checks the oracle against a live API server
 package main
 

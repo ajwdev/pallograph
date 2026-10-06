@@ -8,7 +8,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/klauspost/compress/zstd"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 )
@@ -78,12 +77,11 @@ func splitServiceAccount(username string) (namespace, name string, ok bool) {
 	return namespace, name, ok
 }
 
-// World files are zstd-compressed NDJSON so the committed fixtures stay
-// small. A single-threaded encoder keeps the output byte-identical for the
-// same input, so regenerating unchanged fixtures leaves git clean.
+// The files a world's requests and the oracle's decisions are written to,
+// as NDJSON. They are generated (hack/rbac-compat-gen.sh), never committed.
 const (
-	requestsFile = "requests.ndjson.zst"
-	oracleFile   = "oracle.ndjson.zst"
+	requestsFile = "requests.ndjson"
+	oracleFile   = "oracle.ndjson"
 )
 
 func readRequests(path string) ([]Request, error) {
@@ -92,14 +90,9 @@ func readRequests(path string) ([]Request, error) {
 		return nil, err
 	}
 	defer file.Close()
-	reader, err := zstd.NewReader(bufio.NewReader(file))
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	defer reader.Close()
 
 	var requests []Request
-	decoder := json.NewDecoder(reader)
+	decoder := json.NewDecoder(bufio.NewReader(file))
 	for {
 		var request Request
 		if err := decoder.Decode(&request); err == io.EOF {
@@ -111,17 +104,13 @@ func readRequests(path string) ([]Request, error) {
 	}
 }
 
-// writeNDJSON writes each value as one JSON line, zstd-compressed.
+// writeNDJSON writes each value as one JSON line.
 func writeNDJSON[T any](path string, values []T) error {
 	file, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	writer, err := zstd.NewWriter(file, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedBestCompression))
-	if err != nil {
-		file.Close()
-		return err
-	}
+	writer := bufio.NewWriter(file)
 	encoder := json.NewEncoder(writer)
 	for i := range values {
 		if err := encoder.Encode(&values[i]); err != nil {
@@ -129,7 +118,7 @@ func writeNDJSON[T any](path string, values []T) error {
 			return err
 		}
 	}
-	if err := writer.Close(); err != nil {
+	if err := writer.Flush(); err != nil {
 		file.Close()
 		return err
 	}

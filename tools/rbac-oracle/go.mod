@@ -3,7 +3,6 @@ module github.com/ajwdev/pallograph/tools/rbac-oracle
 go 1.26.0
 
 require (
-	github.com/klauspost/compress v1.19.0
 	k8s.io/api v0.37.1
 	k8s.io/apimachinery v0.37.1
 	k8s.io/apiserver v0.37.1

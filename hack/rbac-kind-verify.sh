@@ -7,8 +7,9 @@
 # Usage: hack/rbac-kind-verify.sh [world...]
 #
 # Run it from the dev shell (nix develop), which provides go and kind.
-# Defaults to the curated worlds under tests/rbac_compat/worlds. Creates the
-# kind cluster on first use and leaves it running; remove it with
+# Defaults to the curated worlds under tests/rbac_compat/worlds, generated
+# first with hack/rbac-compat-gen.sh. Creates the kind cluster on first use
+# and leaves it running; remove it with
 #   kind delete cluster --name pallograph-rbac-compat
 # Extra flags for rbac-oracle kind-verify (e.g. -sample 0) go in
 # RBAC_KIND_VERIFY_FLAGS.
@@ -28,15 +29,18 @@ if [ "$(printf '%s\n' v0.32.0 "$kind_version" | sort -V | head -1)" != v0.32.0 ]
 fi
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
-oracle="$repo/target/rbac-oracle"
+target="${CARGO_TARGET_DIR:-$repo/target}"
+oracle="$target/rbac-oracle"
 
 if ! kind get clusters 2>/dev/null | grep -qx "$cluster"; then
 	kind create cluster --name "$cluster" --image "$image" --wait 120s
 fi
 
-go -C "$repo/tools/rbac-oracle" build -o "$oracle" .
 if [ "$#" -eq 0 ]; then
-	set -- "$repo"/tests/rbac_compat/worlds/*/
+	"$repo/hack/rbac-compat-gen.sh"
+	set -- "$target"/rbac-compat/worlds/*/
+else
+	go -C "$repo/tools/rbac-oracle" build -o "$oracle" .
 fi
 # shellcheck disable=SC2086
 "$oracle" kind-verify -context "kind-$cluster" ${RBAC_KIND_VERIFY_FLAGS:-} "$@"

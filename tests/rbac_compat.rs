@@ -4,10 +4,12 @@
 //! RBAC compatibility harness: checks `rbac_allowed` (rules/rbac.mg) against
 //! the kube-apiserver RBAC authorizer.
 //!
-//! Each world under `tests/rbac_compat/worlds/` holds `rbac.yaml` plus the
-//! requests and decisions written by `tools/rbac-oracle` (zstd-compressed
-//! NDJSON). Every request is decided by both backends, which must agree
-//! exactly. Each disagreement with the oracle has a direction (over-grant:
+//! Each world under `tests/rbac_compat/worlds/` is an `rbac.yaml`. Its
+//! requests and the oracle's decisions are generated, not committed:
+//! `hack/rbac-compat-gen.sh` runs `tools/rbac-oracle` (Go) to write them as
+//! NDJSON under `target/rbac-compat/worlds/<world>/`, and this test refuses
+//! to run on missing or stale output. Every request is decided by both
+//! backends, which must agree exactly. Each disagreement with the oracle has a direction (over-grant:
 //! Pallograph allows what Kubernetes denies; under-grant: the reverse) and is
 //! counted once in the direction's "total" bucket and once per oracle feature
 //! tag, e.g. "under-grant: rule-wildcard-subresource".
@@ -53,12 +55,22 @@ fn report_dir() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("rbac-compat")
 }
 
+/// Where hack/rbac-compat-gen.sh writes the curated worlds' requests and
+/// decisions: `<target>/rbac-compat/worlds`, `<target>/tmp` being
+/// `CARGO_TARGET_TMPDIR`.
+fn generated_dir() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .expect("CARGO_TARGET_TMPDIR has a parent")
+        .join("rbac-compat/worlds")
+}
+
 /// World directories under `dir` that have oracle decisions, in name order.
 fn worlds(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut worlds = Vec::new();
     for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let path = entry?.path();
-        if path.join("oracle.ndjson.zst").exists() {
+        if path.join("oracle.ndjson").exists() {
             worlds.push(path);
         }
     }
@@ -66,10 +78,50 @@ fn worlds(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(worlds)
 }
 
-fn read_ndjson_zstd(path: &Path) -> Result<Vec<Json>> {
+/// The generated directory of every curated world, after checking each one
+/// exists and is newer than everything it was generated from: the world's
+/// rbac.yaml and the oracle's source.
+fn curated_worlds() -> Result<Vec<PathBuf>> {
+    let modified = |path: &Path| -> Result<std::time::SystemTime> {
+        Ok(std::fs::metadata(path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .modified()?)
+    };
+    let oracle_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/rbac-oracle");
+    let mut oracle_modified = std::time::SystemTime::UNIX_EPOCH;
+    for entry in std::fs::read_dir(&oracle_dir)? {
+        oracle_modified = oracle_modified.max(modified(&entry?.path())?);
+    }
+
+    let regenerate = "run hack/rbac-compat-gen.sh (in nix develop) to regenerate";
+    let mut worlds = Vec::new();
+    for entry in std::fs::read_dir(compat_dir().join("worlds"))? {
+        let source = entry?.path();
+        if !source.join("rbac.yaml").exists() {
+            continue;
+        }
+        let world = generated_dir().join(source.file_name().unwrap());
+        let decisions = world.join("oracle.ndjson");
+        if !decisions.exists() {
+            bail!("{} is missing; {regenerate}", decisions.display());
+        }
+        let generated = modified(&decisions)?;
+        if generated < modified(&source.join("rbac.yaml"))? || generated < oracle_modified {
+            bail!(
+                "{} is older than its world or tools/rbac-oracle; {regenerate}",
+                decisions.display()
+            );
+        }
+        worlds.push(world);
+    }
+    worlds.sort();
+    Ok(worlds)
+}
+
+fn read_ndjson(path: &Path) -> Result<Vec<Json>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut rows = Vec::new();
-    for line in BufReader::new(zstd::Decoder::new(file)?).lines() {
+    for line in BufReader::new(file).lines() {
         let line = line.with_context(|| format!("reading {}", path.display()))?;
         rows.push(
             serde_json::from_str(&line).with_context(|| format!("parsing {}", path.display()))?,
@@ -191,8 +243,8 @@ struct LoadedWorld {
 }
 
 fn load_world(world: &Path) -> Result<LoadedWorld> {
-    let requests = read_ndjson_zstd(&world.join("requests.ndjson.zst"))?;
-    let decisions = read_ndjson_zstd(&world.join("oracle.ndjson.zst"))?;
+    let requests = read_ndjson(&world.join("requests.ndjson"))?;
+    let decisions = read_ndjson(&world.join("oracle.ndjson"))?;
     if requests.len() != decisions.len() {
         bail!(
             "{}: {} requests but {} decisions; rerun rbac-oracle eval",
@@ -337,7 +389,7 @@ fn compare_world(
 #[test]
 fn rbac_allowed_matches_kube_apiserver() -> Result<()> {
     let mut current: Buckets = BTreeMap::new();
-    for (world, result) in check_worlds(&worlds(&compat_dir().join("worlds"))?) {
+    for (world, result) in check_worlds(&curated_worlds()?) {
         let name = world.file_name().unwrap().to_string_lossy().into_owned();
         current.insert(name, result?);
     }
