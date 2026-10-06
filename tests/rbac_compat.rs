@@ -18,11 +18,18 @@
 //! when one shrinks. `UPDATE_BASELINE=1 cargo test --test rbac_compat`
 //! rewrites it. Every mismatch is written to
 //! `target/tmp/rbac-compat/<world>.ndjson` for inspection.
+//!
+//! The ignored `fuzz_worlds` test runs the same checks over randomly
+//! generated worlds in `$RBAC_COMPAT_WORLDS` (see hack/rbac-compat.sh). It
+//! has no baseline, since every seed makes new worlds: it fails only when
+//! the backends disagree, and reports which worlds hit a bucket the curated
+//! baseline lacks, as candidates to copy into `tests/rbac_compat/worlds/`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, bail};
 use mangle_common::Value;
@@ -46,10 +53,10 @@ fn report_dir() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("rbac-compat")
 }
 
-/// World directories that have oracle decisions, in name order.
-fn worlds() -> Result<Vec<PathBuf>> {
+/// World directories under `dir` that have oracle decisions, in name order.
+fn worlds(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut worlds = Vec::new();
-    for entry in std::fs::read_dir(compat_dir().join("worlds"))? {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let path = entry?.path();
         if path.join("oracle.ndjson.zst").exists() {
             worlds.push(path);
@@ -142,9 +149,48 @@ fn decide(world: &Path, requests: &[Json], backend: Box<dyn Backend>) -> Result<
     Ok(allowed)
 }
 
-/// Compares one world against its oracle, writes its mismatch report and
-/// returns its bucket counts.
-fn check_world(world: &Path) -> Result<BTreeMap<String, usize>> {
+/// Requests are decided in chunks of this size. Requests are independent,
+/// so the union of the chunks' answers is the world's answer, and
+/// evaluation time grows faster than linearly in the number of requests.
+const CHUNK_SIZE: usize = 2000;
+
+/// Applies `function` to every item on all cores, keeping item order.
+fn parallel_map<T: Sync, R: Send>(items: &[T], function: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map_or(1, usize::from);
+    let mut results: Vec<(usize, R)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut results = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(index) else {
+                            break;
+                        };
+                        results.push((index, function(item)));
+                    }
+                    results
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
+}
+
+/// A world's requests and the oracle's decisions, in id order.
+struct LoadedWorld {
+    path: PathBuf,
+    requests: Vec<Json>,
+    decisions: Vec<Json>,
+}
+
+fn load_world(world: &Path) -> Result<LoadedWorld> {
     let requests = read_ndjson_zstd(&world.join("requests.ndjson.zst"))?;
     let decisions = read_ndjson_zstd(&world.join("oracle.ndjson.zst"))?;
     if requests.len() != decisions.len() {
@@ -155,12 +201,76 @@ fn check_world(world: &Path) -> Result<BTreeMap<String, usize>> {
             decisions.len()
         );
     }
+    Ok(LoadedWorld {
+        path: world.to_path_buf(),
+        requests,
+        decisions,
+    })
+}
 
-    let interpreter = decide(world, &requests, Box::new(InterpreterBackend))?;
-    let dd = decide(world, &requests, Box::new(DdBackend))?;
+/// Checks every world against its oracle and returns each world's bucket
+/// counts. All chunks of all worlds are decided in one parallel pass.
+fn check_worlds(worlds: &[PathBuf]) -> Vec<(PathBuf, Result<BTreeMap<String, usize>>)> {
+    let loaded: Vec<Result<LoadedWorld>> = worlds.iter().map(|world| load_world(world)).collect();
+
+    let mut chunks = Vec::new();
+    for (index, world) in loaded.iter().enumerate() {
+        if let Ok(world) = world {
+            for start in (0..world.requests.len()).step_by(CHUNK_SIZE) {
+                chunks.push((index, start..(start + CHUNK_SIZE).min(world.requests.len())));
+            }
+        }
+    }
+    let decided = parallel_map(&chunks, |(index, range)| {
+        let world = loaded[*index].as_ref().unwrap();
+        let requests = &world.requests[range.clone()];
+        let interpreter = decide(&world.path, requests, Box::new(InterpreterBackend))?;
+        let dd = decide(&world.path, requests, Box::new(DdBackend))?;
+        Ok::<_, anyhow::Error>((interpreter, dd))
+    });
+
+    let mut allowed: Vec<Result<(BTreeSet<i64>, BTreeSet<i64>)>> =
+        (0..loaded.len()).map(|_| Ok(Default::default())).collect();
+    for ((index, _), result) in chunks.iter().zip(decided) {
+        match (&mut allowed[*index], result) {
+            (Ok((interpreter, dd)), Ok((chunk_interpreter, chunk_dd))) => {
+                interpreter.extend(chunk_interpreter);
+                dd.extend(chunk_dd);
+            }
+            (slot @ Ok(_), Err(error)) => *slot = Err(error),
+            (Err(_), _) => {}
+        }
+    }
+
+    worlds
+        .iter()
+        .zip(loaded)
+        .zip(allowed)
+        .map(|((path, world), allowed)| {
+            let result = world.and_then(|world| {
+                let (interpreter, dd) = allowed?;
+                compare_world(&world, &interpreter, &dd)
+            });
+            (path.clone(), result)
+        })
+        .collect()
+}
+
+/// Compares one world's decisions against its oracle, writes its mismatch
+/// report and returns its bucket counts.
+fn compare_world(
+    world: &LoadedWorld,
+    interpreter: &BTreeSet<i64>,
+    dd: &BTreeSet<i64>,
+) -> Result<BTreeMap<String, usize>> {
+    let LoadedWorld {
+        path: world,
+        requests,
+        decisions,
+    } = world;
     if interpreter != dd {
-        let only_interpreter: Vec<_> = interpreter.difference(&dd).take(10).collect();
-        let only_dd: Vec<_> = dd.difference(&interpreter).take(10).collect();
+        let only_interpreter: Vec<_> = interpreter.difference(dd).take(10).collect();
+        let only_dd: Vec<_> = dd.difference(interpreter).take(10).collect();
         bail!(
             "{}: backends disagree; only interpreter allows {only_interpreter:?}, only dd allows {only_dd:?}",
             world.display()
@@ -173,7 +283,7 @@ fn check_world(world: &Path) -> Result<BTreeMap<String, usize>> {
     let mut report = File::create(&report_path)?;
 
     let mut buckets = BTreeMap::new();
-    for (request, decision) in requests.iter().zip(&decisions) {
+    for (request, decision) in requests.iter().zip(decisions) {
         let id = id_field(request)?;
         if id_field(decision)? != id {
             bail!(
@@ -195,13 +305,22 @@ fn check_world(world: &Path) -> Result<BTreeMap<String, usize>> {
             "under-grant"
         };
         *buckets.entry(format!("{direction}: total")).or_insert(0) += 1;
-        for tag in decision["tags"]
+        let tags: Vec<&str> = decision["tags"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(Json::as_str)
-        {
+            .collect();
+        for tag in &tags {
             *buckets.entry(format!("{direction}: {tag}")).or_insert(0) += 1;
+        }
+        // The oracle's denied-by-* tags name the known Kubernetes behavior
+        // behind a denial. An over-grant without one is a gap nobody has
+        // explained yet.
+        if pallograph_allowed && !tags.iter().any(|tag| tag.starts_with("denied-by-")) {
+            *buckets
+                .entry("over-grant: unexplained".to_string())
+                .or_insert(0) += 1;
         }
 
         let row = json!({
@@ -218,9 +337,9 @@ fn check_world(world: &Path) -> Result<BTreeMap<String, usize>> {
 #[test]
 fn rbac_allowed_matches_kube_apiserver() -> Result<()> {
     let mut current: Buckets = BTreeMap::new();
-    for world in worlds()? {
+    for (world, result) in check_worlds(&worlds(&compat_dir().join("worlds"))?) {
         let name = world.file_name().unwrap().to_string_lossy().into_owned();
-        current.insert(name, check_world(&world)?);
+        current.insert(name, result?);
     }
     assert!(
         !current.is_empty(),
@@ -273,6 +392,82 @@ fn rbac_allowed_matches_kube_apiserver() -> Result<()> {
             "rbac_compat: mismatches grew past the baseline (details in {}):\n  {}",
             report_dir().display(),
             regressions.join("\n  ")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "needs generated worlds; run hack/rbac-compat.sh"]
+fn fuzz_worlds() -> Result<()> {
+    let dir = PathBuf::from(
+        std::env::var_os("RBAC_COMPAT_WORLDS")
+            .context("set RBAC_COMPAT_WORLDS to a directory of worlds")?,
+    );
+    let worlds = worlds(&dir)?;
+    assert!(
+        !worlds.is_empty(),
+        "no worlds with oracle decisions under {}",
+        dir.display()
+    );
+
+    let results = check_worlds(&worlds);
+
+    let baseline: Buckets = serde_json::from_str(&std::fs::read_to_string(baseline_path())?)?;
+    let known: BTreeSet<&String> = baseline.values().flat_map(BTreeMap::keys).collect();
+
+    let mut totals: BTreeMap<String, usize> = BTreeMap::new();
+    let mut candidates = Vec::new();
+    let mut failures = Vec::new();
+    for (world, result) in &results {
+        let buckets = match result {
+            Ok(buckets) => buckets,
+            Err(error) => {
+                failures.push(format!("{}: {error:#}", world.display()));
+                continue;
+            }
+        };
+        for (bucket, count) in buckets {
+            *totals.entry(bucket.clone()).or_insert(0) += count;
+        }
+        // Request and principal tags describe the request's shape, not the
+        // behavior behind a mismatch, so new combinations of them are noise.
+        let new: Vec<&String> = buckets
+            .keys()
+            .filter(|bucket| !known.contains(bucket))
+            .filter(|bucket| {
+                let tag = bucket
+                    .split_once(": ")
+                    .map_or(bucket.as_str(), |(_, tag)| tag);
+                !tag.starts_with("request-") && !tag.starts_with("principal-")
+            })
+            .collect();
+        if !new.is_empty() {
+            candidates.push(format!("{}: {new:?}", world.display()));
+        }
+    }
+
+    eprintln!(
+        "rbac_compat fuzz: {} worlds, mismatches per bucket (reports in {}):",
+        results.len(),
+        report_dir().display()
+    );
+    for (bucket, count) in &totals {
+        eprintln!("  {count:>7}  {bucket}");
+    }
+    if !candidates.is_empty() {
+        candidates.sort();
+        eprintln!(
+            "worlds with buckets the curated baseline lacks:\n  {}",
+            candidates.join("\n  ")
+        );
+    }
+    if !failures.is_empty() {
+        failures.sort();
+        bail!(
+            "rbac_compat fuzz: {} worlds failed:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
         );
     }
     Ok(())

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -68,6 +70,64 @@ func TestSmokeDecisions(t *testing.T) {
 			if decision.Allowed != test.allowed {
 				t.Errorf("allowed = %v, want %v (reason %q, tags %v)",
 					decision.Allowed, test.allowed, decision.Reason, decision.Tags)
+			}
+		})
+	}
+}
+
+// TestCounterfactualTags checks that denials are attributed to the
+// Kubernetes behavior that causes them, and only to it.
+func TestCounterfactualTags(t *testing.T) {
+	world, err := LoadWorld(smokeWorld)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oracle := NewOracle(world)
+	for _, counterfactual := range []struct {
+		tag     string
+		variant worldVariant
+	}{
+		{"denied-by-resource-names", withoutResourceNames},
+		{"denied-by-aggregation-replacing-rules", aggregationKeepsOwnRules},
+	} {
+		variantWorld, err := loadWorld(smokeWorld, counterfactual.variant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oracle.AddCounterfactual(counterfactual.tag, variantWorld, false)
+	}
+
+	resource := func(username, resource, name, verb string) Request {
+		return Request{User: username, Groups: authenticatedGroups(username), Namespace: "team-a",
+			Resource: resource, Name: name, Verb: verb}
+	}
+	tests := []struct {
+		name    string
+		request Request
+		tag     string
+	}{
+		{"resourceNames", resource("frank", "configmaps", "other", "get"), "denied-by-resource-names"},
+		{"aggregation replaces own rules", resource("erin", "secrets", "", "get"), "denied-by-aggregation-replacing-rules"},
+		{"plain denial", resource("alice", "secrets", "", "get"), ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decision, err := oracle.Decide(&test.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var explanations []string
+			for _, tag := range decision.Tags {
+				if strings.HasPrefix(tag, "denied-by-") {
+					explanations = append(explanations, tag)
+				}
+			}
+			var want []string
+			if test.tag != "" {
+				want = []string{test.tag}
+			}
+			if decision.Allowed || !slices.Equal(explanations, want) {
+				t.Errorf("allowed = %v, explanations = %v, want denied with %v", decision.Allowed, explanations, want)
 			}
 		})
 	}

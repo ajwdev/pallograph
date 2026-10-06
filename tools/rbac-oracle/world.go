@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,17 +38,37 @@ type World struct {
 	AggregatedRoles map[string]bool
 
 	// WrittenRules is every rule as written in the world file, before
-	// aggregation replaced any. Requests are generated from these so that
-	// rules aggregation discards are still probed.
-	WrittenRules []rbacv1.PolicyRule
+	// aggregation replaced any, and WrittenClusterRoleRules the same per
+	// ClusterRole. Requests are generated from these too, so that rules
+	// aggregation discards are still probed.
+	WrittenRules            []rbacv1.PolicyRule
+	WrittenClusterRoleRules map[string][]rbacv1.PolicyRule
 }
 
 const worldFile = "rbac.yaml"
+
+// worldVariant selects how a world is read: a set of flags, each a
+// deliberate departure from the API server. The oracle uses them to
+// explain denials (see Oracle.AddCounterfactual).
+type worldVariant int
+
+const (
+	kubernetesSemantics worldVariant = 0
+	// withoutResourceNames drops every rule's resourceNames.
+	withoutResourceNames worldVariant = 1 << iota
+	// aggregationKeepsOwnRules adds an aggregated ClusterRole's own rules
+	// to the aggregated ones instead of replacing them.
+	aggregationKeepsOwnRules
+)
 
 // LoadWorld reads <dir>/rbac.yaml, a multi-document YAML file of RBAC
 // objects. Objects of any other kind are ignored, so a world can also carry
 // the Namespaces and ServiceAccounts a live cluster needs.
 func LoadWorld(dir string) (*World, error) {
+	return loadWorld(dir, kubernetesSemantics)
+}
+
+func loadWorld(dir string, variant worldVariant) (*World, error) {
 	data, err := os.ReadFile(filepath.Join(dir, worldFile))
 	if err != nil {
 		return nil, err
@@ -74,18 +96,50 @@ func LoadWorld(dir string) (*World, error) {
 			}
 			return nil, err
 		}
-		if err := world.add(object); err != nil {
-			return nil, err
+		// A List (kubectl get -o yaml, the bootstrap policy golden files)
+		// holds its objects as raw items.
+		objects := []runtime.Object{object}
+		if list, isList := object.(*corev1.List); isList {
+			objects = objects[:0]
+			for _, item := range list.Items {
+				object, _, err := decoder.Decode(item.Raw, nil, nil)
+				if err != nil {
+					if runtime.IsNotRegisteredError(err) {
+						continue
+					}
+					return nil, err
+				}
+				objects = append(objects, object)
+			}
+		}
+		for _, object := range objects {
+			if err := world.add(object); err != nil {
+				return nil, err
+			}
 		}
 	}
 
 	for _, role := range world.Roles {
 		world.WrittenRules = append(world.WrittenRules, role.Rules...)
 	}
+	world.WrittenClusterRoleRules = map[string][]rbacv1.PolicyRule{}
 	for _, role := range world.ClusterRoles {
 		world.WrittenRules = append(world.WrittenRules, role.Rules...)
+		world.WrittenClusterRoleRules[role.Name] = slices.Clone(role.Rules)
 	}
-	world.aggregate()
+	if variant&withoutResourceNames != 0 {
+		for _, role := range world.Roles {
+			for i := range role.Rules {
+				role.Rules[i].ResourceNames = nil
+			}
+		}
+		for _, role := range world.ClusterRoles {
+			for i := range role.Rules {
+				role.Rules[i].ResourceNames = nil
+			}
+		}
+	}
+	world.aggregate(variant&aggregationKeepsOwnRules != 0)
 	return world, nil
 }
 
@@ -144,7 +198,11 @@ func (w *World) add(object runtime.Object) error {
 // ClusterRole matching any of its selectors, visited in name order. The
 // controller is level-triggered and resyncs whenever any ClusterRole
 // changes, so chained aggregation settles the same way.
-func (w *World) aggregate() {
+func (w *World) aggregate(keepOwnRules bool) {
+	ownRules := map[string][]rbacv1.PolicyRule{}
+	for _, role := range w.ClusterRoles {
+		ownRules[role.Name] = slices.Clone(role.Rules)
+	}
 	sort.Slice(w.ClusterRoles, func(i, j int) bool {
 		return w.ClusterRoles[i].Name < w.ClusterRoles[j].Name
 	})
@@ -157,6 +215,9 @@ func (w *World) aggregate() {
 			}
 
 			newRules := []rbacv1.PolicyRule{}
+			if keepOwnRules {
+				newRules = slices.Clone(ownRules[aggregated.Name])
+			}
 			for i := range aggregated.AggregationRule.ClusterRoleSelectors {
 				selector, err := metav1.LabelSelectorAsSelector(&aggregated.AggregationRule.ClusterRoleSelectors[i])
 				if err != nil {

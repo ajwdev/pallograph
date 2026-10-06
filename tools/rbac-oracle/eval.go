@@ -15,9 +15,31 @@ import (
 
 // Oracle answers requests with the kube-apiserver RBAC authorizer.
 type Oracle struct {
-	world      *World
+	world           *World
+	authorizer      *rbacauthorizer.RBACAuthorizer
+	resolver        *rbacregistryvalidation.DefaultRuleResolver
+	counterfactuals []counterfactual
+}
+
+// counterfactual is an authorizer over a deliberately altered copy of the
+// world. A denied request it would allow gets its tag, which names the
+// Kubernetes behavior responsible for the denial.
+type counterfactual struct {
+	tag        string
 	authorizer *rbacauthorizer.RBACAuthorizer
-	resolver   *rbacregistryvalidation.DefaultRuleResolver
+	fallback   bool
+}
+
+// AddCounterfactual tags every denied request that world would allow with
+// tag. Over-grants carrying such a tag are explained by that behavior;
+// over-grants carrying none are unexplained. A fallback counterfactual is
+// only consulted when no earlier one explained the denial, so a combination
+// of behaviors is reported only when no single one suffices.
+func (o *Oracle) AddCounterfactual(tag string, world *World, fallback bool) {
+	_, static := rbacregistryvalidation.NewTestRuleResolver(
+		world.Roles, world.RoleBindings, world.ClusterRoles, world.ClusterRoleBindings)
+	o.counterfactuals = append(o.counterfactuals,
+		counterfactual{tag, rbacauthorizer.New(static, static, static, static), fallback})
 }
 
 func NewOracle(world *World) *Oracle {
@@ -48,6 +70,20 @@ func (o *Oracle) Decide(request *Request) (Decision, error) {
 		Tags:    requestTags(request),
 	}
 	if !decision.Allowed {
+		explained := false
+		for _, counterfactual := range o.counterfactuals {
+			if counterfactual.fallback && explained {
+				continue
+			}
+			verdict, _, err := counterfactual.authorizer.Authorize(ctx, attributes)
+			if err != nil {
+				return Decision{}, err
+			}
+			if verdict == authorizer.DecisionAllow {
+				decision.Tags = append(decision.Tags, counterfactual.tag)
+				explained = true
+			}
+		}
 		slices.Sort(decision.Tags)
 		return decision, nil
 	}
