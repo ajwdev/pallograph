@@ -1,4 +1,10 @@
 {
+  "aggregation-without-sources": {
+    "over-grant: denied-by-aggregation-replacing-rules": 4,
+    "over-grant: request-cluster-scope": 2,
+    "over-grant: request-named": 2,
+    "over-grant: total": 4
+  },
   "bootstrap-v1.37": {
     "over-grant: denied-by-resource-names": 38,
     "over-grant: principal-serviceaccount": 20,

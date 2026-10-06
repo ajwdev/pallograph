@@ -7,6 +7,7 @@
 //	rbac-oracle gen-worlds -seed S -count N <dir>      writes N random worlds under <dir>
 //	rbac-oracle gen [-limit N] [-seed S] <world>...    writes <world>/requests.ndjson.zst
 //	rbac-oracle eval <world>...                        writes <world>/oracle.ndjson.zst
+//	rbac-oracle kind-verify [-context C] <world>...    checks the oracle against a live API server
 package main
 
 import (
@@ -30,6 +31,8 @@ func main() {
 		err = runGen(os.Args[2:])
 	case "eval":
 		err = runEval(os.Args[2:])
+	case "kind-verify":
+		err = runKindVerify(os.Args[2:])
 	default:
 		usage()
 	}
@@ -42,7 +45,8 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage: rbac-oracle gen-worlds -seed S -count N <dir>
        rbac-oracle gen [-limit N] [-seed S] <world>...
-       rbac-oracle eval <world>...`)
+       rbac-oracle eval <world>...
+       rbac-oracle kind-verify [-context C] [-sample N] <world>...`)
 	os.Exit(2)
 }
 

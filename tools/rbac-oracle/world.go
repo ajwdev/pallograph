@@ -69,13 +69,37 @@ func LoadWorld(dir string) (*World, error) {
 }
 
 func loadWorld(dir string, variant worldVariant) (*World, error) {
-	data, err := os.ReadFile(filepath.Join(dir, worldFile))
+	objects, err := readObjects(filepath.Join(dir, worldFile))
+	if err != nil {
+		return nil, err
+	}
+	return NewWorld(objects, variant)
+}
+
+// readObjects decodes every object in a multi-document YAML file,
+// unwrapping Lists (kubectl get -o yaml, the bootstrap policy golden files
+// hold their objects as raw items). Kinds the client-go scheme does not
+// know are skipped.
+func readObjects(path string) ([]runtime.Object, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 
-	world := &World{AggregatedRoles: map[string]bool{}}
+	var objects []runtime.Object
 	decoder := scheme.Codecs.UniversalDeserializer()
+	decode := func(data []byte) error {
+		object, _, err := decoder.Decode(data, nil, nil)
+		if runtime.IsNotRegisteredError(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		objects = append(objects, object)
+		return nil
+	}
+
 	reader := utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(data)))
 	for {
 		document, err := reader.Read()
@@ -83,39 +107,37 @@ func loadWorld(dir string, variant worldVariant) (*World, error) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s: %w", path, err)
 		}
 		if len(bytes.TrimSpace(document)) == 0 {
 			continue
 		}
-
-		object, _, err := decoder.Decode(document, nil, nil)
-		if err != nil {
-			if runtime.IsNotRegisteredError(err) {
-				continue
-			}
-			return nil, err
+		before := len(objects)
+		if err := decode(document); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
 		}
-		// A List (kubectl get -o yaml, the bootstrap policy golden files)
-		// holds its objects as raw items.
-		objects := []runtime.Object{object}
-		if list, isList := object.(*corev1.List); isList {
-			objects = objects[:0]
-			for _, item := range list.Items {
-				object, _, err := decoder.Decode(item.Raw, nil, nil)
-				if err != nil {
-					if runtime.IsNotRegisteredError(err) {
-						continue
+		if len(objects) > before {
+			if list, isList := objects[before].(*corev1.List); isList {
+				objects = objects[:before]
+				for _, item := range list.Items {
+					if err := decode(item.Raw); err != nil {
+						return nil, fmt.Errorf("%s: %w", path, err)
 					}
-					return nil, err
 				}
-				objects = append(objects, object)
 			}
 		}
-		for _, object := range objects {
-			if err := world.add(object); err != nil {
-				return nil, err
-			}
+	}
+	return objects, nil
+}
+
+// NewWorld builds a world from RBAC objects (others are ignored), applying
+// API server defaulting, validation and ClusterRole aggregation as variant
+// says.
+func NewWorld(objects []runtime.Object, variant worldVariant) (*World, error) {
+	world := &World{AggregatedRoles: map[string]bool{}}
+	for _, object := range objects {
+		if err := world.add(object.DeepCopyObject()); err != nil {
+			return nil, err
 		}
 	}
 
@@ -195,9 +217,9 @@ func (w *World) add(object runtime.Object) error {
 // point. It mirrors syncClusterRole in
 // pkg/controller/clusterroleaggregation: an aggregated ClusterRole's rules
 // are replaced (not extended) by the deduplicated rules of every other
-// ClusterRole matching any of its selectors, visited in name order. The
-// controller is level-triggered and resyncs whenever any ClusterRole
-// changes, so chained aggregation settles the same way.
+// ClusterRole matching any of its selectors, visited in name order, unless
+// that leaves none. The controller is level-triggered and resyncs whenever
+// any ClusterRole changes, so chained aggregation settles the same way.
 func (w *World) aggregate(keepOwnRules bool) {
 	ownRules := map[string][]rbacv1.PolicyRule{}
 	for _, role := range w.ClusterRoles {
@@ -237,6 +259,15 @@ func (w *World) aggregate(keepOwnRules bool) {
 			}
 
 			w.AggregatedRoles[aggregated.Name] = true
+			// The controller writes rules with a server-side apply, and an
+			// empty rule list leaves the field out of the patch, so the
+			// rules the role was created with stay. (Once the controller has
+			// owned the field, omitting it would remove them instead; a
+			// static world cannot see that history, and a freshly created
+			// one never has it.)
+			if len(newRules) == 0 {
+				continue
+			}
 			if !equality.Semantic.DeepEqual(newRules, aggregated.Rules) {
 				aggregated.Rules = newRules
 				changed = true

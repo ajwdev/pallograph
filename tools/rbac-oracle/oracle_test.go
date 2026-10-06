@@ -132,3 +132,35 @@ func TestCounterfactualTags(t *testing.T) {
 		})
 	}
 }
+
+// TestAggregationWithoutSources pins a case found against a live cluster:
+// an aggregated ClusterRole whose selectors match nothing keeps its own
+// rules, while one with a source has them replaced.
+func TestAggregationWithoutSources(t *testing.T) {
+	world, err := LoadWorld("../../tests/rbac_compat/worlds/aggregation-without-sources")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oracle := NewOracle(world)
+	tests := []struct {
+		name    string
+		user    string
+		allowed bool
+	}{
+		{"no sources keeps own rules", "grace", true},
+		{"a source replaces own rules", "heidi", false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := Request{User: test.user, Groups: authenticatedGroups(test.user),
+				Namespace: "default", Resource: "configmaps", Verb: "get"}
+			decision, err := oracle.Decide(&request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decision.Allowed != test.allowed {
+				t.Errorf("allowed = %v, want %v (reason %q)", decision.Allowed, test.allowed, decision.Reason)
+			}
+		})
+	}
+}

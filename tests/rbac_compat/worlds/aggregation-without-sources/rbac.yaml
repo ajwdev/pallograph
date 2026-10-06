@@ -1,0 +1,67 @@
+# An aggregated ClusterRole whose selectors match nothing keeps the rules it
+# was created with: the aggregation controller's server-side apply leaves
+# an empty rule list out of the patch. Found by hack/rbac-kind-verify.sh;
+# see World.aggregate in tools/rbac-oracle. With a matching source, the
+# same role's own rules are replaced (no-longer-own, for contrast).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: keeps-own-rules
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-without-sources.pallograph.dev/nothing-has-this: "true"
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: grace-keeps-own-rules
+subjects:
+- kind: User
+  name: grace
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: keeps-own-rules
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: no-longer-own
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-without-sources.pallograph.dev/source: "true"
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: source
+  labels:
+    aggregation-without-sources.pallograph.dev/source: "true"
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: heidi-no-longer-own
+subjects:
+- kind: User
+  name: heidi
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: no-longer-own
