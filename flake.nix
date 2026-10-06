@@ -40,6 +40,8 @@
       buildInputs = buildInputs ++ (with pkgs; [
         rust.stable.rust-analyzer
         kind
+        # The RBAC oracle (tools/rbac-oracle) and its scripts.
+        go
         kubectl
         kwok
         # Used to regenerate src/builtins.txt (see its header).

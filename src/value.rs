@@ -55,7 +55,7 @@ pub fn value_to_json(v: &Value) -> Json {
         // Structs and maps interleave keys and values: [k1, v1, k2, v2, ...].
         Value::Compound(CompoundKind::Struct | CompoundKind::Map, pairs) => {
             let mut map = serde_json::Map::with_capacity(pairs.len() / 2);
-            for chunk in pairs.chunks_exact(2) {
+            for chunk in pairs.as_chunks::<2>().0 {
                 let key = match &chunk[0] {
                     Value::Name(s) => s.strip_prefix('/').unwrap_or(s).to_string(),
                     other => other.to_string(),
@@ -72,7 +72,7 @@ pub fn value_to_json(v: &Value) -> Json {
 pub fn struct_get<'a>(s: &'a Value, field: &str) -> Option<&'a Value> {
     let key = Value::Name(format!("/{field}"));
     if let Value::Compound(_, pairs) = s {
-        for chunk in pairs.chunks_exact(2) {
+        for chunk in pairs.as_chunks::<2>().0 {
             if chunk[0] == key {
                 return Some(&chunk[1]);
             }
