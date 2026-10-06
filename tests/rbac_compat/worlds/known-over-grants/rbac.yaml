@@ -1,0 +1,69 @@
+# Minimal world for the two over-grants known in rbac_allowed. It is small
+# enough to keep every generated request, so neither case is sampled away.
+
+# resourceNames: frank may only touch the ConfigMap named app-config.
+# Pallograph ignores resourceNames and grants every name.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: one-configmap
+  namespace: team-a
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["app-config"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: frank-one-configmap
+  namespace: team-a
+subjects:
+- kind: User
+  name: frank
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: one-configmap
+---
+# Aggregation: the controller replaces an aggregated ClusterRole's own rules
+# with its sources' rules, so erin cannot get secrets. Pallograph keeps the
+# own rules alongside the aggregated ones.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aggregate-edit
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      over-grant.pallograph.dev/aggregate-to-edit: "true"
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: edit-services
+  labels:
+    over-grant.pallograph.dev/aggregate-to-edit: "true"
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: erin-aggregate-edit
+subjects:
+- kind: User
+  name: erin
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aggregate-edit

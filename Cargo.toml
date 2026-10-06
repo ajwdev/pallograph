@@ -43,6 +43,8 @@ z3 = "0.12"
 criterion = { version = "0.5", features = ["html_reports"] }
 # Used by integration tests (tests/) to construct `Value` fixtures.
 mangle-common = "0.9.1"
+# Reads the zstd-compressed RBAC compatibility fixtures (tests/rbac_compat.rs).
+zstd = "0.14"
 
 [[bench]]
 name = "bulk_load"

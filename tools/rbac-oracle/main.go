@@ -4,8 +4,8 @@
 //
 // A world is a directory holding rbac.yaml. Subcommands:
 //
-//	rbac-oracle gen [-limit N] [-seed S] <world>   writes <world>/requests.ndjson
-//	rbac-oracle eval <world>                       writes <world>/oracle.ndjson
+//	rbac-oracle gen [-limit N] [-seed S] <world>   writes <world>/requests.ndjson.zst
+//	rbac-oracle eval <world>                       writes <world>/oracle.ndjson.zst
 package main
 
 import (
@@ -56,7 +56,7 @@ func runGen(args []string) error {
 		return err
 	}
 	requests := GenerateRequests(world, *limit, *seed)
-	if err := writeNDJSON(filepath.Join(dir, "requests.ndjson"), requests); err != nil {
+	if err := writeNDJSON(filepath.Join(dir, requestsFile), requests); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "%s: %d requests\n", dir, len(requests))
@@ -75,7 +75,7 @@ func runEval(args []string) error {
 	if err != nil {
 		return err
 	}
-	requests, err := readRequests(filepath.Join(dir, "requests.ndjson"))
+	requests, err := readRequests(filepath.Join(dir, requestsFile))
 	if err != nil {
 		return err
 	}
@@ -95,7 +95,7 @@ func runEval(args []string) error {
 	}
 	elapsed := time.Since(start)
 
-	if err := writeNDJSON(filepath.Join(dir, "oracle.ndjson"), decisions); err != nil {
+	if err := writeNDJSON(filepath.Join(dir, oracleFile), decisions); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "%s: %d requests, %d allowed, %v\n", dir, len(requests), allowed, elapsed.Round(time.Millisecond))

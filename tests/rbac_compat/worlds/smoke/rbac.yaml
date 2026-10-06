@@ -43,9 +43,13 @@ kind: RoleBinding
 metadata:
   name: deployer-one-configmap
   namespace: team-a
+# The User subject isolates the resourceNames check from SA defaulting.
 subjects:
 - kind: ServiceAccount
   name: deployer
+- kind: User
+  name: frank
+  apiGroup: rbac.authorization.k8s.io
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -173,7 +177,21 @@ rules:
   resources: ["services"]
   verbs: ["create", "delete"]
 ---
-# Chained aggregation: aggregate-edit-plus pulls in aggregate-edit.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: erin-aggregate-edit
+subjects:
+- kind: User
+  name: erin
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aggregate-edit
+---
+# Chained aggregation: aggregate-edit-plus pulls in plus-source, which
+# pulls in edit-services.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

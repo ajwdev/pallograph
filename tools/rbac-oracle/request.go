@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 )
@@ -76,33 +78,50 @@ func splitServiceAccount(username string) (namespace, name string, ok bool) {
 	return namespace, name, ok
 }
 
+// World files are zstd-compressed NDJSON so the committed fixtures stay
+// small. A single-threaded encoder keeps the output byte-identical for the
+// same input, so regenerating unchanged fixtures leaves git clean.
+const (
+	requestsFile = "requests.ndjson.zst"
+	oracleFile   = "oracle.ndjson.zst"
+)
+
 func readRequests(path string) ([]Request, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
+	reader, err := zstd.NewReader(bufio.NewReader(file))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	defer reader.Close()
 
 	var requests []Request
-	decoder := json.NewDecoder(bufio.NewReader(file))
+	decoder := json.NewDecoder(reader)
 	for {
 		var request Request
 		if err := decoder.Decode(&request); err == io.EOF {
 			return requests, nil
 		} else if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s: %w", path, err)
 		}
 		requests = append(requests, request)
 	}
 }
 
-// writeNDJSON writes each value as one JSON line.
+// writeNDJSON writes each value as one JSON line, zstd-compressed.
 func writeNDJSON[T any](path string, values []T) error {
 	file, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	writer := bufio.NewWriter(file)
+	writer, err := zstd.NewWriter(file, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+	if err != nil {
+		file.Close()
+		return err
+	}
 	encoder := json.NewEncoder(writer)
 	for i := range values {
 		if err := encoder.Encode(&values[i]); err != nil {
@@ -110,7 +129,7 @@ func writeNDJSON[T any](path string, values []T) error {
 			return err
 		}
 	}
-	if err := writer.Flush(); err != nil {
+	if err := writer.Close(); err != nil {
 		file.Close()
 		return err
 	}

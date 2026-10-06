@@ -56,6 +56,29 @@ Decl user_groups(Username, Group)
   ]
   bound [/string, /string].
 
+Decl access_request(Id, User, Namespace, ApiGroup, Resource, Subresource, Name, Verb, Path)
+  descr [
+    doc("Authorization requests to decide, as the kube-apiserver sees them; answered by rbac_allowed."),
+    arg(Id, "request id"),
+    arg(User, "authenticated username, e.g. alice or system:serviceaccount:<ns>:<name>"),
+    arg(Namespace, "request namespace; empty for cluster-scoped and non-resource requests"),
+    arg(ApiGroup, "API group; empty for the core group"),
+    arg(Resource, "resource, e.g. pods"),
+    arg(Subresource, "subresource, e.g. exec; empty if none"),
+    arg(Name, "object name; empty for list, create and collection verbs"),
+    arg(Verb, "verb, e.g. get"),
+    arg(Path, "URL path for a non-resource request, e.g. /healthz; empty for resource requests")
+  ]
+  bound [/number, /string, /string, /string, /string, /string, /string, /string, /string].
+
+Decl access_request_group(Id, Group)
+  descr [
+    doc("Groups the authenticator attached to an access_request, one row per group."),
+    arg(Id, "request id"),
+    arg(Group, "group name, e.g. system:authenticated")
+  ]
+  bound [/number, /string].
+
 Decl object_label(ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue)
   descr [
     doc("Labels on objects, one row per label."),
