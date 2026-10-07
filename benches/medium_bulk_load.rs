@@ -5,7 +5,7 @@
 //! an anonymized cluster dump published as a release asset.
 //!
 //! Kept as a separate bench target (distinct benchmark names, e.g.
-//! `medium_bulk_load/interpreter`) so each fixture tier has its own
+//! `medium_bulk_load/mangle`) so each fixture tier has its own
 //! Criterion regression history. Criterion compares each benchmark name
 //! against its own prior run, and swapping the fixture data behind the
 //! same name makes that history meaningless.
@@ -39,11 +39,11 @@ fn medium_bulk_load(c: &mut Criterion) {
     let mut group = c.benchmark_group("medium_bulk_load");
     group.sample_size(10);
 
-    group.bench_function("interpreter", |b| {
+    group.bench_function("mangle", |b| {
         b.iter(|| InterpreterBackend.evaluate(&edb, &rules).unwrap())
     });
 
-    group.bench_function("dd_session", |b| {
+    group.bench_function("dd", |b| {
         b.iter_batched(
             || (edb.clone(), rules.clone()),
             |(edb_c, rules_c)| {

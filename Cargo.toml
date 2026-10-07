@@ -49,7 +49,7 @@ name = "small_bulk_load"
 harness = false
 
 [[bench]]
-name = "small_incremental"
+name = "small_fact_update"
 harness = false
 
 [[bench]]
@@ -57,7 +57,15 @@ name = "medium_bulk_load"
 harness = false
 
 [[bench]]
-name = "medium_incremental"
+name = "medium_fact_update"
+harness = false
+
+[[bench]]
+name = "small_provenance"
+harness = false
+
+[[bench]]
+name = "medium_provenance"
 harness = false
 
 [features]

@@ -10,29 +10,29 @@
 //!
 //! Two variants:
 //!
-//! - `interpreter`  — `InterpreterBackend::evaluate`, the baseline
-//! - `dd_session`   — `Engine::from_parts`, which builds the dataflow graph,
-//!   spawns the persistent worker, and feeds + settles the
-//!   initial EDB; this is the real DD startup cost
+//! - `mangle` — Mangle's `InterpreterBackend::evaluate`, the baseline
+//! - `dd`     — `Engine::from_parts` with `DdBackend`, which builds the
+//!   dataflow graph, spawns the persistent worker, and feeds +
+//!   settles the initial EDB; this is the real DD startup cost
 //!
 //! (`DdBackend::evaluate` now just spawns + snapshots + drops a session, so a
-//! separate batch bench would duplicate `dd_session`.)
+//! separate batch bench would duplicate `dd`.)
 //!
 //! Run:  cargo bench --bench small_bulk_load
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use pallograph::engine::{Backend, DdBackend, Engine, InterpreterBackend, load_bench_fixtures};
 
-fn interpreter_evaluate(c: &mut Criterion) {
+fn mangle_evaluate(c: &mut Criterion) {
     let (edb, rules) = load_bench_fixtures().expect("load fixtures");
-    c.bench_function("small_bulk_load/interpreter", |b| {
+    c.bench_function("small_bulk_load/mangle", |b| {
         b.iter(|| InterpreterBackend.evaluate(&edb, &rules).unwrap())
     });
 }
 
-fn dd_session_spawn(c: &mut Criterion) {
+fn dd_spawn(c: &mut Criterion) {
     let (edb, rules) = load_bench_fixtures().expect("load fixtures");
-    c.bench_function("small_bulk_load/dd_session", |b| {
+    c.bench_function("small_bulk_load/dd", |b| {
         b.iter_batched(
             // Setup: clone pre-loaded data (no file I/O).
             || (edb.clone(), rules.clone()),
@@ -48,5 +48,5 @@ fn dd_session_spawn(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, interpreter_evaluate, dd_session_spawn);
+criterion_group!(benches, mangle_evaluate, dd_spawn);
 criterion_main!(benches);
