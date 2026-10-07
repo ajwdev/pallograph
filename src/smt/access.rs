@@ -596,7 +596,7 @@ impl<'ctx> SmtEncoder<'ctx> {
         // Build hop chains for all relevant targets first.
         let target_chains: Vec<(&String, Vec<(String, String)>)> = relevant_targets
             .iter()
-            .map(|t| (*t, self.build_hop_chain(principal, t, &mut HashSet::new())))
+            .map(|t| (*t, self.build_hop_chain(principal, t)))
             .collect();
 
         // The set of identities that appear as the final hop of some chain.
@@ -672,74 +672,46 @@ impl<'ctx> SmtEncoder<'ctx> {
 
     /// Reconstruct the escalation hop chain from `principal` to `target`.
     /// Returns `Vec<(identity, mechanism)>` describing each step; the last element
-    /// is always `target`. Handles multi-hop chains by walking `escalation_hop` facts.
-    /// `visited` guards against cycles in mutual-escalation graphs.
-    fn build_hop_chain(
-        &self,
-        principal: &str,
-        target: &str,
-        visited: &mut HashSet<String>,
-    ) -> Vec<(String, String)> {
+    /// is always `target`. Breadth-first over `escalation_hop` facts, so the chain
+    /// has the fewest hops and cycles in mutual-escalation graphs are harmless.
+    fn build_hop_chain(&self, principal: &str, target: &str) -> Vec<(String, String)> {
         use mangle_common::Value;
+        use std::collections::VecDeque;
 
-        // Check for a direct hop: escalation_hop(principal, target).
-        let is_direct_hop = self.facts.get("escalation_hop").is_some_and(|rows| {
-            rows.iter().any(|r| {
-                if let [Value::String(p), Value::String(t)] = r.as_slice() {
-                    p == principal && t == target
-                } else {
-                    false
-                }
-            })
-        });
+        let hops = self.facts.get("escalation_hop");
 
-        if is_direct_hop {
-            let mech = self.mechanism_for(principal, target).unwrap_or_default();
-            return vec![(target.to_string(), mech)];
-        }
+        // Each queue entry is (node, hops taken from `principal` to reach it).
+        let mut queue: VecDeque<(String, Vec<(String, String)>)> = VecDeque::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        seen.insert(principal.to_string());
+        queue.push_back((principal.to_string(), vec![]));
 
-        // Multi-hop: find an intermediate B where escalation_hop(principal, B)
-        // and controls_identity(B, target). Guard against cycles with `visited`.
-        if !visited.insert(principal.to_string()) {
-            return vec![(target.to_string(), String::new())];
-        }
-
-        let intermediates: Vec<String> = self
-            .facts
-            .get("escalation_hop")
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|r| {
-                        if let [Value::String(p), Value::String(mid)] = r.as_slice() {
-                            if p == principal && mid != target && !visited.contains(mid) {
-                                Some(mid.clone())
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        for mid in &intermediates {
-            let mid_reaches_target = self.facts.get("controls_identity").is_some_and(|rows| {
-                rows.iter().any(|r| {
-                    if let [Value::String(p), Value::String(t)] = r.as_slice() {
-                        p == mid && t == target
+        while let Some((current, path)) = queue.pop_front() {
+            let neighbours: Vec<&String> = hops
+                .into_iter()
+                .flatten()
+                .filter_map(|r| {
+                    if let [Value::String(p), Value::String(next)] = r.as_slice()
+                        && p == &current
+                    {
+                        Some(next)
                     } else {
-                        false
+                        None
                     }
                 })
-            });
+                .collect();
 
-            if mid_reaches_target {
-                let mech_to_mid = self.mechanism_for(principal, mid).unwrap_or_default();
-                let mut chain = vec![(mid.clone(), mech_to_mid)];
-                chain.extend(self.build_hop_chain(mid, target, visited));
-                return chain;
+            for next in neighbours {
+                if !seen.insert(next.clone()) {
+                    continue;
+                }
+                let mech = self.mechanism_for(&current, next).unwrap_or_default();
+                let mut next_path = path.clone();
+                next_path.push((next.clone(), mech));
+                if next == target {
+                    return next_path;
+                }
+                queue.push_back((next.clone(), next_path));
             }
         }
 
@@ -1123,7 +1095,6 @@ mod tests {
         ]
         .join("\n");
         let eval = load_engine_with(&extra).evaluate().expect("evaluate");
-
         let cfg = z3::Config::new();
         let ctx = z3::Context::new(&cfg);
         let mut enc = SmtEncoder::new(&ctx);
@@ -1139,5 +1110,113 @@ mod tests {
         };
         assert_eq!(mechanisms("exec-user"), vec!["pod-exec"]);
         assert_eq!(mechanisms("create-user"), vec!["pod-create"]);
+    }
+
+    /// One ServiceAccount per namespace (`ns-<name>/<name>`), plus a token-mint
+    /// edge `src -> dst` for each pair: a RoleBinding in dst's namespace gives src
+    /// `serviceaccounts/token create`, so `escalation_hop(src, dst)` holds.
+    /// `holder` additionally gets cluster-wide `secrets get`.
+    fn token_graph(names: &[&str], edges: &[(&str, &str)], holder: &str) -> String {
+        let mut out = String::new();
+        for n in names {
+            out += &format!(
+                r#"{{"apiVersion":"v1","kind":"ServiceAccount","metadata":{{"name":"{n}","namespace":"ns-{n}"}}}}"#
+            );
+            out += "\n";
+            out += &format!(
+                r#"{{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"Role","metadata":{{"name":"minter","namespace":"ns-{n}"}},"rules":[{{"apiGroups":[""],"resources":["serviceaccounts/token"],"verbs":["create"]}}]}}"#
+            );
+            out += "\n";
+        }
+        out += r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"secret-reader"},"rules":[{"apiGroups":[""],"resources":["secrets"],"verbs":["get"]}]}"#;
+        out += "\n";
+        out += &format!(
+            r#"{{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{{"name":"secret-reader"}},"roleRef":{{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"secret-reader"}},"subjects":[{{"kind":"ServiceAccount","name":"{holder}","namespace":"ns-{holder}"}}]}}"#
+        );
+        out += "\n";
+        for (src, dst) in edges {
+            out += &format!(
+                r#"{{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{{"name":"from-{src}","namespace":"ns-{dst}"}},"roleRef":{{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"minter"}},"subjects":[{{"kind":"ServiceAccount","name":"{src}","namespace":"ns-{src}"}}]}}"#
+            );
+            out += "\n";
+        }
+        out
+    }
+
+    /// Hop chains `principal` uses to reach cluster-wide `secrets get`,
+    /// as `(identity, mechanism)` per hop.
+    fn hop_chains(extra: &str, principal: &str) -> Vec<Vec<(String, String)>> {
+        let eval = load_engine_with(extra).evaluate().expect("evaluate");
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let mut enc = SmtEncoder::new(&ctx);
+        enc.assert_rbac_axioms(&eval);
+        let want = format!("system:serviceaccount:ns-{principal}:{principal}");
+        let found = enc.check_reaches("", "", "secrets", "get", &[], false);
+        let v = found
+            .iter()
+            .find(|v| v.principal == want)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{want} missing from {:?}",
+                    found.iter().map(|v| &v.principal).collect::<Vec<_>>()
+                )
+            });
+        v.paths.iter().map(|p| p.hops.clone()).collect()
+    }
+
+    fn sa_id(n: &str) -> String {
+        format!("system:serviceaccount:ns-{n}:{n}")
+    }
+
+    #[test]
+    fn hop_chain_is_the_shortest_route() {
+        // p -> z -> t (2 hops) and p -> n1 -> n2 -> t (3 hops); no direct p -> t.
+        // Both z and n1 control t, so a depth-first walk that tries n1 first
+        // returns the 3-hop chain.
+        let extra = token_graph(
+            &["p", "n1", "n2", "t", "z"],
+            &[
+                ("p", "n1"),
+                ("n1", "n2"),
+                ("n2", "t"),
+                ("p", "z"),
+                ("z", "t"),
+            ],
+            "t",
+        );
+        let chains = hop_chains(&extra, "p");
+        assert!(!chains.is_empty(), "no path found");
+        for hops in chains {
+            let ids: Vec<&str> = hops.iter().map(|(id, _)| id.as_str()).collect();
+            assert_eq!(ids, [sa_id("z"), sa_id("t")], "not the shortest chain");
+            assert!(hops.iter().all(|(_, mech)| mech == "token"), "{hops:?}");
+        }
+    }
+
+    #[test]
+    fn hop_chain_survives_a_cycle_on_the_way() {
+        // a <-> b is a cycle; the way out is a -> c -> t. b controls t only
+        // through a, so a walk that enters b first has nowhere left to go.
+        let extra = token_graph(
+            &["a", "b", "c", "t"],
+            &[("a", "b"), ("b", "a"), ("a", "c"), ("c", "t")],
+            "t",
+        );
+        let chains = hop_chains(&extra, "a");
+        assert!(!chains.is_empty(), "no path found");
+        for hops in chains {
+            let ids: Vec<&str> = hops.iter().map(|(id, _)| id.as_str()).collect();
+            assert_eq!(ids, [sa_id("c"), sa_id("t")]);
+            assert!(hops.iter().all(|(_, mech)| mech == "token"), "{hops:?}");
+        }
+
+        // b has to go through the cycle member a.
+        let chains = hop_chains(&extra, "b");
+        for hops in chains {
+            let ids: Vec<&str> = hops.iter().map(|(id, _)| id.as_str()).collect();
+            assert_eq!(ids, [sa_id("a"), sa_id("c"), sa_id("t")]);
+            assert!(hops.iter().all(|(_, mech)| mech == "token"), "{hops:?}");
+        }
     }
 }
