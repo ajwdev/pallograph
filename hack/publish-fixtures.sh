@@ -24,15 +24,19 @@ trap 'rm -rf "$tmp"' EXIT
 # Flat archive: manifests at the root, no wrapping directory. Piped through
 # zstd rather than tar --zstd, which not every tar supports.
 tar -cf - -C "$SRC" . | zstd -q -19 -o "$tmp/$ASSET"
-sha="$(shasum -a 256 "$tmp/$ASSET" | awk '{print $1}')"
+# `sha256sum` format ("<hash>  <name>") so `shasum -a 256 -c` works on a
+# downloaded pair.
+(cd "$tmp" && shasum -a 256 "$ASSET" > "$ASSET.sha256")
+sha="$(awk '{print $1}' "$tmp/$ASSET.sha256")"
 echo "==> $ASSET sha256 $sha"
 
 read -r -p "Publish $ASSET to $REPO as $TAG? [y/N] " ans
 [[ "$ans" == [yY] ]] || { echo "aborted"; exit 1; }
 
 # --latest=false: this is data, so it must not become the repo's "Latest" release.
-gh release create "$TAG" "$tmp/$ASSET" --repo "$REPO" --latest=false \
-    --title "$TAG" --notes "Anonymized medium benchmark fixture. sha256: $sha"
+gh release create "$TAG" "$tmp/$ASSET" "$tmp/$ASSET.sha256" --repo "$REPO" \
+    --latest=false --title "$TAG" \
+    --notes "Anonymized medium benchmark fixture. Verify with: shasum -a 256 -c $ASSET.sha256"
 
 cat > "$PIN" <<PINEOF
 # Pin for the medium fixture. Written by hack/publish-fixtures.sh,
