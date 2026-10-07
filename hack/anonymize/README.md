@@ -96,16 +96,24 @@ Each variable is a directory of manifests, loaded the same way as
 ## Publishing as the medium benchmark fixture
 
 The `medium_*` benches run against an anonymized dump published as a
-release asset. After `--check` passes and you have read the `--report`
-output:
+release asset. Publishing is two steps so the pinned hash is the hash of
+exactly the bytes that get uploaded. After `--check` passes and you have
+read the `--report` output:
 
 ```
-hack/publish-fixtures.sh anon fixtures-medium-v2
+hack/publish-fixtures.sh pack anon dist/medium-v2     # builds the archive, writes the pin
+git commit fixtures/testdata/medium.env               # review and merge
+hack/publish-fixtures.sh upload dist/medium-v2 <merge-sha>
 ```
 
-This tars the directory, uploads it to a GitHub release, and rewrites
-`fixtures/testdata/medium.env` with the new tag and sha256. Commit that
-file. Everyone else gets the dump with:
+`pack` builds `medium.tar.zst` and its `.sha256` in the output directory and
+writes the sha256 into `fixtures/testdata/medium.env`. Keep that directory:
+the anonymizer's default seed is random, so a rebuilt archive will not match
+the pin. To publish a new version, set `TAG` in `medium.env` first. `upload`
+refuses to run unless the archive still matches the pin, then creates the
+release for `TAG` (marked not-latest) at the given commit.
+
+Everyone else gets the dump with:
 
 ```
 hack/fetch-fixtures.sh medium
