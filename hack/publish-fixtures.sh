@@ -30,7 +30,8 @@ echo "==> $ASSET sha256 $sha"
 read -r -p "Publish $ASSET to $REPO as $TAG? [y/N] " ans
 [[ "$ans" == [yY] ]] || { echo "aborted"; exit 1; }
 
-gh release create "$TAG" "$tmp/$ASSET" --repo "$REPO" \
+# --latest=false: this is data, so it must not become the repo's "Latest" release.
+gh release create "$TAG" "$tmp/$ASSET" --repo "$REPO" --latest=false \
     --title "$TAG" --notes "Anonymized medium benchmark fixture. sha256: $sha"
 
 cat > "$PIN" <<PINEOF
