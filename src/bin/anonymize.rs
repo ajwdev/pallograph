@@ -20,6 +20,16 @@
 //! whole so the engine's literals still match. Secret/ConfigMap base64
 //! payloads are replaced with random base64 of the same length.
 //!
+//! IP addresses and `ip-A-B-C-D` / `ec2-A-B-C-D` hostnames are rewritten
+//! before tokenizing (the octets would otherwise pass as quantities). The
+//! mapping is injective and length-preserving, and a node name stays
+//! consistent with its IP. Private ranges map into the same range and keep
+//! their length. Public IPv4 maps into reserved, non-routable space (RFC 2544
+//! 198.18.0.0/15 plus the RFC 5737 TEST-NETs; `POOL`), and public IPv6 into
+//! 2001:db8::/32 (RFC 3849). Loopback, link-local and multicast stay as they
+//! are. The run aborts if the input has more distinct public IPv4 addresses
+//! than `POOL` holds, and `--check` fails on any IP that survives.
+//!
 //!   cargo run --release --bin anonymize -- real/dump.json \
 //!       -o anon/dump.json --check --report
 
@@ -27,6 +37,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
+use std::net::Ipv6Addr;
 use std::path::PathBuf;
 
 const VOCAB: &str = include_str!("../../hack/anonymize/public-vocab.txt");
@@ -117,8 +128,21 @@ const QTY_MAPS: &[&str] = &[
 /// String-valued fields copied verbatim.
 const SKIP_STR: &[&str] = &["resourceVersion"];
 
+/// Public IPv4 addresses are rewritten into these reserved blocks, which are
+/// never globally routed: RFC 2544 benchmarking (198.18.0.0/15) and the
+/// RFC 5737 documentation TEST-NET-1/2/3 /24s. (base, size).
+const POOL: [([u8; 4], u32); 4] = [
+    ([198, 18, 0, 0], 1 << 17),
+    ([192, 0, 2, 0], 256),
+    ([198, 51, 100, 0], 256),
+    ([203, 0, 113, 0], 256),
+];
+const POOL_SIZE: u32 = (1 << 17) + 3 * 256;
+
 #[derive(Parser)]
-#[command(about = "Anonymize a k8s JSON dump, preserving relations and string lengths")]
+#[command(
+    about = "Anonymize a k8s JSON dump, preserving relations (and string lengths, except public IPs)"
+)]
 struct Cli {
     /// Input JSON file (a List, a single object, or concatenated objects)
     input: PathBuf,
@@ -189,6 +213,181 @@ fn is_timestamp(s: &str) -> bool {
         && b[7] == b'-'
         && b[10] == b'T'
         && b[13] == b':'
+}
+
+/// What an address-like span in a string is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NetKind {
+    /// Dotted quad.
+    V4([u8; 4]),
+    /// `ip-A-B-C-D` / `ec2-A-B-C-D` hostname; the prefix length in bytes.
+    Host(usize, [u8; 4]),
+    V6,
+}
+
+struct NetSpan {
+    start: usize,
+    end: usize,
+    kind: NetKind,
+}
+
+/// Parse `A<sep>B<sep>C<sep>D` at the start of `b`. Each group is 1-3 digits,
+/// without leading zeros, and at most 255. Returns the address and the bytes
+/// consumed. The caller checks what follows.
+fn parse_quad(b: &[u8], sep: u8) -> Option<([u8; 4], usize)> {
+    let mut out = [0u8; 4];
+    let mut i = 0;
+    for (n, slot) in out.iter_mut().enumerate() {
+        if n > 0 {
+            if b.get(i) != Some(&sep) {
+                return None;
+            }
+            i += 1;
+        }
+        let start = i;
+        while i < b.len() && b[i].is_ascii_digit() && i - start < 3 {
+            i += 1;
+        }
+        let g = &b[start..i];
+        if g.is_empty() || (g.len() > 1 && g[0] == b'0') {
+            return None;
+        }
+        let v: u32 = std::str::from_utf8(g).ok()?.parse().ok()?;
+        *slot = u8::try_from(v).ok()?;
+    }
+    Some((out, i))
+}
+
+fn host_span(b: &[u8], i: usize) -> Option<NetSpan> {
+    for prefix in ["ip-", "ec2-"] {
+        if b[i..].starts_with(prefix.as_bytes()) {
+            let (ip, n) = parse_quad(&b[i + prefix.len()..], b'-')?;
+            let end = i + prefix.len() + n;
+            if b.get(end).is_some_and(u8::is_ascii_alphanumeric) {
+                return None;
+            }
+            return Some(NetSpan {
+                start: i,
+                end,
+                kind: NetKind::Host(prefix.len(), ip),
+            });
+        }
+    }
+    None
+}
+
+fn v4_span(b: &[u8], i: usize) -> Option<NetSpan> {
+    if !b[i].is_ascii_digit() {
+        return None;
+    }
+    let (ip, n) = parse_quad(&b[i..], b'.')?;
+    let end = i + n;
+    let more_octets = b.get(end) == Some(&b'.') && b.get(end + 1).is_some_and(u8::is_ascii_digit);
+    if b.get(end).is_some_and(u8::is_ascii_alphanumeric) || more_octets {
+        return None;
+    }
+    Some(NetSpan {
+        start: i,
+        end,
+        kind: NetKind::V4(ip),
+    })
+}
+
+fn v6_span(s: &str, i: usize) -> Option<NetSpan> {
+    let b = s.as_bytes();
+    let run = |c: &u8| c.is_ascii_hexdigit() || *c == b':';
+    if !run(&b[i]) {
+        return None;
+    }
+    let mut end = i + b[i..].iter().take_while(|c| run(c)).count();
+    if b.get(end).is_some_and(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+    let ok =
+        |t: &str| t.bytes().filter(|&c| c == b':').count() >= 2 && t.parse::<Ipv6Addr>().is_ok();
+    if !ok(&s[i..end]) {
+        // `2600:1f18::1:` style trailing separator, e.g. in a `host:port` join.
+        let t = s[i..end].strip_suffix(':').filter(|t| !t.ends_with(':'))?;
+        if !ok(t) {
+            return None;
+        }
+        end -= 1;
+    }
+    Some(NetSpan {
+        start: i,
+        end,
+        kind: NetKind::V6,
+    })
+}
+
+/// Address-like spans of `s`, in order and non-overlapping.
+fn net_spans(s: &str) -> Vec<NetSpan> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let prev = i.checked_sub(1).map(|p| b[p]);
+        if !prev.is_some_and(|c| c.is_ascii_alphanumeric()) {
+            let span = host_span(b, i)
+                .or_else(|| v4_span(b, i).filter(|_| prev != Some(b'.')))
+                .or_else(|| v6_span(s, i).filter(|_| prev != Some(b':')));
+            if let Some(sp) = span {
+                i = sp.end;
+                out.push(sp);
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Addresses that carry no identity and stay as they are: unspecified,
+/// loopback, link-local, multicast/reserved (which includes netmasks).
+fn v4_special(ip: [u8; 4]) -> bool {
+    ip[0] == 0 || ip[0] == 127 || ip[0] >= 224 || (ip[0] == 169 && ip[1] == 254)
+}
+
+fn v6_special(s: &str) -> bool {
+    s.parse::<Ipv6Addr>()
+        .is_ok_and(|a| a.is_loopback() || a.is_unspecified())
+}
+
+fn is_private_v4(ip: [u8; 4]) -> bool {
+    matches!(
+        (ip[0], ip[1]),
+        (10, _) | (172, 16..=31) | (192, 168) | (100, 64..=127)
+    )
+}
+
+fn pool_addr(mut idx: u32) -> [u8; 4] {
+    for (base, size) in POOL {
+        if idx < size {
+            return (u32::from_be_bytes(base) + idx).to_be_bytes();
+        }
+        idx -= size;
+    }
+    unreachable!("pool index {idx} out of range")
+}
+
+fn in_pool(ip: [u8; 4]) -> bool {
+    let n = u32::from_be_bytes(ip);
+    POOL.iter().any(|(b, size)| {
+        let base = u32::from_be_bytes(*b);
+        (base..base + size).contains(&n)
+    })
+}
+
+fn digits(n: u8) -> usize {
+    match n {
+        0..=9 => 1,
+        10..=99 => 2,
+        _ => 3,
+    }
+}
+
+fn dotted(ip: [u8; 4], sep: char) -> String {
+    format!("{}{sep}{}{sep}{}{sep}{}", ip[0], ip[1], ip[2], ip[3])
 }
 
 fn public_domain(d: &str) -> bool {
@@ -276,6 +475,13 @@ struct Mapper {
     kept_paths: HashMap<String, usize>,
     /// real base64 value -> fake base64 value
     b64: HashMap<String, String>,
+    /// Every IP in the input (fakes never equal one) and the real -> fake maps.
+    real_ips: HashSet<[u8; 4]>,
+    ips: HashMap<[u8; 4], [u8; 4]>,
+    issued_ips: HashSet<[u8; 4]>,
+    real_v6: HashSet<Ipv6Addr>,
+    ips6: HashMap<Ipv6Addr, Ipv6Addr>,
+    issued_v6: HashSet<Ipv6Addr>,
     rng: u64,
 }
 
@@ -318,6 +524,12 @@ impl Mapper {
             kept_tokens: HashSet::new(),
             kept_paths: HashMap::new(),
             b64: HashMap::new(),
+            real_ips: HashSet::new(),
+            ips: HashMap::new(),
+            issued_ips: HashSet::new(),
+            real_v6: HashSet::new(),
+            ips6: HashMap::new(),
+            issued_v6: HashSet::new(),
             // xorshift must not start at zero
             rng: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
         }
@@ -346,6 +558,18 @@ impl Mapper {
 
     /// Pass 1: record every token so fakes can avoid them.
     fn note(&mut self, s: &str) {
+        for sp in net_spans(s) {
+            match sp.kind {
+                NetKind::V4(ip) | NetKind::Host(_, ip) => {
+                    self.real_ips.insert(ip);
+                }
+                NetKind::V6 => {
+                    if let Ok(a) = s[sp.start..sp.end].parse() {
+                        self.real_v6.insert(a);
+                    }
+                }
+            }
+        }
         for (is_tok, r) in runs(s) {
             if is_tok {
                 self.seen.insert(r.to_string());
@@ -375,6 +599,136 @@ impl Mapper {
             }
         }
         panic!("token space exhausted for {tok:?}");
+    }
+
+    /// Random value with exactly `d` decimal digits.
+    fn rand_digits(&mut self, d: usize) -> u8 {
+        let r = self.next();
+        match d {
+            1 => (r % 10) as u8,
+            2 => 10 + (r % 90) as u8,
+            _ => 100 + (r % 156) as u8,
+        }
+    }
+
+    /// One candidate fake for a private `ip`: same range, and each octet
+    /// keeps its digit count so the string length is kept.
+    fn fake_v4_once(&mut self, ip: [u8; 4]) -> [u8; 4] {
+        let [a, b, c, d] = ip;
+        let (fa, fb) = match (a, b) {
+            (10, _) => (10, self.rand_digits(digits(b))),
+            (172, 16..=31) => (172, 16 + (self.next() % 16) as u8),
+            (192, 168) => (192, 168),
+            (100, 64..=127) if digits(b) == 2 => (100, 64 + (self.next() % 36) as u8),
+            (100, 64..=127) => (100, 100 + (self.next() % 28) as u8),
+            _ => unreachable!("public address {}", dotted(ip, '.')),
+        };
+        [
+            fa,
+            fb,
+            self.rand_digits(digits(c)),
+            self.rand_digits(digits(d)),
+        ]
+    }
+
+    /// Memoized, injective fake for `ip`.
+    fn fake_v4(&mut self, ip: [u8; 4]) -> [u8; 4] {
+        if v4_special(ip) {
+            return ip;
+        }
+        if let Some(f) = self.ips.get(&ip) {
+            return *f;
+        }
+        let f = if is_private_v4(ip) {
+            self.fake_private(ip)
+        } else {
+            self.fake_public()
+        };
+        self.issued_ips.insert(f);
+        self.ips.insert(ip, f);
+        f
+    }
+
+    fn ip_free(&self, f: [u8; 4]) -> bool {
+        !self.real_ips.contains(&f)
+            && !self.issued_ips.contains(&f)
+            && !self.denied(&dotted(f, '.'))
+    }
+
+    fn fake_private(&mut self, ip: [u8; 4]) -> [u8; 4] {
+        for _ in 0..100_000 {
+            let f = self.fake_v4_once(ip);
+            if f != ip && self.ip_free(f) {
+                return f;
+            }
+        }
+        panic!("address space exhausted for {}", dotted(ip, '.'));
+    }
+
+    /// Next free address in `POOL`: random start, then linear probe, so it
+    /// succeeds whenever any slot is free (`check_capacity` rules out none).
+    fn fake_public(&mut self) -> [u8; 4] {
+        let start = (self.next() % u64::from(POOL_SIZE)) as u32;
+        (0..POOL_SIZE)
+            .map(|k| pool_addr((start + k) % POOL_SIZE))
+            .find(|&f| self.ip_free(f))
+            .expect("fake public IPv4 pool exhausted")
+    }
+
+    /// Fail up front if the input has more distinct public IPv4 addresses
+    /// than `POOL` can hand out. Run after pass 1, before any rewriting.
+    fn check_capacity(&self) -> Result<()> {
+        let public = |ip: &&[u8; 4]| !v4_special(**ip) && !is_private_v4(**ip);
+        let demand = self.real_ips.iter().filter(public).count();
+        // Input addresses that already sit inside the pool are never reused.
+        let blocked = self.real_ips.iter().filter(|ip| in_pool(**ip)).count();
+        let free = POOL_SIZE as usize - blocked;
+        if demand > free {
+            bail!(
+                "input has {demand} distinct public IPv4 addresses but only {free} fake \
+                 addresses are available (RFC 2544 198.18.0.0/15 + RFC 5737 TEST-NETs); \
+                 enlarge POOL in src/bin/anonymize.rs"
+            );
+        }
+        Ok(())
+    }
+
+    /// Memoized, injective fake for an IPv6 literal: a random address in
+    /// 2001:db8::/32 (RFC 3849). Equal addresses written differently map
+    /// to the same fake.
+    fn fake_v6(&mut self, text: &str) -> String {
+        let Ok(ip) = text.parse::<Ipv6Addr>() else {
+            return text.to_string();
+        };
+        if v6_special(text) {
+            return text.to_string();
+        }
+        if let Some(f) = self.ips6.get(&ip) {
+            return f.to_string();
+        }
+        for _ in 0..100_000 {
+            let mut g = [0x2001, 0x0db8, 0, 0, 0, 0, 0, 0];
+            for slot in &mut g[2..] {
+                *slot = (self.next() & 0xffff) as u16;
+            }
+            let f = Ipv6Addr::from(g);
+            if f != ip && !self.real_v6.contains(&f) && !self.issued_v6.contains(&f) {
+                self.issued_v6.insert(f);
+                self.ips6.insert(ip, f);
+                return f.to_string();
+            }
+        }
+        panic!("address space exhausted for {text:?}");
+    }
+
+    fn fake_span(&mut self, text: &str, kind: NetKind) -> String {
+        match kind {
+            NetKind::V4(ip) => dotted(self.fake_v4(ip), '.'),
+            NetKind::Host(plen, ip) => {
+                format!("{}{}", &text[..plen], dotted(self.fake_v4(ip), '-'))
+            }
+            NetKind::V6 => self.fake_v6(text),
+        }
     }
 
     /// Random base64 with the same encoded length (and padding) as `s`,
@@ -428,8 +782,9 @@ impl Mapper {
         self.rewrite(s)
     }
 
-    /// Token-wise rewrite. The `system:` / `system:serviceaccount:` prefixes
-    /// are kept because the engine parses them.
+    /// Rewrite address-like spans, then the rest token-wise. The `system:` /
+    /// `system:serviceaccount:` prefixes are kept because the engine parses
+    /// them.
     fn rewrite(&mut self, s: &str) -> String {
         let mut keep_lead = if s.starts_with("system:serviceaccount:") {
             2
@@ -439,13 +794,25 @@ impl Mapper {
             0
         };
         let mut out = String::with_capacity(s.len());
+        let mut at = 0;
+        for sp in net_spans(s) {
+            self.rewrite_tokens(&s[at..sp.start], &mut keep_lead, &mut out);
+            let fake = self.fake_span(&s[sp.start..sp.end], sp.kind);
+            out.push_str(&fake);
+            at = sp.end;
+        }
+        self.rewrite_tokens(&s[at..], &mut keep_lead, &mut out);
+        out
+    }
+
+    fn rewrite_tokens(&mut self, s: &str, keep_lead: &mut usize, out: &mut String) {
         for (is_tok, r) in runs(s) {
             if !is_tok {
                 out.push_str(r);
                 continue;
             }
-            if keep_lead > 0 {
-                keep_lead -= 1;
+            if *keep_lead > 0 {
+                *keep_lead -= 1;
                 out.push_str(r);
             } else if !self.denied(r) && (r.len() <= 2 || is_quantity(r)) {
                 self.kept_tokens.insert(r.to_string());
@@ -458,7 +825,6 @@ impl Mapper {
                 out.push_str(&f);
             }
         }
-        out
     }
 }
 
@@ -618,7 +984,7 @@ fn walk<'a>(v: &'a Value, path: &mut Vec<&'a str>, keep_vals: bool, f: &mut Visi
 }
 
 /// Run both passes over `docs` and return the anonymized copies.
-fn anonymize(m: &mut Mapper, docs: &[Value]) -> Vec<Value> {
+fn anonymize(m: &mut Mapper, docs: &[Value]) -> Result<Vec<Value>> {
     // Base64 payloads are replaced wholesale, never tokenized: blank them
     // for the token passes, then fill in random same-length base64.
     let blanked: Vec<Value> = docs
@@ -635,6 +1001,7 @@ fn anonymize(m: &mut Mapper, docs: &[Value]) -> Vec<Value> {
             s.to_string()
         });
     }
+    m.check_capacity()?;
     let mut anon: Vec<Value> = blanked
         .iter()
         .map(|d| walk(d, &mut Vec::new(), false, &mut |p, s, a| m.apply(p, s, a)))
@@ -642,7 +1009,7 @@ fn anonymize(m: &mut Mapper, docs: &[Value]) -> Vec<Value> {
     for (o, a) in docs.iter().zip(anon.iter_mut()) {
         fill_b64(o, a, m);
     }
-    anon
+    Ok(anon)
 }
 
 fn parse_input(bytes: &[u8]) -> Result<Vec<Value>> {
@@ -671,9 +1038,39 @@ fn check(anon: &[Value], m: &Mapper) -> Vec<String> {
     // `kernelVersion`) are expected to survive and would be false positives.
     let mut out_tokens: HashSet<String> = HashSet::new();
     let mut hits: HashSet<(String, String)> = HashSet::new();
+    let mut net_hits: HashSet<(String, String)> = HashSet::new();
     for d in anon {
         walk(d, &mut Vec::new(), false, &mut |p, s, _| {
-            out_tokens.extend(runs(s).into_iter().filter(|r| r.0).map(|r| r.1.to_string()));
+            let mut at = 0;
+            for sp in net_spans(s) {
+                // Tokens inside an address are covered by the address check;
+                // random fake IPv6 groups can equal unrelated real tokens.
+                out_tokens.extend(
+                    runs(&s[at..sp.start])
+                        .into_iter()
+                        .filter(|r| r.0)
+                        .map(|r| r.1.to_string()),
+                );
+                at = sp.end;
+                let text = &s[sp.start..sp.end];
+                let survived = match sp.kind {
+                    NetKind::V4(ip) | NetKind::Host(_, ip) => {
+                        !v4_special(ip) && !m.issued_ips.contains(&ip)
+                    }
+                    NetKind::V6 => text
+                        .parse()
+                        .is_ok_and(|a| !v6_special(text) && !m.issued_v6.contains(&a)),
+                };
+                if survived {
+                    net_hits.insert((text.to_string(), p.join(".")));
+                }
+            }
+            out_tokens.extend(
+                runs(&s[at..])
+                    .into_iter()
+                    .filter(|r| r.0)
+                    .map(|r| r.1.to_string()),
+            );
             let lower = s.to_ascii_lowercase();
             for d in m.deny.iter().filter(|d| lower.contains(d.as_str())) {
                 hits.insert((d.clone(), p.join(".")));
@@ -686,6 +1083,13 @@ fn check(anon: &[Value], m: &Mapper) -> Vec<String> {
     for (d, path) in hits {
         problems.push(format!(
             "denylist substring {d:?} present in output at {path}"
+        ));
+    }
+    let mut net_hits: Vec<_> = net_hits.into_iter().collect();
+    net_hits.sort();
+    for (text, path) in net_hits {
+        problems.push(format!(
+            "address {text:?} not rewritten, present in output at {path}"
         ));
     }
     for real in m.map.keys() {
@@ -714,7 +1118,7 @@ fn main() -> Result<()> {
     let bytes = std::fs::read(&cli.input).with_context(|| format!("read {:?}", cli.input))?;
     let docs = parse_input(&bytes)?;
     let mut m = Mapper::new(seed, deny);
-    let anon = anonymize(&mut m, &docs);
+    let anon = anonymize(&mut m, &docs)?;
     let text = serialize(&anon)?;
 
     if let Some(dir) = cli.output.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -723,12 +1127,13 @@ fn main() -> Result<()> {
     std::fs::write(&cli.output, &text)?;
 
     eprintln!(
-        "anonymize: {} -> {} ({} -> {} bytes), {} tokens rewritten, {} field values kept",
+        "anonymize: {} -> {} ({} -> {} bytes), {} tokens and {} addresses rewritten, {} field values kept",
         cli.input.display(),
         cli.output.display(),
         bytes.len(),
         text.len(),
         m.map.len(),
+        m.ips.len() + m.ips6.len(),
         m.kept_paths.len()
     );
 
@@ -781,7 +1186,9 @@ mod tests {
 
     fn anon(v: &Value) -> (Value, Mapper) {
         let mut m = mapper(1);
-        let out = anonymize(&mut m, std::slice::from_ref(v)).remove(0);
+        let out = anonymize(&mut m, std::slice::from_ref(v))
+            .unwrap()
+            .remove(0);
         (out, m)
     }
 
@@ -978,7 +1385,7 @@ mod tests {
         let pod = j(r#"{"kind":"Pod","metadata":{"name":"p"},
             "spec":{"nodeSelector":{"kubernetes.io/arch":"amd64","acme.io/pool":"blue"}}}"#);
         let mut m = mapper(1);
-        let out = anonymize(&mut m, &[node, pod]);
+        let out = anonymize(&mut m, &[node, pod]).unwrap();
         let nl = out[0]["metadata"]["labels"].as_object().unwrap();
         let ns = out[1]["spec"]["nodeSelector"].as_object().unwrap();
         assert_eq!(nl["kubernetes.io/arch"], "amd64");
@@ -1049,5 +1456,187 @@ mod tests {
         assert_eq!(b64_encode(b"fo"), "Zm8=");
         assert_eq!(b64_encode(b"foo"), "Zm9v");
         assert_eq!(b64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    fn ip_of(s: &str) -> [u8; 4] {
+        let (ip, n) = parse_quad(s.as_bytes(), b'.').unwrap();
+        assert_eq!(n, s.len());
+        ip
+    }
+
+    #[test]
+    fn ips_rewritten_with_length_and_class_kept() {
+        let mut m = mapper(1);
+        for (real, class) in [
+            ("10.243.130.80", "10"),
+            ("172.20.5.9", "172"),
+            ("192.168.1.77", "192.168"),
+            ("100.100.4.5", "100"),
+        ] {
+            let o = run(&mut m, real);
+            assert_ne!(o, real);
+            assert_eq!(o.len(), real.len(), "{real} -> {o}");
+            assert!(o.starts_with(class), "{real} -> {o}");
+        }
+        let o = run(&mut m, "172.20.5.9");
+        assert!((16..=31).contains(&ip_of(&o)[1]), "{o}");
+    }
+
+    #[test]
+    fn public_ips_land_in_reserved_space() {
+        let mut m = mapper(2);
+        for real in ["44.201.133.165", "54.162.132.32", "8.8.8.8", "104.18.2.3"] {
+            let o = run(&mut m, real);
+            let f = ip_of(&o);
+            assert!(in_pool(f), "{real} -> {o}");
+            assert_ne!(o, real);
+        }
+        // consistent across occurrences
+        assert_eq!(run(&mut m, "8.8.8.8"), run(&mut m, "8.8.8.8"));
+    }
+
+    #[test]
+    fn pool_has_expected_size_and_is_injective() {
+        assert_eq!(
+            POOL_SIZE as usize,
+            POOL.iter().map(|p| p.1 as usize).sum::<usize>()
+        );
+        let all: HashSet<[u8; 4]> = (0..POOL_SIZE).map(pool_addr).collect();
+        assert_eq!(all.len(), POOL_SIZE as usize);
+        assert!(all.iter().all(|ip| in_pool(*ip) && !v4_special(*ip)));
+        let mut m = mapper(7);
+        let fakes: HashSet<String> = (0..2000)
+            .map(|i| run(&mut m, &format!("20.{}.{}.1", i / 256, i % 256)))
+            .collect();
+        assert_eq!(fakes.len(), 2000);
+    }
+
+    #[test]
+    fn real_addresses_inside_the_pool_are_never_reused() {
+        let doc = j(r#"{"kind":"Pod","metadata":{"name":"p"},
+            "spec":{"a":"198.18.0.1","b":"192.0.2.9","c":"8.8.8.8"}}"#);
+        let (out, m) = anon(&doc);
+        for k in ["a", "b", "c"] {
+            let o = out["spec"][k].as_str().unwrap();
+            assert!(in_pool(ip_of(o)), "{o}");
+            assert!(
+                !m.real_ips.contains(&ip_of(o)),
+                "{o} equals a real input address"
+            );
+        }
+        assert!(check(std::slice::from_ref(&out), &m).is_empty());
+    }
+
+    #[test]
+    fn overflowing_the_public_pool_aborts_with_a_clear_error() {
+        // one more distinct public address than the pool can hold
+        let ips: Vec<Value> = (0..=POOL_SIZE)
+            .map(|i| Value::String(dotted(((20u32 << 24) + i).to_be_bytes(), '.')))
+            .collect();
+        let doc =
+            serde_json::json!({"kind": "Pod", "metadata": {"name": "p"}, "spec": {"ips": ips}});
+        let mut m = mapper(1);
+        let err = anonymize(&mut m, &[doc]).unwrap_err().to_string();
+        assert!(err.contains("distinct public IPv4"), "{err}");
+        assert!(err.contains(&POOL_SIZE.to_string()), "{err}");
+    }
+
+    #[test]
+    fn exactly_filling_the_public_pool_succeeds() {
+        let ips: Vec<Value> = (0..POOL_SIZE)
+            .map(|i| Value::String(dotted(((20u32 << 24) + i).to_be_bytes(), '.')))
+            .collect();
+        let doc =
+            serde_json::json!({"kind": "Pod", "metadata": {"name": "p"}, "spec": {"ips": ips}});
+        let mut m = mapper(1);
+        let out = anonymize(&mut m, &[doc]).unwrap();
+        let got: HashSet<&str> = out[0]["spec"]["ips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(got.len(), POOL_SIZE as usize);
+    }
+
+    #[test]
+    fn ips_consistent_injective_and_special_kept() {
+        let mut m = mapper(3);
+        let a = run(&mut m, "10.1.2.3");
+        let b = run(&mut m, "10.1.2.4");
+        assert_eq!(a, run(&mut m, "10.1.2.3"));
+        assert_ne!(a, b);
+        // inside larger strings; CIDR suffix and port stay
+        let o = run(&mut m, "http://10.1.2.3:8080/x");
+        assert!(o.ends_with(&format!("://{a}:8080/x")), "{o}");
+        let o = run(&mut m, "10.1.2.3/32");
+        assert_eq!(o, format!("{a}/32"));
+        for keep in ["0.0.0.0/0", "127.0.0.1", "169.254.169.254", "255.255.255.0"] {
+            assert_eq!(run(&mut m, keep), keep);
+        }
+    }
+
+    #[test]
+    fn version_like_strings_are_not_ips() {
+        let mut m = mapper(4);
+        for s in [
+            "v1.2.3.4",
+            "1.2.3.4.5",
+            "1.2.3.400",
+            "app-1.2.3.4x",
+            "01.2.3.4",
+        ] {
+            assert!(net_spans(s).is_empty(), "{s}");
+        }
+        assert_eq!(net_spans("a 1.2.3.4").len(), 1);
+        let _ = run(&mut m, "x");
+    }
+
+    #[test]
+    fn hostnames_follow_their_ip() {
+        let mut m = mapper(5);
+        let ip = run(&mut m, "10.243.130.80");
+        let host = run(&mut m, "ip-10-243-130-80.ec2.internal");
+        assert!(
+            host.starts_with(&format!("ip-{}.", ip.replace('.', "-"))),
+            "{host}"
+        );
+        assert_eq!(host.len(), "ip-10-243-130-80.ec2.internal".len());
+        let pub_ip = run(&mut m, "44.201.133.165");
+        let pub_host = run(&mut m, "ec2-44-201-133-165.compute-1.amazonaws.com");
+        assert!(
+            pub_host.starts_with(&format!("ec2-{}.", pub_ip.replace('.', "-"))),
+            "{pub_host}"
+        );
+    }
+
+    #[test]
+    fn ipv6_rewritten_into_documentation_prefix() {
+        let mut m = mapper(6);
+        let real = "2600:1f18:252b:c0a:c0c1::1e";
+        let o = run(&mut m, real);
+        let a: Ipv6Addr = o.parse().unwrap();
+        assert_eq!(&a.segments()[..2], &[0x2001, 0x0db8], "{o}");
+        assert_eq!(o, run(&mut m, real));
+        // same address, different spelling, same fake
+        assert_eq!(o, run(&mut m, "2600:1f18:252b:c0a:c0c1:0:0:1e"));
+        assert_ne!(o, run(&mut m, "2600:1f18:252b:c0a:c0c1::1f"));
+        assert_eq!(run(&mut m, "::1"), "::1");
+        assert_eq!(run(&mut m, "::"), "::");
+        assert!(net_spans("12:30:45").is_empty());
+        assert!(net_spans("aa:bb:cc:dd:ee:ff").is_empty());
+    }
+
+    #[test]
+    fn check_flags_surviving_addresses() {
+        let doc = j(r#"{"kind":"Pod","metadata":{"name":"p"},"status":{"podIP":"10.1.2.3"}}"#);
+        let (out, m) = anon(&doc);
+        assert!(check(std::slice::from_ref(&out), &m).is_empty());
+        let leaked = j(r#"{"kind":"Pod","metadata":{"name":"p"},"status":{"podIP":"10.1.2.3"}}"#);
+        let problems = check(std::slice::from_ref(&leaked), &m);
+        assert!(
+            problems.iter().any(|p| p.contains("10.1.2.3")),
+            "{problems:?}"
+        );
     }
 }

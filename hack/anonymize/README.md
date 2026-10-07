@@ -1,7 +1,7 @@
 # anonymize
 
 Rewrites a `kubectl get -o json` dump so it can be benchmarked or shared
-without leaking real names. Every reference and string length is preserved,
+without leaking real names. Every reference is preserved, and so is every string length except public IP addresses (see below),
 so joins between objects (names, namespaces, labels, selectors, UUIDs,
 `system:serviceaccount:<ns>:<sa>`) still line up and the engine derives the
 same relation counts.
@@ -53,14 +53,24 @@ values are public or structural and must stay readable:
 Secret and ConfigMap base64 payloads are replaced with random base64 of the
 same length.
 
-### public-vocab.txt
+### IP addresses and hostnames
 
-A value in a schema-defined field (apiVersion, kind, apiGroup, RBAC verbs,
-resources and apiGroups) is kept only if every word in it appears in
-`public-vocab.txt` or `api-resources.txt`. Anything else, such as CRDs and
-internal API groups, is rewritten. Add public Kubernetes words to
-`public-vocab.txt` if a legitimate value is being scrambled. Never add
-internal names.
+IPv4 and IPv6 literals and `ip-A-B-C-D` / `ec2-A-B-C-D` hostnames are
+rewritten before tokenizing, since their octets would otherwise pass as
+quantities. The mapping is consistent and injective, and a node name stays
+in step with its IP.
+
+- Private ranges (10/8, 172.16/12, 192.168/16, 100.64/10) map into the same
+  range and keep their string length.
+- Public IPv4 maps into reserved, never-routed space: RFC 2544
+  198.18.0.0/15 plus the three RFC 5737 TEST-NET /24s (131,840 addresses,
+  `POOL` in `src/bin/anonymize.rs`). Length is not preserved.
+- IPv6 maps into 2001:db8::/32 (RFC 3849). Length is not preserved.
+- Unspecified, loopback, link-local and multicast/reserved addresses
+  (including netmasks) are kept as they are.
+- The run aborts before writing anything if the input has more distinct
+  public IPv4 addresses than `POOL` can hand out.
+- `--check` fails if any other address survives in the output.
 
 ## Files you must not commit
 
