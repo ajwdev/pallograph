@@ -1,3 +1,8 @@
 pallograph
 /target
 /notes
+
+# Anonymizer token mappings; review --report before ever sharing.
+*.mapping.json
+# Local denylist for the anonymizer (internal names). Never commit.
+*.local.txt

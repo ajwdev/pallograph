@@ -709,10 +709,22 @@ pub struct Engine {
 /// `(edb, rule_sources)` pair consumed by `Backend::evaluate`.
 ///
 /// Intended for benchmarks and integration tests; not used in the binary.
+/// Always uses the checked-in synthetic fixtures, so `cargo bench`'s
+/// regression baseline stays comparable run over run. For benchmarking
+/// against real cluster data, see `load_bench_fixtures_from`.
 pub fn load_bench_fixtures() -> Result<(Vec<(String, Vec<Value>)>, Vec<String>)> {
+    load_bench_fixtures_from("testdata")
+}
+
+/// Same as `load_bench_fixtures`, but loads manifests from `dir` instead of
+/// `testdata/`. Intended for an out-of-tree benchmark pointed at a real,
+/// locally-captured cluster dump (never checked in) — kept as a distinct
+/// entry point/benchmark name so its numbers never mix into the tracked
+/// `testdata/` regression history.
+pub fn load_bench_fixtures_from(dir: &str) -> Result<(Vec<(String, Vec<Value>)>, Vec<String>)> {
     let mut store = MemStore::new();
-    crate::edb::load_from_manifests(&mut store, vec!["testdata".to_string()])
-        .context("load testdata")?;
+    crate::edb::load_from_manifests(&mut store, vec![dir.to_string()])
+        .with_context(|| format!("load {dir}"))?;
 
     let mut edb: Vec<(String, Vec<Value>)> = Vec::new();
     for rel in store.relation_names() {
