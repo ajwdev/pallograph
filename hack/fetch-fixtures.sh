@@ -37,7 +37,7 @@ if [[ "$got" != "$SHA256" ]]; then
 fi
 
 mkdir "$tmp/extract"
-tar -xzf "$tmp/$ASSET" -C "$tmp/extract"
+zstd -dc "$tmp/$ASSET" | tar -xf - -C "$tmp/extract"
 echo "$SHA256" > "$tmp/extract/.sha256"
 
 rm -rf "$DEST"

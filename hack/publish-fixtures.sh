@@ -13,7 +13,7 @@ REPO="ajwdev/pallograph"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="${1:?usage: $0 <anonymized-dir> <tag>}"
 TAG="${2:?usage: $0 <anonymized-dir> <tag>}"
-ASSET="medium.tar.gz"
+ASSET="medium.tar.zst"
 PIN="$ROOT/fixtures/testdata/medium.env"
 
 [[ -d "$SRC" ]] || { echo "not a directory: $SRC" >&2; exit 1; }
@@ -21,8 +21,9 @@ PIN="$ROOT/fixtures/testdata/medium.env"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-# Flat archive: manifests at the root, no wrapping directory.
-tar -czf "$tmp/$ASSET" -C "$SRC" .
+# Flat archive: manifests at the root, no wrapping directory. Piped through
+# zstd rather than tar --zstd, which not every tar supports.
+tar -cf - -C "$SRC" . | zstd -q -19 -o "$tmp/$ASSET"
 sha="$(shasum -a 256 "$tmp/$ASSET" | awk '{print $1}')"
 echo "==> $ASSET sha256 $sha"
 
