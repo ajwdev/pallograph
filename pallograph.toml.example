@@ -20,7 +20,7 @@ source = "k8s"
 # Local directory or file of k8s JSON manifests.
 [datasources.local]
 source = "file"
-paths = ["testdata/"]
+paths = ["fixtures/testdata/small/"]
 content = "k8s-manifests"
 
 # Shell command — full command including any flags, context, etc.

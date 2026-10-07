@@ -971,7 +971,7 @@ mod tests {
     use crate::edb;
     use crate::engine::{Engine, InterpreterBackend};
 
-    /// `testdata/` plus extra NDJSON manifests written to a throwaway directory.
+    /// `fixtures/testdata/small/` plus extra NDJSON manifests written to a throwaway directory.
     fn load_engine_with(extra: &str) -> Engine {
         // Unique per call: tests run in parallel threads of one process.
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -981,7 +981,10 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create temp dir");
         std::fs::write(dir.join("extra.json"), extra).expect("write extra manifests");
         let mut edb = MemStore::new();
-        let paths = vec!["testdata".to_string(), dir.to_string_lossy().into_owned()];
+        let paths = vec![
+            "fixtures/testdata/small".to_string(),
+            dir.to_string_lossy().into_owned(),
+        ];
         let loaded = edb::load_from_manifests(&mut edb, paths);
         let _ = std::fs::remove_dir_all(&dir);
         loaded.expect("load manifests");

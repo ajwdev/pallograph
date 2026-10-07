@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Drives the built binary over the `testdata/` fixture to check the REPL's
+//! Drives the built binary over the small fixture to check the REPL's
 //! `?-` query UX: tuple listing, output formats, unknown-relation hints and
 //! the hint printed for input that is not a command.
 
@@ -19,7 +19,7 @@ fn run_session(commands: &str) -> (String, String) {
         std::env::temp_dir().join(format!("pallograph-repl-query-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let config = dir.join("pallograph.toml");
-    let testdata = format!("{}/testdata", env!("CARGO_MANIFEST_DIR"));
+    let testdata = format!("{}/fixtures/testdata/small", env!("CARGO_MANIFEST_DIR"));
     std::fs::write(
         &config,
         format!(

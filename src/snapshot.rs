@@ -157,7 +157,8 @@ mod tests {
 
     fn load_testdata() -> MemStore {
         let mut store = MemStore::new();
-        edb::load_from_manifests(&mut store, vec!["testdata".to_string()]).expect("load testdata");
+        edb::load_from_manifests(&mut store, vec!["fixtures/testdata/small".to_string()])
+            .expect("load testdata");
         store
     }
 

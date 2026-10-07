@@ -3,7 +3,7 @@ set -euo pipefail
 
 CLUSTER_NAME="${1:-pallograph-test}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MANIFESTS_DIR="$SCRIPT_DIR/../testdata/kind"
+MANIFESTS_DIR="$SCRIPT_DIR/../fixtures/kind"
 
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
     echo "Cluster '$CLUSTER_NAME' already exists; skipping create."

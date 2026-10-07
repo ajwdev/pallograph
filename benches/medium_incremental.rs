@@ -1,24 +1,19 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Same benchmarks as `incremental.rs` (add_fact only), but against a real,
-//! locally-captured cluster dump instead of the checked-in `testdata/`
-//! fixtures. See `real_bulk_load.rs` for why this is a separate bench target.
+//! Same benchmarks as `small_incremental.rs` (add_fact only), but against
+//! the medium fixture: an anonymized cluster dump published as a release
+//! asset. See `medium_bulk_load.rs` for why this is a separate bench target
+//! and how to fetch the dump (`hack/fetch-fixtures.sh medium`). Panics with
+//! that instruction if the dump is missing or stale.
 //!
-//! Expected input: a directory of Kubernetes JSON or YAML manifests, by
-//! default the gitignored `testdata-real/` (override with
-//! `PALLOGRAPH_REAL_FIXTURES`). `real_bulk_load.rs` shows how to produce
-//! one. If the directory is missing, the bench prints a message and exits
-//! without running anything.
-//!
-//! Run:  cargo bench --bench real_incremental
+//! Run:  cargo bench --bench medium_incremental
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use mangle_common::Value;
-use pallograph::engine::{DdBackend, Engine, InterpreterBackend, load_bench_fixtures_from};
+use pallograph::engine::{DdBackend, Engine, InterpreterBackend, load_medium_bench_fixtures};
 
 // Unique per-call index so `Engine::add_fact`'s dedup guard never no-ops.
 fn bench_fact(i: u64) -> (String, Vec<Value>) {
@@ -31,25 +26,22 @@ fn bench_fact(i: u64) -> (String, Vec<Value>) {
     )
 }
 
-fn real_incremental(c: &mut Criterion) {
-    let dir =
-        std::env::var("PALLOGRAPH_REAL_FIXTURES").unwrap_or_else(|_| "testdata-real".to_string());
-    if !Path::new(&dir).is_dir() {
-        eprintln!(
-            "real_incremental: no cluster dump at `{dir}`, skipping. \
-             See the header of benches/real_bulk_load.rs for how to create one."
-        );
+fn medium_incremental(c: &mut Criterion) {
+    // `cargo test --all-targets` runs bench binaries without `--bench`; skip
+    // there so CI does not need the dump. `cargo bench` passes it and panics
+    // if the dump is missing.
+    if !std::env::args().any(|a| a == "--bench") {
         return;
     }
-    let (edb, rules) = load_bench_fixtures_from(&dir).expect("load fixtures");
+    let (edb, rules) = load_medium_bench_fixtures().unwrap_or_else(|e| panic!("{e:#}"));
 
-    let mut group = c.benchmark_group("real_incremental");
+    let mut group = c.benchmark_group("medium_incremental");
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(3));
     group.measurement_time(Duration::from_secs(60));
 
     // iter_custom: engine setup (worker spawn + settle) is paid once per
-    // sample, not per iteration. See incremental.rs for why
+    // sample, not per iteration. See small_incremental.rs for why
     // iter_batched(PerIteration) gives degenerate stats here.
     group.bench_function("interpreter_add_fact", |b| {
         b.iter_custom(|iters| {
@@ -86,5 +78,5 @@ fn real_incremental(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, real_incremental);
+criterion_group!(benches, medium_incremental);
 criterion_main!(benches);

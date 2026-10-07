@@ -705,21 +705,44 @@ pub struct Engine {
     session: Option<crate::dd::session::DdSession>,
 }
 
-/// Load `testdata/` manifests and `rules/*.mg` files into the raw
+/// Load `fixtures/testdata/small/` manifests and `rules/*.mg` files into the raw
 /// `(edb, rule_sources)` pair consumed by `Backend::evaluate`.
 ///
 /// Intended for benchmarks and integration tests; not used in the binary.
-/// Always uses the checked-in synthetic fixtures, so `cargo bench`'s
-/// regression baseline stays comparable run over run. For benchmarking
-/// against real cluster data, see `load_bench_fixtures_from`.
+/// Always uses the checked-in small fixture, so the `small_*` benchmarks'
+/// regression baseline stays comparable run over run. See
+/// `load_medium_bench_fixtures` for the fetched, anonymized cluster dump.
 pub fn load_bench_fixtures() -> Result<(Vec<(String, Vec<Value>)>, Vec<String>)> {
-    load_bench_fixtures_from("testdata")
+    load_bench_fixtures_from("fixtures/testdata/small")
+}
+
+/// Load the medium fixture (an anonymized cluster dump fetched from a
+/// release by `hack/fetch-fixtures.sh medium`) plus `rules/*.mg`.
+///
+/// Fails with fetch instructions if the dump is missing, or if its
+/// `.sha256` stamp does not match the pin in `fixtures/testdata/medium.env`.
+pub fn load_medium_bench_fixtures() -> Result<(Vec<(String, Vec<Value>)>, Vec<String>)> {
+    const DIR: &str = "fixtures/testdata/medium";
+    const PIN: &str = "fixtures/testdata/medium.env";
+    const HINT: &str = "run `hack/fetch-fixtures.sh medium`";
+
+    let pin = std::fs::read_to_string(PIN).with_context(|| format!("read {PIN}"))?;
+    let want = pin
+        .lines()
+        .find_map(|l| l.strip_prefix("SHA256="))
+        .map(str::trim)
+        .with_context(|| format!("no SHA256= line in {PIN}"))?;
+    let have = std::fs::read_to_string(format!("{DIR}/.sha256"))
+        .map_err(|_| anyhow::anyhow!("medium fixture not found at {DIR}; {HINT}"))?;
+    if have.trim() != want {
+        anyhow::bail!("medium fixture at {DIR} is stale (pin is {want}); {HINT}");
+    }
+    load_bench_fixtures_from(DIR)
 }
 
 /// Same as `load_bench_fixtures`, but loads manifests from `dir` instead of
-/// `testdata/`. Intended for benchmarks pointed at a real, locally-captured
-/// cluster dump (never checked in). Kept as a distinct entry point so its
-/// numbers never mix into the tracked `testdata/` regression history.
+/// the small fixture. Used by the medium benchmarks and the anonymizer
+/// equivalence test.
 pub fn load_bench_fixtures_from(dir: &str) -> Result<(Vec<(String, Vec<Value>)>, Vec<String>)> {
     let mut store = MemStore::new();
     crate::edb::load_from_manifests(&mut store, vec![dir.to_string()])
@@ -1027,12 +1050,15 @@ fn drain_store(store: MemStore) -> Vec<(String, Vec<Value>)> {
 mod tests {
     use super::*;
 
-    /// Load the testdata/ manifests + rules/*.mg files and return the raw
+    /// Load the fixtures/testdata/small/ manifests + rules/*.mg files and return the raw
     /// (edb, rule_sources) pair that both backends consume.
     fn load_fixtures() -> Result<(Vec<(String, Vec<Value>)>, Vec<String>)> {
         let mut edb_store = MemStore::new();
-        crate::edb::load_from_manifests(&mut edb_store, vec!["testdata".to_string()])
-            .context("load testdata")?;
+        crate::edb::load_from_manifests(
+            &mut edb_store,
+            vec!["fixtures/testdata/small".to_string()],
+        )
+        .context("load testdata")?;
         let edb = drain_store(edb_store);
 
         let rule_files = glob::glob("rules/*.mg")

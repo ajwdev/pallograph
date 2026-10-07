@@ -18,21 +18,21 @@
 //! (`DdBackend::evaluate` now just spawns + snapshots + drops a session, so a
 //! separate batch bench would duplicate `dd_session`.)
 //!
-//! Run:  cargo bench --bench bulk_load
+//! Run:  cargo bench --bench small_bulk_load
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use pallograph::engine::{Backend, DdBackend, Engine, InterpreterBackend, load_bench_fixtures};
 
 fn interpreter_evaluate(c: &mut Criterion) {
     let (edb, rules) = load_bench_fixtures().expect("load fixtures");
-    c.bench_function("bulk_load/interpreter", |b| {
+    c.bench_function("small_bulk_load/interpreter", |b| {
         b.iter(|| InterpreterBackend.evaluate(&edb, &rules).unwrap())
     });
 }
 
 fn dd_session_spawn(c: &mut Criterion) {
     let (edb, rules) = load_bench_fixtures().expect("load fixtures");
-    c.bench_function("bulk_load/dd_session", |b| {
+    c.bench_function("small_bulk_load/dd_session", |b| {
         b.iter_batched(
             // Setup: clone pre-loaded data (no file I/O).
             || (edb.clone(), rules.clone()),

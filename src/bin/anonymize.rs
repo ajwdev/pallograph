@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 const VOCAB: &str = include_str!("../../hack/anonymize/public-vocab.txt");
-const API_RESOURCES: &str = include_str!("../../api-resources.txt");
+const API_RESOURCES: &str = include_str!("../../fixtures/testdata/small/api-resources.txt");
 const BUILTINS: &str = include_str!("../builtins.txt");
 
 /// Names the rules and SMT code compare against literally.

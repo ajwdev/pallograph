@@ -81,10 +81,27 @@ PALLOGRAPH_REAL_FIXTURES=real PALLOGRAPH_ANON_FIXTURES=anon \
 ```
 
 Each variable is a directory of manifests, loaded the same way as
-`testdata/`.
+`fixtures/testdata/small/`.
 
-## Benchmarking against the result
+## Publishing as the medium benchmark fixture
 
-`pallograph::engine::load_bench_fixtures_from(dir)` loads manifests from any
-directory, so an anonymized dump can be benchmarked without touching the
-checked-in `testdata/` regression baseline.
+The `medium_*` benches run against an anonymized dump published as a
+release asset. After `--check` passes and you have read the `--report`
+output:
+
+```
+hack/publish-fixtures.sh anon fixtures-medium-v2
+```
+
+This tars the directory, uploads it to a GitHub release, and rewrites
+`fixtures/testdata/medium.env` with the new tag and sha256. Commit that
+file. Everyone else gets the dump with:
+
+```
+hack/fetch-fixtures.sh medium
+cargo bench --bench medium_bulk_load
+```
+
+The fetch verifies the pinned sha256 before extracting. The medium benches
+panic with this instruction if the dump is missing or stale. Signing the
+asset (cosign) is not done yet.

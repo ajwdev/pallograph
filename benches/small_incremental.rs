@@ -29,9 +29,9 @@
 //!
 //! Trade-off: the EDB grows by one fact per add-iteration within a sample, so
 //! later iterations settle against a marginally larger EDB than earlier ones.
-//! For testdata scale this is negligible, but it is worth noting.
+//! For small-fixture scale this is negligible, but it is worth noting.
 //!
-//! Run:  cargo bench --bench incremental
+//! Run:  cargo bench --bench small_incremental
 
 use std::time::{Duration, Instant};
 
@@ -39,7 +39,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use mangle_common::Value;
 use pallograph::engine::{DdBackend, Engine, InterpreterBackend, load_bench_fixtures};
 
-// Generate a synthetic edge fact absent from testdata.  The index `i` keeps
+// Generate a synthetic edge fact absent from the small fixture.  The index `i` keeps
 // each call within a sample unique so `Engine::add_fact`'s dedup guard never
 // short-circuits (it no-ops when the fact is already present).
 fn bench_fact(i: u64) -> (String, Vec<Value>) {
@@ -58,7 +58,7 @@ fn bench_fact(i: u64) -> (String, Vec<Value>) {
 
 fn interpreter_add_fact(c: &mut Criterion) {
     let (edb, rules) = load_bench_fixtures().expect("load fixtures");
-    c.bench_function("incremental/interpreter_add_fact", |b| {
+    c.bench_function("small_incremental/interpreter_add_fact", |b| {
         b.iter_custom(|iters| {
             // Build a fresh engine once per sample — not per iteration.
             let mut engine =
@@ -77,7 +77,7 @@ fn interpreter_add_fact(c: &mut Criterion) {
 
 fn dd_add_fact(c: &mut Criterion) {
     let (edb, rules) = load_bench_fixtures().expect("load fixtures");
-    c.bench_function("incremental/dd_add_fact", |b| {
+    c.bench_function("small_incremental/dd_add_fact", |b| {
         b.iter_custom(|iters| {
             // Session startup is setup, not measurement.
             let mut engine = Engine::from_parts(
@@ -102,7 +102,7 @@ fn dd_add_fact(c: &mut Criterion) {
 
 fn interpreter_retract_fact(c: &mut Criterion) {
     let (edb, rules) = load_bench_fixtures().expect("load fixtures");
-    c.bench_function("incremental/interpreter_retract_fact", |b| {
+    c.bench_function("small_incremental/interpreter_retract_fact", |b| {
         b.iter_custom(|iters| {
             // Pre-insert the facts during setup (not timed), then retract them.
             let mut engine =
@@ -125,7 +125,7 @@ fn interpreter_retract_fact(c: &mut Criterion) {
 
 fn dd_retract_fact(c: &mut Criterion) {
     let (edb, rules) = load_bench_fixtures().expect("load fixtures");
-    c.bench_function("incremental/dd_retract_fact", |b| {
+    c.bench_function("small_incremental/dd_retract_fact", |b| {
         b.iter_custom(|iters| {
             // Pre-insert the facts during setup (not timed), then retract them.
             let mut engine = Engine::from_parts(
