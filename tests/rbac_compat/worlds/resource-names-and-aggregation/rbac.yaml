@@ -1,0 +1,142 @@
+# Promoted from the fuzz tier (hack/rbac-compat.sh -s 1, world fuzz-1-028):
+# over-grants that need both the resourceNames and the aggregation gap to
+# explain (denied-by-resource-names-and-aggregation).
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      fuzz.pallograph.dev/agg-x: "true"
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    fuzz.pallograph.dev/agg-y: "true"
+  name: clusterrole-0
+rules: null
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    fuzz.pallograph.dev/agg-x: "true"
+  name: clusterrole-1
+rules:
+- apiGroups:
+  - ""
+  - apps
+  resources:
+  - '*/scale'
+  - deployments/scale
+  verbs:
+  - get
+  - create
+  - '*'
+---
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      fuzz.pallograph.dev/agg-x: "true"
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clusterrole-2
+rules:
+- apiGroups:
+  - batch
+  - ""
+  resourceNames:
+  - alpha
+  - beta
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - '*'
+  - list
+- apiGroups:
+  - ""
+  - '*'
+  resourceNames:
+  - alpha
+  resources:
+  - '*/scale'
+  - pods/*
+  verbs:
+  - patch
+  - '*'
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rolebinding-0
+  namespace: ns-b
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: clusterrole-0
+subjects:
+- kind: ServiceAccount
+  name: sa-1
+- kind: ServiceAccount
+  name: sa-2
+  namespace: ns-a
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rolebinding-1
+  namespace: ns-b
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: clusterrole-1
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: user-1
+- kind: ServiceAccount
+  name: sa-2
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: clusterrolebinding-0
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: clusterrole-1
+subjects:
+- kind: ServiceAccount
+  name: sa-2
+  namespace: ns-a
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: clusterrolebinding-1
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: clusterrole-2
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:unauthenticated
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: user-1
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: clusterrolebinding-2
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: clusterrole-2
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:unauthenticated
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:serviceaccounts

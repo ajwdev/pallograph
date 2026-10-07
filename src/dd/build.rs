@@ -140,7 +140,9 @@ fn eval_call_filter(func: &str, args: &[Slot], row: &Row) -> Result<bool> {
             (Val::Compound(CompoundKindMirror::Struct, kvs), Val::Name(_)) => {
                 // Struct layout: [k1, v1, k2, v2, ...]
                 Ok(kvs
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .any(|kv| kv[0] == vals[1] && kv[1] == vals[2]))
             }
             _ => Ok(false),

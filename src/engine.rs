@@ -362,7 +362,7 @@ impl CompiledProgram {
 
                 self.fprint_op(w, body, level + 1)
             }
-            _ => Ok(write!(w, "{}(unimplemented: {:?})", node_prefix, &op)?),
+            _ => Ok(write!(w, "{}(unimplemented: {:?})", node_prefix, op)?),
         }
     }
 

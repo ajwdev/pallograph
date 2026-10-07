@@ -310,3 +310,71 @@ direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
 
 direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
     all_group_perm(Principal, Namespace, ApiGroup, Resource, Verb).
+
+# ---- Access decisions ----
+#
+# rbac_allowed(Id) answers, for each access_request, whether the RBAC
+# authorizer would allow it. It reads direct_perm, so it inherits that
+# relation's modelling: resourceNames and nonResourceURLs rules are not
+# represented, and neither are groups the request does not list in
+# access_request_group. The RBAC compatibility harness
+# (tests/rbac_compat.rs) measures this relation against the kube-apiserver
+# authorizer.
+#
+# Each access_request_grant_* relation lists the grant values that match
+# one field of the request: the value itself, or the "*" wildcard.
+
+Decl rbac_allowed(Id)
+  descr [
+    doc("access_request ids the RBAC authorizer would allow."),
+    arg(Id, "access_request id")
+  ].
+
+access_request_principal(Id, User) :-
+    access_request(Id, User, _, _, _, _, _, _, _).
+
+access_request_principal(Id, Group) :-
+    access_request_group(Id, Group).
+
+# RoleBinding grants apply in their own namespace; ClusterRoleBinding grants
+# (Namespace "") apply everywhere.
+access_request_grant_namespace(Id, Namespace) :-
+    access_request(Id, _, Namespace, _, _, _, _, _, _).
+
+access_request_grant_namespace(Id, "") :-
+    access_request(Id, _, _, _, _, _, _, _, _).
+
+access_request_grant_api_group(Id, ApiGroup) :-
+    access_request(Id, _, _, ApiGroup, _, _, _, _, _).
+
+access_request_grant_api_group(Id, "*") :-
+    access_request(Id, _, _, _, _, _, _, _, _).
+
+# Rules name subresources as "resource/subresource".
+access_request_grant_resource(Id, Resource) :-
+    access_request(Id, _, _, _, Resource, Subresource, _, _, _),
+    Subresource = "".
+
+access_request_grant_resource(Id, Combined) :-
+    access_request(Id, _, _, _, Resource, Subresource, _, _, _),
+    Subresource != ""
+    |> let Combined = fn:string:concat(Resource, "/", Subresource).
+
+access_request_grant_resource(Id, "*") :-
+    access_request(Id, _, _, _, _, _, _, _, _).
+
+access_request_grant_verb(Id, Verb) :-
+    access_request(Id, _, _, _, _, _, _, Verb, _).
+
+access_request_grant_verb(Id, "*") :-
+    access_request(Id, _, _, _, _, _, _, _, _).
+
+rbac_allowed(Id) :-
+    access_request(Id, _, _, _, _, _, _, _, Path),
+    Path = "",
+    access_request_principal(Id, Principal),
+    access_request_grant_namespace(Id, Namespace),
+    access_request_grant_api_group(Id, ApiGroup),
+    access_request_grant_resource(Id, Resource),
+    access_request_grant_verb(Id, Verb),
+    direct_perm(Principal, Namespace, ApiGroup, Resource, Verb).

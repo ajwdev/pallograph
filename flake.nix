@@ -24,6 +24,9 @@
       pkg-config
       z3
       llvmPackages.libclang
+      # Builds tools/rbac-oracle, which generates the RBAC compatibility
+      # test data (hack/rbac-compat-gen.sh).
+      go
     ];
 
     env = {

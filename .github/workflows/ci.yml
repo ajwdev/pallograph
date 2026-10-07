@@ -41,5 +41,14 @@ jobs:
         with:
           arguments: .#ci
       - uses: Swatinem/rust-cache@v2
+      # The RBAC oracle links k8s.io/kubernetes, which is slow to build cold.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('tools/rbac-oracle/go.sum') }}
+          restore-keys: go-${{ runner.os }}-
       - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: hack/rbac-compat-gen.sh
       - run: cargo test --all-targets --locked
