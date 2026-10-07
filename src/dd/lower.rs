@@ -149,15 +149,75 @@ pub struct LoweredAggregate {
     pub arg_slot: Option<Slot>,
 }
 
+/// A negated body atom, recorded so the lazy provenance path can show it as a
+/// non-descendable `¬rel(args)` leaf in a reconstructed proof.
+///
+/// `arg_slots` reads each argument of the negated atom from the rule's wide
+/// pre-`Insert` row: `Some(Slot::Col(i))`/`Some(Slot::Const(v))` for a bound
+/// variable or a literal, and `None` for an anonymous/wildcard argument that is
+/// not addressable in the row (rendered as `_`). This is purely for rendering
+/// the absent condition; it records no premise and contributes no height, so it
+/// does not change the existing premise/height semantics.
+#[derive(Debug, Clone)]
+pub struct NegatedAtom {
+    pub rel: String,
+    pub arg_slots: Vec<Option<Slot>>,
+}
+
+/// A positive relation lookup in a rule body: an atom that must hold for the
+/// rule to fire. The facts it matches are that derivation's *premises*, the
+/// children `::why` shows under a derived fact. For
+///
+/// ```text
+/// path(X, Z) :- path(X, Y), edge(Y, Z), !blocked(Z), :match_field(...).
+/// ```
+///
+/// the premise atoms are `path(X, Y)` and `edge(Y, Z)`. Negated atoms like
+/// `!blocked(Z)` are not premises (see [`NegatedAtom`]), and neither are
+/// builtins, `let`s or comparisons: they filter rows or add computed columns,
+/// but no fact is derived *from* them.
+///
+/// `arg_cols` maps the atom's argument positions (in relation-column order) to
+/// their column index in the rule's final pre-`Insert` row. Because the builder
+/// only ever *appends* columns before the final `Insert` (the sole reshaper is
+/// `Step::Reduce`, which applies only to premise-less aggregate rules), these
+/// indices stay valid all the way to the head projection — so
+/// `build_rule` can reconstruct each premise tuple `Row(row[arg_cols])` at the
+/// moment it emits the head.
+#[derive(Debug, Clone)]
+pub struct PremiseAtom {
+    /// The relation the atom looks up, e.g. `"edge"`.
+    pub rel: String,
+    /// Where each argument sits in the rule's joined row. For the example
+    /// above the row is `[X, Y, Z]`, so `path(X, Y)` is `[0, 1]` and
+    /// `edge(Y, Z)` is `[1, 2]`.
+    pub arg_cols: Vec<usize>,
+}
+
 /// The fully-lowered representation of one Mangle rule: a linear pipeline of
 /// `Step`s ending in an `Insert`.  All `NameId`/`StringId` references have been
 /// resolved to owned strings; all variables have been replaced by column indices.
 #[derive(Debug, Clone)]
 pub struct LoweredRule {
+    /// A stable, compile-time-assigned identity for this rule, sourced from the
+    /// rule's `InstId` in `build_strata`. Used by lazy provenance to annotate
+    /// each derived fact with "the rule that achieved its minimal-height
+    /// derivation" and to look the rule back up at `::why` time for
+    /// backward-chaining. Deterministic across runs.
+    pub rule_id: u32,
     /// The name of the head (output) relation.
     pub head_rel: String,
     /// Ordered steps of the pipeline.
     pub steps: Vec<Step>,
+    /// The positive body atoms, in body order — the premises whose heights
+    /// feed lazy provenance annotations. Empty for unit rules and (by design,
+    /// matching the interpreter) for aggregate rules.
+    pub premise_atoms: Vec<PremiseAtom>,
+    /// The negated body atoms, in body order. Consumed only by lazy provenance
+    /// reconstruction, which surfaces each as a `¬rel(args)` absent-leaf in
+    /// the proof. Does not affect `premise_atoms` or height. Empty unless the
+    /// rule has `!rel(...)` atoms.
+    pub negated_atoms: Vec<NegatedAtom>,
 }
 
 // ---------------------------------------------------------------------------
@@ -168,15 +228,31 @@ pub struct LoweredRule {
 ///
 /// Call this while `Ir` is still alive (name/string resolution happens here).
 /// The result is fully owned and `Send + Sync + 'static`.
-pub fn lower_op(op: &Op, ir: &Ir) -> Result<LoweredRule> {
+pub fn lower_op(op: &Op, ir: &Ir, rule_id: u32) -> Result<LoweredRule> {
     let mut steps = Vec::new();
     let mut schema: Vec<String> = Vec::new();
     let mut head_rel = String::new();
-    lower_inner(op, ir, &mut schema, &mut steps, &mut head_rel)?;
+    let mut premise_atoms = Vec::new();
+    let mut negated_atoms = Vec::new();
+    lower_inner(
+        op,
+        ir,
+        &mut schema,
+        &mut steps,
+        &mut head_rel,
+        &mut premise_atoms,
+        &mut negated_atoms,
+    )?;
     if head_rel.is_empty() {
         bail!("lowered rule produced no Insert step");
     }
-    Ok(LoweredRule { head_rel, steps })
+    Ok(LoweredRule {
+        rule_id,
+        head_rel,
+        steps,
+        premise_atoms,
+        negated_atoms,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -231,26 +307,40 @@ fn resolve_data_source(source: &DataSource, ir: &Ir) -> Result<(String, Vec<Stri
 }
 
 /// Emit join steps for a DataSource encountered while `schema` is non-empty.
-fn emit_join(rel_name: String, vars: &[String], schema: &mut Vec<String>, steps: &mut Vec<Step>) {
+fn emit_join(
+    rel_name: String,
+    vars: &[String],
+    schema: &mut Vec<String>,
+    steps: &mut Vec<Step>,
+    premise_atoms: &mut Vec<PremiseAtom>,
+) {
     let mut left_key_cols = Vec::new();
     let mut right_key_cols = Vec::new();
     let mut right_new_cols = Vec::new();
+    // The final row column holding each of this atom's args, in relation order.
+    let mut arg_cols = Vec::new();
 
     for (right_pos, var) in vars.iter().enumerate() {
         if let Some(left_pos) = schema.iter().position(|v| v == var) {
             left_key_cols.push(left_pos);
             right_key_cols.push(right_pos);
+            arg_cols.push(left_pos);
         } else {
             right_new_cols.push(right_pos);
+            arg_cols.push(schema.len());
             schema.push(var.clone());
         }
     }
 
     steps.push(Step::Join {
-        rel: rel_name,
+        rel: rel_name.clone(),
         left_key_cols,
         right_key_cols,
         right_new_cols,
+    });
+    premise_atoms.push(PremiseAtom {
+        rel: rel_name,
+        arg_cols,
     });
 }
 
@@ -283,6 +373,7 @@ fn lower_cond(
     ir: &Ir,
     schema: &[String],
     steps: &mut Vec<Step>,
+    negated_atoms: &mut Vec<NegatedAtom>,
 ) -> Result<()> {
     match cond {
         Condition::Cmp { op, left, right } => {
@@ -313,6 +404,10 @@ fn lower_cond(
             let mut left_key_slots = Vec::new();
             let mut right_key_cols = Vec::new();
             let mut const_filters = Vec::new();
+            // Full argument list (in relation-column order) for rendering
+            // the `¬rel(args)` absent-leaf on the lazy provenance path.
+            // `None` = anonymous/wildcard var, not addressable in the row.
+            let mut render_slots: Vec<Option<Slot>> = Vec::new();
 
             for (right_col, arg) in args.iter().enumerate() {
                 match arg {
@@ -322,14 +417,24 @@ fn lower_cond(
                             // Shared variable: join on it.
                             left_key_slots.push(Slot::Col(left_pos));
                             right_key_cols.push(right_col);
+                            render_slots.push(Some(Slot::Col(left_pos)));
+                        } else {
+                            // Anonymous/wildcard var (not in schema) → no
+                            // constraint, not renderable from the row.
+                            render_slots.push(None);
                         }
-                        // Anonymous/wildcard var (not in schema) → no constraint.
                     }
                     Operand::Const(c) => {
-                        const_filters.push((right_col, resolve_constant(c, ir)));
+                        let val = resolve_constant(c, ir);
+                        const_filters.push((right_col, val.clone()));
+                        render_slots.push(Some(Slot::Const(val)));
                     }
                 }
             }
+            negated_atoms.push(NegatedAtom {
+                rel: rel_name.clone(),
+                arg_slots: render_slots,
+            });
             steps.push(Step::Antijoin {
                 rel: rel_name,
                 left_key_slots,
@@ -349,7 +454,7 @@ fn lower_cond(
                 negate,
             });
         }
-        Condition::Not(inner) => lower_cond(inner, !negate, ir, schema, steps)?,
+        Condition::Not(inner) => lower_cond(inner, !negate, ir, schema, steps, negated_atoms)?,
     }
     Ok(())
 }
@@ -360,6 +465,8 @@ fn lower_inner(
     schema: &mut Vec<String>,
     steps: &mut Vec<Step>,
     head_rel: &mut String,
+    premise_atoms: &mut Vec<PremiseAtom>,
+    negated_atoms: &mut Vec<NegatedAtom>,
 ) -> Result<()> {
     match op {
         Op::Iterate { source, body } => {
@@ -375,12 +482,26 @@ fn lower_inner(
 
                     if schema.is_empty() {
                         schema.extend(var_names);
-                        steps.push(Step::Scan { rel: rel_name });
+                        steps.push(Step::Scan {
+                            rel: rel_name.clone(),
+                        });
+                        premise_atoms.push(PremiseAtom {
+                            rel: rel_name,
+                            arg_cols: (0..schema.len()).collect(),
+                        });
                     } else {
-                        emit_join(rel_name, &var_names, schema, steps);
+                        emit_join(rel_name, &var_names, schema, steps, premise_atoms);
                     }
 
-                    lower_inner(body, ir, schema, steps, head_rel)
+                    lower_inner(
+                        body,
+                        ir,
+                        schema,
+                        steps,
+                        head_rel,
+                        premise_atoms,
+                        negated_atoms,
+                    )
                 }
 
                 DataSource::IndexLookup {
@@ -422,11 +543,20 @@ fn lower_inner(
                     if schema.is_empty() {
                         // First atom of the body: seed with a plain scan.
                         schema.extend(var_names);
-                        steps.push(Step::Scan { rel });
+                        steps.push(Step::Scan { rel: rel.clone() });
+                        premise_atoms.push(PremiseAtom {
+                            rel,
+                            arg_cols: (0..schema.len()).collect(),
+                        });
                     } else if let Some(kpos) = key_pos {
                         // Keyed (indexed) join on `key == relation[col_idx]`.
+                        let base = schema.len();
                         let arity = var_names.len();
                         schema.extend(var_names);
+                        premise_atoms.push(PremiseAtom {
+                            rel: rel.clone(),
+                            arg_cols: (base..base + arity).collect(),
+                        });
                         steps.push(Step::Join {
                             rel,
                             left_key_cols: vec![kpos],
@@ -439,17 +569,33 @@ fn lower_inner(
                         // Constant key, or key var not yet in schema: fall back to a
                         // shared-var join; the downstream Filter enforces the key.
                         // Uncommon in practice.
-                        emit_join(rel, &var_names, schema, steps);
+                        emit_join(rel, &var_names, schema, steps, premise_atoms);
                     }
 
-                    lower_inner(body, ir, schema, steps, head_rel)
+                    lower_inner(
+                        body,
+                        ir,
+                        schema,
+                        steps,
+                        head_rel,
+                        premise_atoms,
+                        negated_atoms,
+                    )
                 }
             }
         }
 
         Op::Filter { cond, body } => {
-            lower_cond(cond, false, ir, schema, steps)?;
-            lower_inner(body, ir, schema, steps, head_rel)
+            lower_cond(cond, false, ir, schema, steps, negated_atoms)?;
+            lower_inner(
+                body,
+                ir,
+                schema,
+                steps,
+                head_rel,
+                premise_atoms,
+                negated_atoms,
+            )
         }
 
         Op::Let { var, expr, body } => {
@@ -469,7 +615,15 @@ fn lower_inner(
             };
             schema.push(ir.resolve_name(*var).to_string());
             steps.push(Step::Let { expr: owned_expr });
-            lower_inner(body, ir, schema, steps, head_rel)
+            lower_inner(
+                body,
+                ir,
+                schema,
+                steps,
+                head_rel,
+                premise_atoms,
+                negated_atoms,
+            )
         }
 
         Op::MatchField {
@@ -485,14 +639,30 @@ fn lower_inner(
                 struct_slot,
                 field: field_name,
             });
-            lower_inner(body, ir, schema, steps, head_rel)
+            lower_inner(
+                body,
+                ir,
+                schema,
+                steps,
+                head_rel,
+                premise_atoms,
+                negated_atoms,
+            )
         }
 
         Op::IterateList { source, var, body } => {
             let source_slot = resolve_operand(source, ir, schema)?;
             schema.push(ir.resolve_name(*var).to_string());
             steps.push(Step::IterateList { source_slot });
-            lower_inner(body, ir, schema, steps, head_rel)
+            lower_inner(
+                body,
+                ir,
+                schema,
+                steps,
+                head_rel,
+                premise_atoms,
+                negated_atoms,
+            )
         }
 
         Op::Insert { relation, args } => {
@@ -537,7 +707,20 @@ fn lower_inner(
                 let mut sub_schema: Vec<String> = Vec::new();
                 let mut sub_steps: Vec<Step> = Vec::new();
                 let mut sub_head: String = String::new();
-                lower_inner(op, ir, &mut sub_schema, &mut sub_steps, &mut sub_head)?;
+                // Seq is only emitted for aggregation, whose derived facts carry
+                // empty premises (interpreter parity). Lower each sub-op with a
+                // throwaway premise vec so the rule's premise_atoms stays empty.
+                let mut sub_premises: Vec<PremiseAtom> = Vec::new();
+                let mut sub_negated: Vec<NegatedAtom> = Vec::new();
+                lower_inner(
+                    op,
+                    ir,
+                    &mut sub_schema,
+                    &mut sub_steps,
+                    &mut sub_head,
+                    &mut sub_premises,
+                    &mut sub_negated,
+                )?;
 
                 if active_steps.is_empty() {
                     // First sub-op: take its steps as-is.
@@ -582,12 +765,26 @@ fn lower_inner(
 
             // Seed from the build side.
             schema.extend(build_vars.clone());
-            steps.push(Step::Scan { rel: build_rel });
+            steps.push(Step::Scan {
+                rel: build_rel.clone(),
+            });
+            premise_atoms.push(PremiseAtom {
+                rel: build_rel,
+                arg_cols: (0..build_vars.len()).collect(),
+            });
 
             // Join on the probe side — shared vars become keys automatically.
-            emit_join(probe_rel, &probe_vars, schema, steps);
+            emit_join(probe_rel, &probe_vars, schema, steps, premise_atoms);
 
-            lower_inner(body, ir, schema, steps, head_rel)
+            lower_inner(
+                body,
+                ir,
+                schema,
+                steps,
+                head_rel,
+                premise_atoms,
+                negated_atoms,
+            )
         }
 
         // -----------------------------------------------------------------------
@@ -632,6 +829,9 @@ fn lower_inner(
                 key_cols: key_cols.clone(),
                 aggregates: lowered_aggs,
             });
+            // Aggregate facts carry empty premises (interpreter parity): the
+            // GroupBy source scan above is a reshaped, not a body-atom, read.
+            premise_atoms.clear();
 
             // Rewrite schema: key columns first, then one column per aggregate result.
             // The body's Insert/Cmp steps will resolve against this new schema.
@@ -641,7 +841,15 @@ fn lower_inner(
             }
             *schema = new_schema;
 
-            lower_inner(body, ir, schema, steps, head_rel)
+            lower_inner(
+                body,
+                ir,
+                schema,
+                steps,
+                head_rel,
+                premise_atoms,
+                negated_atoms,
+            )
         }
     }
 }

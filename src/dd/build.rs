@@ -19,12 +19,61 @@ use mangle_interpreter::eval_function;
 use crate::dd::lower::{CmpOp, LoweredAggregate, LoweredRule, OwnedExpr, Slot, Step};
 use crate::dd::value::{CompoundKindMirror, OrdF64, Row, Val};
 
+/// A fact's lazy-provenance annotation, `(rule_id, height)`, kept in a *side*
+/// collection keyed by the fact's `Row`.
+///
+/// `height` is the depth of the fact's shortest proof tree: 0 for an EDB
+/// fact, otherwise `1 + max(premise heights)`, minimised over all of the
+/// fact's derivations. `rule_id` is the rule that achieved that minimum
+/// ([`SENTINEL_EDB`](crate::dd::value::SENTINEL_EDB) for EDB facts).
+///
+/// Storing just this per fact, instead of every derivation, is enough to
+/// rebuild one minimal-height proof on demand at `::why` time: find a
+/// grounding of `rule_id` whose premises all have strictly lower heights, then
+/// recurse into each premise (`reconstruct_grounding` in `session.rs`). The
+/// strict decrease is what guarantees the walk terminates.
+///
+/// The technique comes from the Soufflé Datalog engine: Zhao, Subotić &
+/// Scholz, "Debugging Large-scale Datalog: A Scalable Provenance Evaluation
+/// Strategy", TOPLAS 2020. Design notes: `docs/lazy-provenance.md`.
+pub type Annotation = (u32, u32);
+
+/// Collapse a collection of candidate annotations `(fact, (rule_id, height))`
+/// to one annotation per fact: the minimal `(height, rule_id)` (smallest height
+/// wins; tie-break on smallest rule_id for determinism). This is the DD
+/// realisation of the provenance-lattice join `min` (the `min_g` in the height
+/// update equation `h'(t) = min_g (1 + max_i h(t_i))`).
+///
+/// Output multiplicity is always 1, so the result is a proper set (one
+/// annotation per fact). Runs inside the recursive scope for recursive heads,
+/// where `reduce`'s differential retractions give the "re-fire on height
+/// improvement" behaviour for free.
+pub fn min_reduce_annotations<'scope, T>(
+    candidates: VecCollection<'scope, T, (Row, Annotation)>,
+) -> VecCollection<'scope, T, (Row, Annotation)>
+where
+    T: Timestamp + differential_dataflow::lattice::Lattice + Ord + 'static,
+{
+    candidates.reduce(
+        |_fact, input: &[(&Annotation, isize)], output: &mut Vec<(Annotation, isize)>| {
+            // Pick lexicographically-minimal (height, rule_id).
+            let best = input
+                .iter()
+                .map(|((rid, h), _)| (*h, *rid))
+                .min()
+                .expect("reduce group is non-empty");
+            let (h, rid) = best;
+            output.push(((rid, h), 1));
+        },
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Slot helper
 // ---------------------------------------------------------------------------
 
 #[inline]
-fn slot_val(slot: &Slot, row: &Row) -> Val {
+pub fn slot_val(slot: &Slot, row: &Row) -> Val {
     match slot {
         Slot::Col(i) => row.0[*i].clone(),
         Slot::Const(v) => v.clone(),
@@ -35,7 +84,7 @@ fn slot_val(slot: &Slot, row: &Row) -> Val {
 // Cmp evaluation
 // ---------------------------------------------------------------------------
 
-fn eval_cmp(op: CmpOp, left: &Val, right: &Val) -> bool {
+pub fn eval_cmp(op: CmpOp, left: &Val, right: &Val) -> bool {
     match op {
         CmpOp::Eq => left == right,
         CmpOp::Neq => left != right,
@@ -55,13 +104,43 @@ fn eval_cmp(op: CmpOp, left: &Val, right: &Val) -> bool {
 /// Calls the interpreter's own `eval_function`, so errors (e.g. `fn:plus` on
 /// a string) carry the same messages and fail the same evaluations as upstream
 /// mangle. See `Step::Let` for how they are surfaced.
-fn eval_expr(expr: &OwnedExpr, row: &Row) -> Result<Val> {
+pub fn eval_expr(expr: &OwnedExpr, row: &Row) -> Result<Val> {
     match expr {
         OwnedExpr::Value(slot) => Ok(slot_val(slot, row)),
         OwnedExpr::Call { func, args } => {
             let vals: Vec<Value> = args.iter().map(|s| slot_val(s, row).into()).collect();
             Ok(Val::from(&eval_function(func, &vals)?))
         }
+    }
+}
+
+/// `Step::MatchField` on one row: append the struct's `field` value, or drop
+/// the row if the slot is not a struct or lacks the field. Shared with lazy
+/// provenance replay (`session.rs`) so both see the same rows.
+pub fn match_field_row(struct_slot: &Slot, field: &str, row: Row) -> Option<Row> {
+    match slot_val(struct_slot, &row) {
+        Val::Compound(CompoundKindMirror::Struct, kvs) => {
+            // Struct layout: [k1, v1, k2, v2, ...]
+            let (pairs, _) = kvs.as_chunks::<2>();
+            pairs
+                .iter()
+                .find(|[key, _]| matches!(key, Val::Name(n) if &**n == field))
+                .map(|[_, value]| row.appended(std::iter::once(value.clone())))
+        }
+        _ => None,
+    }
+}
+
+/// `Step::IterateList` on one row: one output row per list (or pair) element,
+/// appended. Shared with lazy provenance replay like [`match_field_row`].
+pub fn iterate_list_row(source_slot: &Slot, row: Row) -> Vec<Row> {
+    match slot_val(source_slot, &row) {
+        Val::Compound(CompoundKindMirror::List, elems)
+        | Val::Compound(CompoundKindMirror::Pair, elems) => elems
+            .into_iter()
+            .map(|elem| row.appended(std::iter::once(elem)))
+            .collect(),
+        _ => vec![],
     }
 }
 
@@ -99,7 +178,7 @@ pub(crate) fn is_supported_call_filter(func: &str) -> bool {
 /// considered semantics; if upstream (or we) decide a type mismatch should
 /// just be `false`, change it here and drop the error collection in
 /// `Step::CallFilter`.
-fn eval_call_filter(func: &str, args: &[Slot], row: &Row) -> Result<bool> {
+pub fn eval_call_filter(func: &str, args: &[Slot], row: &Row) -> Result<bool> {
     let vals: Vec<Val> = args.iter().map(|s| slot_val(s, row)).collect();
     match func {
         ":string:starts_with" => {
@@ -161,7 +240,7 @@ fn eval_call_filter(func: &str, args: &[Slot], row: &Row) -> Result<bool> {
 /// accumulated multiplicity (always positive in batch mode).
 ///
 /// Mirrors the interpreter's `eval_aggregate` semantics exactly.
-fn eval_aggregate(agg: &LoweredAggregate, input: &[(&Row, isize)]) -> Val {
+pub fn eval_aggregate(agg: &LoweredAggregate, input: &[(&Row, isize)]) -> Val {
     // Helper: read the aggregate argument from a row (Col index or Const value).
     let arg = |row: &Row| -> Val {
         slot_val(
@@ -255,18 +334,55 @@ fn eval_aggregate(agg: &LoweredAggregate, input: &[(&Row, isize)]) -> Val {
 /// Returns the output `VecCollection<Row>` — its rows are the tuples to be
 /// inserted into `rule.head_rel`.  Call `.distinct()` after concatenating all
 /// rules for the same head relation.
+///
+/// # Provenance
+///
+/// With `provenance` on, also returns a parallel annotation collection
+/// `Collection<(Row, (rule_id, height))>`: one candidate annotation per
+/// grounding of this rule, `height = 1 + max(premise heights)`. The premise
+/// heights are looked up by joining the pre-projection row against each
+/// positive premise relation's *annotation* sibling collection (`annotations`).
+/// The per-fact `min` over all groundings/rules is done by the caller
+/// (`session.rs`) via a `reduce`. With it off, the annotation return is `None`
+/// and no extra operators are built.
+///
+/// Returns `(head_rows, annotations)`.
 pub fn build_rule<'scope, T>(
     rule: &LoweredRule,
     rels: &HashMap<String, VecCollection<'scope, T, Row>>,
+    annotations: &HashMap<String, VecCollection<'scope, T, (Row, Annotation)>>,
     unit_coll: &VecCollection<'scope, T, Row>,
     errors: &mut Vec<VecCollection<'scope, T, Row>>,
-) -> Result<VecCollection<'scope, T, Row>>
+    provenance: bool,
+) -> Result<(
+    VecCollection<'scope, T, Row>,
+    Option<VecCollection<'scope, T, (Row, Annotation)>>,
+)>
 where
     T: Timestamp + differential_dataflow::lattice::Lattice + Ord + 'static,
 {
     let mut curr: Option<VecCollection<'scope, T, Row>> = None;
+    let mut annotation: Option<VecCollection<'scope, T, (Row, Annotation)>> = None;
+    let n_steps = rule.steps.len();
 
-    for step in &rule.steps {
+    // Lazy provenance covers every body step. Only `Scan`/`Join` contribute
+    // premises (and so height); everything else is height-neutral:
+    //
+    // - `Cmp` and `CallFilter` are pure row filters (the mangle planner adds a
+    //   redundant `Cmp(Eq)` even after a keyed join, so `Cmp` is common).
+    // - `Let`, `MatchField` and `IterateList` only append columns. A later
+    //   premise may key on one, which is fine: replay appends the same columns
+    //   in the same order, so `premise_atoms[..].arg_cols` index identically.
+    // - `Antijoin` is height-neutral: negated atoms are excluded from
+    //   `premise_atoms`. The lazy path records them separately in
+    //   `negated_atoms` for rendering only.
+    // - `Reduce` (aggregation) is treated as a leaf: aggregate rules carry empty
+    //   `premise_atoms` (interpreter parity), so the height join-chain yields the
+    //   base height 1 and reconstruction terminates with no descent.
+    //
+    // `reconstruct_grounding` (session.rs) must replay each step identically.
+
+    for (idx, step) in rule.steps.iter().enumerate() {
         match step {
             // ---------------------------------------------------------------
             // Unit — seed collection for unit rules (no body).
@@ -455,23 +571,8 @@ where
                     .ok_or_else(|| anyhow::anyhow!("MatchField before Scan"))?;
                 let struct_slot = struct_slot.clone();
                 let field = field.clone();
-                curr = Some(pipeline.flat_map(move |row| {
-                    let sv = slot_val(&struct_slot, &row);
-                    match sv {
-                        Val::Compound(CompoundKindMirror::Struct, kvs) => {
-                            // Struct layout: [k1, v1, k2, v2, ...]
-                            let mut i = 0;
-                            while i + 1 < kvs.len() {
-                                if kvs[i] == Val::Name(field.as_str().into()) {
-                                    return vec![row.appended(std::iter::once(kvs[i + 1].clone()))];
-                                }
-                                i += 2;
-                            }
-                            vec![]
-                        }
-                        _ => vec![],
-                    }
-                }));
+                curr =
+                    Some(pipeline.flat_map(move |row| match_field_row(&struct_slot, &field, row)));
             }
 
             // ---------------------------------------------------------------
@@ -482,17 +583,7 @@ where
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("IterateList before Scan"))?;
                 let source_slot = source_slot.clone();
-                curr = Some(pipeline.flat_map(move |row| {
-                    let sv = slot_val(&source_slot, &row);
-                    match sv {
-                        Val::Compound(CompoundKindMirror::List, elems)
-                        | Val::Compound(CompoundKindMirror::Pair, elems) => elems
-                            .into_iter()
-                            .map(|elem| row.appended(std::iter::once(elem)))
-                            .collect(),
-                        _ => vec![],
-                    }
-                }));
+                curr = Some(pipeline.flat_map(move |row| iterate_list_row(&source_slot, row)));
             }
 
             // ---------------------------------------------------------------
@@ -542,6 +633,69 @@ where
                 let pipeline = curr
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("Insert before Scan"))?;
+
+                // -------------------------------------------------------------
+                // Lazy provenance: emit one candidate annotation per grounding.
+                //
+                // height = 1 + max over positive premises of premise.height.
+                // We look up each premise's height by joining the wide pre-
+                // projection `pipeline` row against that premise relation's
+                // annotation sibling collection (keyed by the premise tuple).
+                // The per-fact `min` over groundings/rules happens in the caller.
+                //
+                // Only the final Insert is a derivation of the head: aggregation
+                // rules carry an intermediate Insert into a temp relation before
+                // the Reduce.
+                // -------------------------------------------------------------
+                if provenance && idx + 1 == n_steps {
+                    let head_proj = proj.clone();
+                    let atoms = rule.premise_atoms.clone();
+                    let rule_id = rule.rule_id;
+
+                    // Carry (wide_row, running_max_height) through a chain of
+                    // joins, one per positive premise atom. Start max = 0.
+                    let mut acc: VecCollection<'scope, T, (Row, u32)> =
+                        pipeline.clone().map(|row| (row, 0u32));
+
+                    for pa in &atoms {
+                        let arg_cols = pa.arg_cols.clone();
+                        let premise_annotations = annotations.get(&pa.rel).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "lazy provenance: no annotation collection for premise `{}`",
+                                pa.rel
+                            )
+                        })?;
+
+                        // Key the accumulator by this premise's tuple.
+                        let acc_keyed: VecCollection<'scope, T, (Row, (Row, u32))> =
+                            acc.map(move |(row, max_h)| {
+                                let premise =
+                                    Row(arg_cols.iter().map(|&i| row.0[i].clone()).collect());
+                                (premise, (row, max_h))
+                            });
+
+                        // Key the premise annotations by their fact tuple; value
+                        // = its height (we ignore the premise's own rule_id here).
+                        let premise_keyed: VecCollection<'scope, T, (Row, u32)> =
+                            premise_annotations
+                                .clone()
+                                .map(|(fact, (_rid, h))| (fact, h));
+
+                        acc = acc_keyed.join_map(
+                            premise_keyed,
+                            |_premise, (row, max_h): &(Row, u32), premise_height: &u32| {
+                                (row.clone(), (*max_h).max(*premise_height))
+                            },
+                        );
+                    }
+
+                    // Project the head and finalise height = 1 + max.
+                    annotation = Some(acc.map(move |(row, max_h)| {
+                        let head = Row(head_proj.iter().map(|s| slot_val(s, &row)).collect());
+                        (head, (rule_id, max_h + 1))
+                    }));
+                }
+
                 let proj = proj.clone();
                 curr = Some(
                     pipeline.map(move |row| Row(proj.iter().map(|s| slot_val(s, &row)).collect())),
@@ -550,5 +704,6 @@ where
         }
     }
 
-    curr.ok_or_else(|| anyhow::anyhow!("rule produced no collection (empty steps?)"))
+    let head = curr.ok_or_else(|| anyhow::anyhow!("rule produced no collection (empty steps?)"))?;
+    Ok((head, annotation))
 }

@@ -40,7 +40,8 @@ fn dd_session_spawn(c: &mut Criterion) {
             // settle the full initial EDB.  Worker shutdown happens at drop,
             // outside the timed window.
             |(edb_c, rules_c)| {
-                Engine::from_parts(edb_c, rules_c, Box::new(DdBackend)).expect("engine")
+                Engine::from_parts(edb_c, rules_c, Box::new(DdBackend { provenance: false }))
+                    .expect("engine")
             },
             BatchSize::SmallInput,
         )

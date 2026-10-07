@@ -37,6 +37,12 @@ struct Cli {
     #[arg(long, value_enum, default_value = "interpreter")]
     backend: BackendKind,
 
+    /// Enable provenance for the DD backend so `::why` works.
+    /// Off by default: it adds per-fact annotation operators to every rule and is
+    /// only needed for explanation queries. (The interpreter always has it.)
+    #[arg(long)]
+    provenance: bool,
+
     /// Output format for query/relation results and `::smt` checks. `default`
     /// names each column, `compact` prints bare tuples, `table` aligns columns
     /// under a header, and `ndjson` emits one JSON object per row (or per
@@ -148,7 +154,9 @@ async fn main() -> Result<()> {
     let backend: Box<dyn Backend> = match cli.backend {
         _ if cli.explain => Box::new(InterpreterBackend),
         BackendKind::Interpreter => Box::new(InterpreterBackend),
-        BackendKind::Dd => Box::new(DdBackend),
+        BackendKind::Dd => Box::new(DdBackend {
+            provenance: cli.provenance,
+        }),
     };
 
     // Build the policy engine.

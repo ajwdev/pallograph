@@ -277,7 +277,11 @@ fn check_worlds(worlds: &[PathBuf]) -> Vec<(PathBuf, Result<BTreeMap<String, usi
         let world = loaded[*index].as_ref().unwrap();
         let requests = &world.requests[range.clone()];
         let interpreter = decide(&world.path, requests, Box::new(InterpreterBackend))?;
-        let dd = decide(&world.path, requests, Box::new(DdBackend))?;
+        let dd = decide(
+            &world.path,
+            requests,
+            Box::new(DdBackend { provenance: false }),
+        )?;
         Ok::<_, anyhow::Error>((interpreter, dd))
     });
 
