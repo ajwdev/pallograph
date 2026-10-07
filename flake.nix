@@ -48,6 +48,8 @@
         # Used to regenerate src/builtins.txt (see its header).
         jq
         ast-grep
+        # Used by hack/fetch-fixtures.sh and hack/publish-fixtures.sh.
+        zstd
       ]);
     });
   });

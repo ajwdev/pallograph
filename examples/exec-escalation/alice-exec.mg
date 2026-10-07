@@ -14,7 +14,7 @@
 #         --[steal mounted token of]-----------> system:serviceaccount:kube-system:default
 #         --[cluster-admin CRB]----------------> all permissions
 #
-# Note: the pod facts are in the baseline fixture (testdata/allpods.json).
+# Note: the pod facts are in the baseline fixture (fixtures/testdata/small/allpods.json).
 # This scenario only adds the RoleBinding — the dangerous pods are already there.
 #
 # Demo flow:

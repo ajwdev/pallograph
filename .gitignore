@@ -6,3 +6,7 @@ pallograph
 *.mapping.json
 # Local denylist for the anonymizer (internal names). Never commit.
 *.local.txt
+
+# Medium fixture (anonymized cluster dump), fetched from a release by
+# hack/fetch-fixtures.sh. Never commit.
+/fixtures/testdata/medium/

@@ -1,7 +1,7 @@
 # anonymize
 
 Rewrites a `kubectl get -o json` dump so it can be benchmarked or shared
-without leaking real names. Every reference and string length is preserved,
+without leaking real names. Every reference is preserved, and so is every string length except public IP addresses (see below),
 so joins between objects (names, namespaces, labels, selectors, UUIDs,
 `system:serviceaccount:<ns>:<sa>`) still line up and the engine derives the
 same relation counts.
@@ -53,14 +53,24 @@ values are public or structural and must stay readable:
 Secret and ConfigMap base64 payloads are replaced with random base64 of the
 same length.
 
-### public-vocab.txt
+### IP addresses and hostnames
 
-A value in a schema-defined field (apiVersion, kind, apiGroup, RBAC verbs,
-resources and apiGroups) is kept only if every word in it appears in
-`public-vocab.txt` or `api-resources.txt`. Anything else, such as CRDs and
-internal API groups, is rewritten. Add public Kubernetes words to
-`public-vocab.txt` if a legitimate value is being scrambled. Never add
-internal names.
+IPv4 and IPv6 literals and `ip-A-B-C-D` / `ec2-A-B-C-D` hostnames are
+rewritten before tokenizing, since their octets would otherwise pass as
+quantities. The mapping is consistent and injective, and a node name stays
+in step with its IP.
+
+- Private ranges (10/8, 172.16/12, 192.168/16, 100.64/10) map into the same
+  range and keep their string length.
+- Public IPv4 maps into reserved, never-routed space: RFC 2544
+  198.18.0.0/15 plus the three RFC 5737 TEST-NET /24s (131,840 addresses,
+  `POOL` in `src/bin/anonymize.rs`). Length is not preserved.
+- IPv6 maps into 2001:db8::/32 (RFC 3849). Length is not preserved.
+- Unspecified, loopback, link-local and multicast/reserved addresses
+  (including netmasks) are kept as they are.
+- The run aborts before writing anything if the input has more distinct
+  public IPv4 addresses than `POOL` can hand out.
+- `--check` fails if any other address survives in the output.
 
 ## Files you must not commit
 
@@ -81,10 +91,35 @@ PALLOGRAPH_REAL_FIXTURES=real PALLOGRAPH_ANON_FIXTURES=anon \
 ```
 
 Each variable is a directory of manifests, loaded the same way as
-`testdata/`.
+`fixtures/testdata/small/`.
 
-## Benchmarking against the result
+## Publishing as the medium benchmark fixture
 
-`pallograph::engine::load_bench_fixtures_from(dir)` loads manifests from any
-directory, so an anonymized dump can be benchmarked without touching the
-checked-in `testdata/` regression baseline.
+The `medium_*` benches run against an anonymized dump published as a
+release asset. Publishing is two steps so the pinned hash is the hash of
+exactly the bytes that get uploaded. After `--check` passes and you have
+read the `--report` output:
+
+```
+hack/publish-fixtures.sh pack anon dist/medium-v2     # builds the archive, writes the pin
+git commit fixtures/testdata/medium.env               # review and merge
+hack/publish-fixtures.sh upload dist/medium-v2 <merge-sha>
+```
+
+`pack` builds `medium.tar.zst` and its `.sha256` in the output directory and
+writes the sha256 into `fixtures/testdata/medium.env`. Keep that directory:
+the anonymizer's default seed is random, so a rebuilt archive will not match
+the pin. To publish a new version, set `TAG` in `medium.env` first. `upload`
+refuses to run unless the archive still matches the pin, then creates the
+release for `TAG` (marked not-latest) at the given commit.
+
+Everyone else gets the dump with:
+
+```
+hack/fetch-fixtures.sh medium
+cargo bench --bench medium_bulk_load
+```
+
+The fetch verifies the pinned sha256 before extracting. The medium benches
+panic with this instruction if the dump is missing or stale. Signing the
+asset (cosign) is not done yet.

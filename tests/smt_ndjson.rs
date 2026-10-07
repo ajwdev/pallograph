@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Drives the built binary over the `testdata/` fixture to check the ndjson
+//! Drives the built binary over the small fixture to check the ndjson
 //! output of `::smt` checks and the exit status contract: nonzero when any
 //! check fails, zero when all pass.
 
@@ -18,7 +18,7 @@ fn run_session(commands: &str, format: &str) -> Output {
         std::env::temp_dir().join(format!("pallograph-smt-ndjson-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let config = dir.join("pallograph.toml");
-    let testdata = format!("{}/testdata", env!("CARGO_MANIFEST_DIR"));
+    let testdata = format!("{}/fixtures/testdata/small", env!("CARGO_MANIFEST_DIR"));
     std::fs::write(
         &config,
         format!(

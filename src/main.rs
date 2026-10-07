@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Load EDB facts into a staging MemStore.
-    // Priority: config file > testdata/ default.
+    // Priority: config file > small fixture default.
     let mut edb = MemStore::new();
     match config::load_config(cli.config.as_deref())? {
         Some(cfg) => {
@@ -145,8 +145,8 @@ async fn main() -> Result<()> {
             }
         }
         None => {
-            eprintln!("datasource: k8s-manifests (testdata) [default]");
-            edb::load_from_manifests(&mut edb, vec!["testdata".to_string()])?;
+            eprintln!("datasource: k8s-manifests (fixtures/testdata/small) [default]");
+            edb::load_from_manifests(&mut edb, vec!["fixtures/testdata/small".to_string()])?;
         }
     }
 

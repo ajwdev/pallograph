@@ -45,11 +45,27 @@ criterion = { version = "0.5", features = ["html_reports"] }
 mangle-common = "0.9.1"
 
 [[bench]]
-name = "bulk_load"
+name = "small_bulk_load"
 harness = false
 
 [[bench]]
-name = "incremental"
+name = "small_fact_update"
+harness = false
+
+[[bench]]
+name = "medium_bulk_load"
+harness = false
+
+[[bench]]
+name = "medium_fact_update"
+harness = false
+
+[[bench]]
+name = "small_provenance"
+harness = false
+
+[[bench]]
+name = "medium_provenance"
 harness = false
 
 [features]
