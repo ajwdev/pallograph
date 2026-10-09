@@ -161,6 +161,7 @@ fn build_can_rec_func<'ctx>(
     let v_var = Z3String::new_const(ctx, vn.as_str());
 
     let wildcard = Z3String::from_str(ctx, "*").unwrap();
+    let empty_ns = Z3String::from_str(ctx, "").unwrap();
     let matches = |needle: &Z3String<'ctx>, pat_str: &str| -> Bool<'ctx> {
         let pat = Z3String::from_str(ctx, pat_str).unwrap();
         // pat == "*"  →  always matches; simplifies to true at construction.
@@ -177,7 +178,8 @@ fn build_can_rec_func<'ctx>(
                 ctx,
                 &[
                     &p_var._eq(&pe_z3),
-                    &ns_var._eq(&nse_z3),
+                    // Cluster-wide entries (ns "") apply in every namespace.
+                    &Bool::or(ctx, &[&nse_z3._eq(&empty_ns), &ns_var._eq(&nse_z3)]),
                     &matches(&ag_var, age),
                     &matches(&r_var, re),
                     &matches(&v_var, ve),
@@ -231,6 +233,7 @@ fn build_effective_can_rec_func<'ctx>(
     let v_var = Z3String::new_const(ctx, vn.as_str());
 
     let wildcard = Z3String::from_str(ctx, "*").unwrap();
+    let empty_ns = Z3String::from_str(ctx, "").unwrap();
     let matches = |needle: &Z3String<'ctx>, pat_str: &str| -> Bool<'ctx> {
         let pat = Z3String::from_str(ctx, pat_str).unwrap();
         Bool::or(ctx, &[&pat._eq(&wildcard), &needle._eq(&pat)])
@@ -245,7 +248,8 @@ fn build_effective_can_rec_func<'ctx>(
                 ctx,
                 &[
                     &p_var._eq(&pe_z3),
-                    &ns_var._eq(&nse_z3),
+                    // Cluster-wide entries (ns "") apply in every namespace.
+                    &Bool::or(ctx, &[&nse_z3._eq(&empty_ns), &ns_var._eq(&nse_z3)]),
                     &matches(&ag_var, age),
                     &matches(&r_var, re),
                     &matches(&v_var, ve),

@@ -88,9 +88,14 @@ fn failing_check_emits_ndjson_and_exits_1() {
 
 #[test]
 fn passing_check_emits_pass_line_and_exits_0() {
-    // A namespace nobody has access to is trivially isolated.
+    // Cluster-wide grants reach every namespace, so isolation only holds once
+    // the principals holding them are listed as allowed.
     let out = run_session(
-        "::smt check_isolation no-such-namespace\n::quit\n",
+        "::smt check_isolation no-such-namespace admin@example.com \
+         system:serviceaccount:kube-system:kindnet \
+         system:serviceaccount:local-path-storage:local-path-provisioner-service-account \
+         system:serviceaccount:kube-system:default \
+         system:serviceaccount:kube-system:kube-proxy\n::quit\n",
         "ndjson",
     );
     let lines = json_lines(&out);

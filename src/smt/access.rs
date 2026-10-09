@@ -365,7 +365,7 @@ impl<'ctx> SmtEncoder<'ctx> {
             violations.retain(|v| {
                 !can.iter().any(|(ep, e_ns, e_ag, e_r, e_v)| {
                     ep == &v.principal
-                        && e_ns == namespace
+                        && ns_covers(e_ns, namespace)
                         && (e_ag == "*" || apigroup == e_ag)
                         && (e_r == "*" || resource == e_r)
                         && (e_v == "*" || verb == e_v)
@@ -418,7 +418,10 @@ impl<'ctx> SmtEncoder<'ctx> {
                 .into_iter()
                 .flatten()
                 .filter(|(_, e_ns, e_ag, e_r, e_v)| {
-                    e_ns == namespace && wc(e_ag, apigroup) && wc(e_r, resource) && wc(e_v, verb)
+                    ns_covers(e_ns, namespace)
+                        && wc(e_ag, apigroup)
+                        && wc(e_r, resource)
+                        && wc(e_v, verb)
                 })
                 .filter_map(|(p, ..)| {
                     if (self.include_builtins || !crate::builtins::is_builtin(p))
@@ -528,7 +531,7 @@ impl<'ctx> SmtEncoder<'ctx> {
         let has_direct = self.can_entries.get(suffix).is_some_and(|entries| {
             entries.iter().any(|(ep, e_ns, e_ag, e_r, e_v)| {
                 ep == principal
-                    && e_ns == q_ns
+                    && ns_covers(e_ns, q_ns)
                     && (e_ag == "*" || q_ag == e_ag)
                     && (e_r == "*" || q_r == e_r)
                     && (e_v == "*" || q_v == e_v)
@@ -584,7 +587,7 @@ impl<'ctx> SmtEncoder<'ctx> {
                 can.is_some_and(|entries| {
                     entries.iter().any(|(ep, e_ns, e_ag, e_r, e_v)| {
                         ep == *target
-                            && e_ns == q_ns
+                            && ns_covers(e_ns, q_ns)
                             && (e_ag == "*" || q_ag == e_ag)
                             && (e_r == "*" || q_r == e_r)
                             && (e_v == "*" || q_v == e_v)
@@ -932,6 +935,12 @@ impl<'ctx> SmtEncoder<'ctx> {
     }
 }
 
+/// A permission entry's namespace covers a queried one when it is cluster-wide
+/// ("") or equal.
+fn ns_covers(entry_ns: &str, query_ns: &str) -> bool {
+    entry_ns.is_empty() || entry_ns == query_ns
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -1218,5 +1227,33 @@ mod tests {
             assert_eq!(ids, [sa_id("a"), sa_id("c"), sa_id("t")]);
             assert!(hops.iter().all(|(_, mech)| mech == "token"), "{hops:?}");
         }
+    }
+
+    #[test]
+    fn cluster_wide_grants_reach_every_namespace() {
+        // admin@example.com holds cluster-admin via a CRB
+        // (stored with ns ""), so it must show up for any namespace query.
+        let eval = load_engine_with("").evaluate().expect("evaluate");
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let mut enc = SmtEncoder::new(&ctx);
+        enc.assert_rbac_axioms(&eval);
+
+        let iso = enc.check_namespace_isolation("default", &[]);
+        assert!(
+            iso.iter().any(|v| v.principal == "admin@example.com"),
+            "isolation: {:?}",
+            iso.iter().map(|v| &v.principal).collect::<Vec<_>>()
+        );
+        let acc = enc.check_access_invariant("default", "pods", "get", &[]);
+        assert!(
+            acc.iter().any(|v| v.principal == "admin@example.com"),
+            "check_access missed cluster-wide grant"
+        );
+        let direct = enc.direct_violations("default", "", "pods", "get");
+        assert!(
+            direct.iter().any(|v| v.principal == "admin@example.com"),
+            "direct_violations missed cluster-wide grant"
+        );
     }
 }
