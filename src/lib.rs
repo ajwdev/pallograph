@@ -18,6 +18,6 @@ pub mod load;
 pub(crate) mod query;
 pub mod repl;
 pub(crate) mod selector;
-pub(crate) mod smt;
+pub mod smt;
 pub mod snapshot;
 pub(crate) mod value;
