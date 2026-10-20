@@ -71,27 +71,25 @@ impl<'ctx> SmtEncoder<'ctx> {
         let (can_entries, eff_entries) = effective_permission_entries(&direct_perm, &indirect_perm);
 
         for rel in &["user_groups", "controls_identity"] {
-            self.load_relation(&fn_name(rel, suffix), &scan(rel));
+            self.load_relation(&relation_name(rel, suffix), &scan(rel));
         }
-        self.load_relation(&fn_name("direct_perm", suffix), &direct_perm);
-        self.load_relation(&fn_name("indirect_perm", suffix), &indirect_perm);
-        self.load_relation(&fn_name("subject_in_rb", suffix), &subject_in_rb);
-        self.load_relation(&fn_name("subject_in_crb", suffix), &subject_in_crb);
+        self.load_relation(&relation_name("direct_perm", suffix), &direct_perm);
+        self.load_relation(&relation_name("indirect_perm", suffix), &indirect_perm);
+        self.load_relation(&relation_name("subject_in_rb", suffix), &subject_in_rb);
+        self.load_relation(&relation_name("subject_in_crb", suffix), &subject_in_crb);
 
-        let can_fn = build_can_rec_func(self.ctx, &fn_name("can", suffix), &can_entries);
-        let eff_fn =
-            build_effective_can_rec_func(self.ctx, &fn_name("effective_can", suffix), &eff_entries);
-        self.rec_decls.insert(fn_name("can", suffix), can_fn);
+        let can_fn = build_can_rec_func(self.ctx, &relation_name("can", suffix), &can_entries);
+        let eff_fn = build_effective_can_rec_func(
+            self.ctx,
+            &relation_name("effective_can", suffix),
+            &eff_entries,
+        );
+        self.rec_decls.insert(relation_name("can", suffix), can_fn);
         self.rec_decls
-            .insert(fn_name("effective_can", suffix), eff_fn);
+            .insert(relation_name("effective_can", suffix), eff_fn);
         self.can_entries.insert(suffix.to_string(), can_entries);
         self.eff_entries.insert(suffix.to_string(), eff_entries);
     }
-}
-
-/// Returns `base` when suffix is empty, `base_suffix` otherwise.
-pub fn fn_name(base: &str, suffix: &str) -> String {
-    relation_name(base, suffix)
 }
 
 // ---- RecFuncDecl builders ----

@@ -1392,12 +1392,12 @@ fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label:
             "  EFFECTIVE GAINED ({}) [escalation-aware]:",
             eff_gained.len()
         );
-        let via_rel = smt::rbac_model::fn_name("indirect_perm", after_label);
+        let via_rel = rbac::facts::relation_name("indirect_perm", after_label);
         print_eff_diffs_grouped(&eff_gained, &via_rel, &enc.facts);
     }
     if !eff_lost.is_empty() {
         println!("  EFFECTIVE LOST ({}) [escalation-aware]:", eff_lost.len());
-        let via_rel = smt::rbac_model::fn_name("indirect_perm", before_label);
+        let via_rel = rbac::facts::relation_name("indirect_perm", before_label);
         print_eff_diffs_grouped(&eff_lost, &via_rel, &enc.facts);
     }
 }
