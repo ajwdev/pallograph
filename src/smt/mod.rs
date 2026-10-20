@@ -9,32 +9,9 @@ use z3::ast::{Ast, Dynamic, Int};
 use z3::{FuncDecl, RecFuncDecl, Solver, Sort};
 
 use crate::engine::EvalStore;
-
-pub mod access;
 pub mod diff;
 pub mod rbac_model;
 pub mod scheduling;
-
-#[derive(Clone)]
-pub struct AccessPath {
-    pub binding_kind: &'static str, // "RoleBinding" | "ClusterRoleBinding"
-    pub binding_namespace: String,  // "" for ClusterRoleBinding
-    pub binding_name: String,
-    pub role_kind: &'static str, // "Role" | "ClusterRole"
-    pub role_name: String,
-    // Escalation chain leading to this binding.
-    // Each element is (identity, mechanism_used_to_reach_it).
-    // Empty for direct grants (no escalation needed).
-    pub hops: Vec<(String, String)>,
-}
-
-pub struct Violation {
-    pub principal: String,
-    pub namespace: String,
-    pub resource: String,
-    pub verb: String,
-    pub paths: Vec<AccessPath>,
-}
 
 /// Encodes Mangle ground facts as Z3 assertions and exposes the solver for
 /// constraint checking.
@@ -42,9 +19,6 @@ pub struct SmtEncoder<'ctx> {
     pub ctx: &'ctx z3::Context,
     pub solver: Solver<'ctx>,
     pub decls: HashMap<String, FuncDecl<'ctx>>,
-    /// When true, built-in Kubernetes/EKS principals are included in results.
-    /// Default false: builtins are filtered out as expected-platform noise.
-    pub include_builtins: bool,
     /// Recursively-defined functions (used for can, effective_can axioms).
     /// RecFuncDecl derefs to FuncDecl; use `get_decl` for a unified lookup.
     pub rec_decls: HashMap<String, RecFuncDecl<'ctx>>,
@@ -66,7 +40,6 @@ impl<'ctx> SmtEncoder<'ctx> {
             facts: HashMap::new(),
             can_entries: HashMap::new(),
             eff_entries: HashMap::new(),
-            include_builtins: false,
         }
     }
 

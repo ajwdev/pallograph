@@ -8,7 +8,7 @@ use z3::ast::Ast;
 use z3::ast::String as Z3String;
 
 use super::SmtEncoder;
-use super::rbac_model::fn_name;
+use crate::rbac::facts::relation_name;
 
 pub struct CanDiff {
     pub principal: String,
@@ -59,7 +59,7 @@ impl<'ctx> SmtEncoder<'ctx> {
     // This avoids the infinite-loop that results from asking Z3 to search the full string
     // space when a wildcard entry like ("alice","","","*","*") is present.
     fn can_diff_witnesses(&self, have: &str, not_have: &str) -> Vec<CanDiff> {
-        let not_have_decl = match self.get_decl(&fn_name("can", not_have)) {
+        let not_have_decl = match self.get_decl(&relation_name("can", not_have)) {
             Some(d) => d,
             None => return vec![],
         };
@@ -102,7 +102,7 @@ impl<'ctx> SmtEncoder<'ctx> {
 
     // Same approach for effective_can: finite literal diff, Z3 only for subsumption checks.
     fn eff_diff_witnesses(&self, have: &str, not_have: &str) -> Vec<EffDiff> {
-        let not_have_decl = match self.get_decl(&fn_name("effective_can", not_have)) {
+        let not_have_decl = match self.get_decl(&relation_name("effective_can", not_have)) {
             Some(d) => d,
             None => return vec![],
         };

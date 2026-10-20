@@ -27,8 +27,6 @@
 // `pat == "*" ∨ needle == pat`. Z3 simplifies `matches(x, "*")` to `true`
 // and `matches("pods", "pods")` to `true` at construction time.
 
-use std::collections::HashSet;
-
 use mangle_common::Value;
 use z3::ast::String as Z3String;
 use z3::ast::{Ast, Bool};
@@ -36,6 +34,9 @@ use z3::{RecFuncDecl, Sort};
 
 use super::SmtEncoder;
 use crate::engine::EvalStore;
+use crate::rbac::facts::{
+    compute_subject_in_crb, compute_subject_in_rb, effective_permission_entries, relation_name,
+};
 
 impl<'ctx> SmtEncoder<'ctx> {
     /// Load Mangle RBAC primitives and define `can` and `effective_can` as
@@ -65,69 +66,29 @@ impl<'ctx> SmtEncoder<'ctx> {
         let subject_in_rb = compute_subject_in_rb(&scan);
         let subject_in_crb = compute_subject_in_crb(&scan);
 
-        let can_entries = parse_perm_tuples(&scan("direct_perm"));
-        let eff_entries: Vec<_> = {
-            let mut set: HashSet<(String, String, String, String, String)> = HashSet::new();
-            set.extend(parse_perm_tuples(&scan("direct_perm")));
-            set.extend(parse_perm_tuples_6(&scan("indirect_perm")));
-            set.into_iter().collect()
-        };
+        let direct_perm = scan("direct_perm");
+        let indirect_perm = scan("indirect_perm");
+        let (can_entries, eff_entries) = effective_permission_entries(&direct_perm, &indirect_perm);
 
         for rel in &["user_groups", "controls_identity"] {
-            self.load_relation(&fn_name(rel, suffix), &scan(rel));
+            self.load_relation(&relation_name(rel, suffix), &scan(rel));
         }
-        self.load_relation(&fn_name("direct_perm", suffix), &scan("direct_perm"));
-        self.load_relation(&fn_name("indirect_perm", suffix), &scan("indirect_perm"));
-        self.load_relation(&fn_name("subject_in_rb", suffix), &subject_in_rb);
-        self.load_relation(&fn_name("subject_in_crb", suffix), &subject_in_crb);
-        // Load roleref and escalation-mechanism tables for path reconstruction
-        // (display only, not queried by Z3). Stored without suffix so
-        // paths_for_principal always finds them regardless of which snapshot is current.
-        self.facts.insert(
-            "rolebinding_roleref".to_string(),
-            scan("rolebinding_roleref"),
-        );
-        self.facts.insert(
-            "clusterrolebinding_roleref".to_string(),
-            scan("clusterrolebinding_roleref"),
-        );
-        // Subject kind tables: derived from IDB, used to annotate principals as user/group.
-        for rel in &["all_group_perm", "all_user_perm"] {
-            self.facts.insert(rel.to_string(), scan(rel));
-        }
-        // Role permission tables: used by collect_binding_paths to filter displayed
-        // bindings to only those that actually grant the queried permission.
-        self.facts
-            .insert("role_perm".to_string(), scan("role_perm"));
-        self.facts
-            .insert("clusterrole_perm".to_string(), scan("clusterrole_perm"));
-        for rel in &[
-            "exec_reachable_sa",
-            "token_accessible_sa",
-            "pod_creatable_sa",
-            "impersonatable_sa",
-            "escalation_hop",
-        ] {
-            self.facts.insert(rel.to_string(), scan(rel));
-        }
+        self.load_relation(&relation_name("direct_perm", suffix), &direct_perm);
+        self.load_relation(&relation_name("indirect_perm", suffix), &indirect_perm);
+        self.load_relation(&relation_name("subject_in_rb", suffix), &subject_in_rb);
+        self.load_relation(&relation_name("subject_in_crb", suffix), &subject_in_crb);
 
-        let can_fn = build_can_rec_func(self.ctx, &fn_name("can", suffix), &can_entries);
-        let eff_fn =
-            build_effective_can_rec_func(self.ctx, &fn_name("effective_can", suffix), &eff_entries);
-        self.rec_decls.insert(fn_name("can", suffix), can_fn);
+        let can_fn = build_can_rec_func(self.ctx, &relation_name("can", suffix), &can_entries);
+        let eff_fn = build_effective_can_rec_func(
+            self.ctx,
+            &relation_name("effective_can", suffix),
+            &eff_entries,
+        );
+        self.rec_decls.insert(relation_name("can", suffix), can_fn);
         self.rec_decls
-            .insert(fn_name("effective_can", suffix), eff_fn);
+            .insert(relation_name("effective_can", suffix), eff_fn);
         self.can_entries.insert(suffix.to_string(), can_entries);
         self.eff_entries.insert(suffix.to_string(), eff_entries);
-    }
-}
-
-/// Returns `base` when suffix is empty, `base_suffix` otherwise.
-pub fn fn_name(base: &str, suffix: &str) -> String {
-    if suffix.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base}_{suffix}")
     }
 }
 
@@ -275,178 +236,4 @@ fn build_effective_can_rec_func<'ctx>(
         &body,
     );
     eff_fn
-}
-
-// ---- Entry computation ----
-
-fn parse_perm_tuples(rows: &[Vec<Value>]) -> Vec<(String, String, String, String, String)> {
-    rows.iter()
-        .filter_map(|t| {
-            if let [
-                Value::String(p),
-                Value::String(ns),
-                Value::String(ag),
-                Value::String(r),
-                Value::String(v),
-            ] = t.as_slice()
-            {
-                Some((p.clone(), ns.clone(), ag.clone(), r.clone(), v.clone()))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-/// Like `parse_perm_tuples` but for 6-column rows (e.g. `indirect_perm/6`);
-/// projects away the last column (the via-target).
-fn parse_perm_tuples_6(rows: &[Vec<Value>]) -> Vec<(String, String, String, String, String)> {
-    rows.iter()
-        .filter_map(|t| {
-            if let [
-                Value::String(p),
-                Value::String(ns),
-                Value::String(ag),
-                Value::String(r),
-                Value::String(v),
-                _,
-            ] = t.as_slice()
-            {
-                Some((p.clone(), ns.clone(), ag.clone(), r.clone(), v.clone()))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-// ---- Subject-table helpers (used by assert_rbac_axioms_impl) ----
-
-/// Build `subject_in_rb(principal, binding_ns, binding_name)` tuples.
-pub fn compute_subject_in_rb(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Vec<Vec<Value>> {
-    let mut result: HashSet<(String, String, String)> = HashSet::new();
-
-    for t in scan("rolebinding_subject_sa") {
-        if let [
-            Value::String(b_ns),
-            Value::String(b_name),
-            Value::String(sa_ns),
-            Value::String(sa_name),
-        ] = t.as_slice()
-        {
-            let p = format!("system:serviceaccount:{sa_ns}:{sa_name}");
-            result.insert((p, b_ns.clone(), b_name.clone()));
-        }
-    }
-
-    for t in scan("rolebinding_subject_user") {
-        if let [
-            Value::String(b_ns),
-            Value::String(b_name),
-            Value::String(user),
-        ] = t.as_slice()
-        {
-            result.insert((user.clone(), b_ns.clone(), b_name.clone()));
-        }
-    }
-
-    let group_bindings: Vec<(String, String, String)> = scan("rolebinding_subject_group")
-        .into_iter()
-        .filter_map(|t| {
-            if let [
-                Value::String(b_ns),
-                Value::String(b_name),
-                Value::String(group),
-            ] = t.as_slice()
-            {
-                Some((b_ns.clone(), b_name.clone(), group.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let user_groups: Vec<(String, String)> = scan("user_groups")
-        .into_iter()
-        .filter_map(|t| {
-            if let [Value::String(user), Value::String(group)] = t.as_slice() {
-                Some((user.clone(), group.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for (b_ns, b_name, group) in &group_bindings {
-        result.insert((group.clone(), b_ns.clone(), b_name.clone()));
-        for (user, g) in &user_groups {
-            if g == group {
-                result.insert((user.clone(), b_ns.clone(), b_name.clone()));
-            }
-        }
-    }
-
-    result
-        .into_iter()
-        .map(|(p, b_ns, b_name)| vec![Value::String(p), Value::String(b_ns), Value::String(b_name)])
-        .collect()
-}
-
-/// Build `subject_in_crb(principal, binding_name)` tuples.
-pub fn compute_subject_in_crb(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Vec<Vec<Value>> {
-    let mut result: HashSet<(String, String)> = HashSet::new();
-
-    for t in scan("clusterrolebinding_subject_sa") {
-        if let [
-            Value::String(b_name),
-            Value::String(sa_ns),
-            Value::String(sa_name),
-        ] = t.as_slice()
-        {
-            let p = format!("system:serviceaccount:{sa_ns}:{sa_name}");
-            result.insert((p, b_name.clone()));
-        }
-    }
-
-    for t in scan("clusterrolebinding_subject_user") {
-        if let [Value::String(b_name), Value::String(user)] = t.as_slice() {
-            result.insert((user.clone(), b_name.clone()));
-        }
-    }
-
-    let group_crbs: Vec<(String, String)> = scan("clusterrolebinding_subject_group")
-        .into_iter()
-        .filter_map(|t| {
-            if let [Value::String(b_name), Value::String(group)] = t.as_slice() {
-                Some((b_name.clone(), group.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let user_groups: Vec<(String, String)> = scan("user_groups")
-        .into_iter()
-        .filter_map(|t| {
-            if let [Value::String(user), Value::String(group)] = t.as_slice() {
-                Some((user.clone(), group.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for (b_name, group) in &group_crbs {
-        result.insert((group.clone(), b_name.clone()));
-        for (user, g) in &user_groups {
-            if g == group {
-                result.insert((user.clone(), b_name.clone()));
-            }
-        }
-    }
-
-    result
-        .into_iter()
-        .map(|(p, b_name)| vec![Value::String(p), Value::String(b_name)])
-        .collect()
 }

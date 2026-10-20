@@ -1,23 +1,120 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::collections::HashSet;
+//! Finite RBAC access model.
+//!
+//! Mangle derives closed-world RBAC facts (`direct_perm`, `indirect_perm`,
+//! `controls_identity`, etc.). This module queries those finite relations
+//! directly. Z3 remains available under `smt` for analyses that need symbolic
+//! search, but normal RBAC access checks should use this model.
 
-use z3::SatResult;
-use z3::ast::String as Z3String;
-use z3::ast::{Ast, Bool};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::rbac_model::fn_name;
-use super::{AccessPath, SmtEncoder, Violation};
+use mangle_common::Value;
 
-impl<'ctx> SmtEncoder<'ctx> {
+use crate::engine::EvalStore;
+
+pub(crate) mod facts;
+
+use facts::{compute_subject_in_crb, compute_subject_in_rb, effective_permission_entries};
+
+pub type PermissionEntry = (String, String, String, String, String);
+
+#[derive(Clone)]
+pub struct AccessPath {
+    pub binding_kind: &'static str, // "RoleBinding" | "ClusterRoleBinding"
+    pub binding_namespace: String,  // "" for ClusterRoleBinding
+    pub binding_name: String,
+    pub role_kind: &'static str, // "Role" | "ClusterRole"
+    pub role_name: String,
+    // Escalation chain leading to this binding.
+    // Each element is (identity, mechanism_used_to_reach_it).
+    // Empty for direct grants (no escalation needed).
+    pub hops: Vec<(String, String)>,
+}
+
+pub struct Violation {
+    pub principal: String,
+    pub namespace: String,
+    pub resource: String,
+    pub verb: String,
+    pub paths: Vec<AccessPath>,
+}
+
+/// Closed-world RBAC access model derived from Mangle facts.
+pub struct RbacAccessModel {
+    /// When true, built-in Kubernetes/EKS principals are included in results.
+    /// Default false: builtins are filtered out as expected-platform noise.
+    pub include_builtins: bool,
+    /// Ground/display facts needed for path reconstruction and annotations.
+    pub facts: HashMap<String, Vec<Vec<Value>>>,
+    /// (principal, namespace, apigroup, resource, verb) direct RBAC entries.
+    pub direct_permissions: Vec<PermissionEntry>,
+    /// (principal, namespace, apigroup, resource, verb) direct + escalation-aware entries.
+    /// Order is unspecified; callers that expose results should dedupe and sort.
+    pub effective_permissions: Vec<PermissionEntry>,
+}
+
+impl RbacAccessModel {
+    pub fn from_store(store: &EvalStore) -> Self {
+        Self::from_scan(|rel| store.scan(rel).to_vec())
+    }
+
+    pub fn from_scan<F: Fn(&str) -> Vec<Vec<Value>>>(scan: F) -> Self {
+        let subject_in_rb = compute_subject_in_rb(&scan);
+        let subject_in_crb = compute_subject_in_crb(&scan);
+        let direct_perm = scan("direct_perm");
+        let indirect_perm = scan("indirect_perm");
+
+        let (can_entries, eff_entries) = effective_permission_entries(&direct_perm, &indirect_perm);
+
+        let mut facts = HashMap::new();
+        for rel in ["user_groups", "controls_identity"] {
+            facts.insert(rel.to_string(), scan(rel));
+        }
+        facts.insert("direct_perm".to_string(), direct_perm);
+        facts.insert("indirect_perm".to_string(), indirect_perm);
+        facts.insert("subject_in_rb".to_string(), subject_in_rb);
+        facts.insert("subject_in_crb".to_string(), subject_in_crb);
+        facts.insert(
+            "rolebinding_roleref".to_string(),
+            scan("rolebinding_roleref"),
+        );
+        facts.insert(
+            "clusterrolebinding_roleref".to_string(),
+            scan("clusterrolebinding_roleref"),
+        );
+        for rel in [
+            "all_group_perm",
+            "all_user_perm",
+            "role_perm",
+            "clusterrole_perm",
+        ] {
+            facts.insert(rel.to_string(), scan(rel));
+        }
+        for rel in [
+            "exec_reachable_sa",
+            "token_accessible_sa",
+            "pod_creatable_sa",
+            "impersonatable_sa",
+            "escalation_hop",
+        ] {
+            facts.insert(rel.to_string(), scan(rel));
+        }
+
+        Self {
+            include_builtins: false,
+            facts,
+            direct_permissions: can_entries,
+            effective_permissions: eff_entries,
+        }
+    }
+
     /// Check that every principal with can(_, namespace, resource, verb) is in `expected`.
     /// Pass namespace="" to check cluster-wide grants (ClusterRoleBindings apply to any namespace).
-    /// Enumerates all unexpected principals via SAT witness exclusion loop.
     ///
-    /// Candidate principals are derived from `subject_in_rb`/`subject_in_crb` facts (loaded by
-    /// `assert_rbac_axioms`). This bounds Z3's witness search to actual binding subjects, providing
-    /// a practical closed-world guarantee even though the intermediate predicates are open-world.
+    /// `direct_permissions` is already the closed-world finite RBAC relation derived by Mangle, so this
+    /// scans those entries directly instead of asking Z3 to synthesize string witnesses.
     pub fn check_access_invariant(
         &self,
         namespace: &str,
@@ -25,211 +122,81 @@ impl<'ctx> SmtEncoder<'ctx> {
         verb: &str,
         expected: &[&str],
     ) -> Vec<Violation> {
-        let Some(can_decl) = self.get_decl("can") else {
-            return vec![];
-        };
+        let expected: HashSet<&str> = expected.iter().copied().collect();
+        let mut principals = HashSet::new();
 
-        // Derive candidate principals from the binding subject tables rather than from can/5
-        // (which is no longer loaded as ground facts under the axiomatic model).
-        // CRB subjects are always candidates regardless of namespace; RB subjects are candidates
-        // when their binding namespace matches the queried namespace.
-        let mut principal_set: HashSet<String> = HashSet::new();
-
-        if let Some(rb_tuples) = self.facts.get("subject_in_rb") {
-            // subject_in_rb: (principal, binding_ns, binding_name)
-            for t in rb_tuples {
-                if let [
-                    mangle_common::Value::String(p),
-                    mangle_common::Value::String(b_ns),
-                    ..,
-                ] = t.as_slice()
-                {
-                    // Include if namespace matches OR if we're checking cluster-wide ("").
-                    if (namespace.is_empty() || b_ns == namespace)
-                        && (self.include_builtins || !crate::builtins::is_builtin(p))
-                    {
-                        principal_set.insert(p.clone());
-                    }
-                }
+        for (principal, ..) in
+            self.direct_permissions
+                .iter()
+                .filter(|(_, entry_ns, _, entry_resource, entry_verb)| {
+                    ns_covers(entry_ns, namespace)
+                        && value_covers(entry_resource, resource)
+                        && value_covers(entry_verb, verb)
+                })
+        {
+            if expected.contains(principal.as_str()) {
+                continue;
             }
-        }
-
-        if let Some(crb_tuples) = self.facts.get("subject_in_crb") {
-            // subject_in_crb: (principal, binding_name)
-            for t in crb_tuples {
-                if let [mangle_common::Value::String(p), ..] = t.as_slice()
-                    && (self.include_builtins || !crate::builtins::is_builtin(p))
-                {
-                    principal_set.insert(p.clone());
-                }
+            if !self.include_builtins && crate::builtins::is_builtin(principal) {
+                continue;
             }
+            principals.insert(principal.clone());
         }
 
-        let known_principals_owned: Vec<String> = principal_set.into_iter().collect();
-        let known_principals: Vec<&str> =
-            known_principals_owned.iter().map(String::as_str).collect();
-
-        if known_principals.is_empty() {
-            return vec![];
-        }
-
-        let witness = Z3String::new_const(self.ctx, "witness_principal");
-        let apigroup_witness = Z3String::new_const(self.ctx, "witness_apigroup");
-        let namespace_ast = Z3String::from_str(self.ctx, namespace).unwrap();
-        let resource_ast = Z3String::from_str(self.ctx, resource).unwrap();
-        let verb_ast = Z3String::from_str(self.ctx, verb).unwrap();
-
-        // can/5: (principal, ns, apigroup, resource, verb)
-        // apigroup_witness is a free variable — any apiGroup satisfies the query.
-        let witness_has_perm = can_decl
-            .apply(&[
-                &witness as &dyn Ast,
-                &namespace_ast as &dyn Ast,
-                &apigroup_witness as &dyn Ast,
-                &resource_ast as &dyn Ast,
-                &verb_ast as &dyn Ast,
-            ])
-            .as_bool()
-            .unwrap();
-
-        let known_eqs: Vec<Bool> = known_principals
-            .iter()
-            .map(|p| witness._eq(&Z3String::from_str(self.ctx, p).unwrap()))
-            .collect();
-        let witness_is_known = Bool::or(self.ctx, &known_eqs.iter().collect::<Vec<_>>());
-
-        let not_expected: Vec<Bool> = expected
-            .iter()
-            .map(|ep| {
-                witness
-                    ._eq(&Z3String::from_str(self.ctx, ep).unwrap())
-                    .not()
+        let mut violations: Vec<_> = principals
+            .into_iter()
+            .map(|principal| {
+                let paths = self.paths_for_principal(&principal, None);
+                Violation {
+                    principal,
+                    namespace: namespace.to_string(),
+                    resource: resource.to_string(),
+                    verb: verb.to_string(),
+                    paths,
+                }
             })
             .collect();
-
-        self.solver.push();
-        self.solver.assert(&witness_has_perm);
-        self.solver.assert(&witness_is_known);
-        if !not_expected.is_empty() {
-            self.solver.assert(&Bool::and(
-                self.ctx,
-                &not_expected.iter().collect::<Vec<_>>(),
-            ));
-        }
-
-        let mut violations = Vec::new();
-        loop {
-            if self.solver.check() != SatResult::Sat {
-                break;
-            }
-            let Some(principal) = self
-                .solver
-                .get_model()
-                .and_then(|m| m.eval(&witness, true))
-                .and_then(|v| v.as_string())
-            else {
-                break;
-            };
-
-            self.solver.assert(
-                &witness
-                    ._eq(&Z3String::from_str(self.ctx, &principal).unwrap())
-                    .not(),
-            );
-            let paths = self.paths_for_principal(&principal, "", None);
-            violations.push(Violation {
-                principal,
-                namespace: namespace.to_string(),
-                resource: resource.to_string(),
-                verb: verb.to_string(),
-                paths,
-            });
-        }
-
-        self.solver.pop(1);
+        violations.sort_by(|a, b| a.principal.cmp(&b.principal));
         violations
     }
 
-    /// Prove that only the `allowed` principals have *any* access in `namespace`.
+    /// Check that only the `allowed` principals have any direct access in `namespace`.
     ///
-    /// Unlike `check_access_invariant`, there is no prefilter: `p` is a free symbolic
-    /// string. Z3 evaluates the RecFuncDecl body directly to find satisfying assignments.
-    /// When the loop terminates via UNSAT that is a proof — not just "searched and found
-    /// nothing" — that no string exists satisfying the constraints.
+    /// This is the same closed-world RBAC model used by the Z3 encoding, but it avoids the
+    /// expensive free-string witness search by enumerating the finite direct-permission relation.
     pub fn check_namespace_isolation(&self, namespace: &str, allowed: &[&str]) -> Vec<Violation> {
-        let Some(can_decl) = self.get_decl("can") else {
-            return vec![];
-        };
+        let allowed: HashSet<&str> = allowed.iter().copied().collect();
+        let mut by_principal: BTreeMap<String, (String, String)> = BTreeMap::new();
 
-        let p = Z3String::new_const(self.ctx, "p");
-        let ag = Z3String::new_const(self.ctx, "ag");
-        let r = Z3String::new_const(self.ctx, "r");
-        let v = Z3String::new_const(self.ctx, "v");
-        let ns_ast = Z3String::from_str(self.ctx, namespace).unwrap();
-
-        let has_access = can_decl
-            .apply(&[
-                &p as &dyn Ast,
-                &ns_ast as &dyn Ast,
-                &ag as &dyn Ast,
-                &r as &dyn Ast,
-                &v as &dyn Ast,
-            ])
-            .as_bool()
-            .unwrap();
-
-        let not_allowed: Vec<Bool> = allowed
+        for (principal, _, _, entry_resource, entry_verb) in self
+            .direct_permissions
             .iter()
-            .map(|a| p._eq(&Z3String::from_str(self.ctx, a).unwrap()).not())
-            .collect();
-
-        self.solver.push();
-        self.solver.assert(&has_access);
-        if !not_allowed.is_empty() {
-            self.solver.assert(&Bool::and(
-                self.ctx,
-                &not_allowed.iter().collect::<Vec<_>>(),
-            ));
+            .filter(|(_, entry_ns, _, _, _)| ns_covers(entry_ns, namespace))
+        {
+            if allowed.contains(principal.as_str()) {
+                continue;
+            }
+            if !self.include_builtins && crate::builtins::is_builtin(principal) {
+                continue;
+            }
+            by_principal
+                .entry(principal.clone())
+                .or_insert_with(|| (entry_resource.clone(), entry_verb.clone()));
         }
 
-        let mut violations = Vec::new();
-        loop {
-            if self.solver.check() != SatResult::Sat {
-                break;
-            }
-            let model = self.solver.get_model().unwrap();
-            let Some(principal) = model.eval(&p, true).and_then(|ev| ev.as_string()) else {
-                break;
-            };
-            let resource = model
-                .eval(&r, true)
-                .and_then(|ev| ev.as_string())
-                .unwrap_or_default();
-            let verb = model
-                .eval(&v, true)
-                .and_then(|ev| ev.as_string())
-                .unwrap_or_default();
-
-            // Exclude this principal and let Z3 find the next one.
-            self.solver.assert(
-                &p._eq(&Z3String::from_str(self.ctx, &principal).unwrap())
-                    .not(),
-            );
-
-            if self.include_builtins || !crate::builtins::is_builtin(&principal) {
-                let paths = self.paths_for_principal(&principal, "", None);
-                violations.push(Violation {
+        by_principal
+            .into_iter()
+            .map(|(principal, (resource, verb))| {
+                let paths = self.paths_for_principal(&principal, None);
+                Violation {
                     principal,
                     namespace: namespace.to_string(),
                     resource,
                     verb,
                     paths,
-                });
-            }
-        }
-
-        self.solver.pop(1);
-        violations
+                }
+            })
+            .collect()
     }
 
     /// Like `check_access_invariant` but queries `effective_can` (escalation-aware).
@@ -244,135 +211,46 @@ impl<'ctx> SmtEncoder<'ctx> {
         expected: &[&str],
         include_direct: bool,
     ) -> Vec<Violation> {
-        let Some(eff_decl) = self.get_decl("effective_can") else {
-            return vec![];
-        };
+        let expected: HashSet<&str> = expected.iter().copied().collect();
+        let mut principals = HashSet::new();
 
-        let mut principal_set: HashSet<String> = HashSet::new();
-        if let Some(rb_tuples) = self.facts.get("subject_in_rb") {
-            for t in rb_tuples {
-                if let [
-                    mangle_common::Value::String(p),
-                    mangle_common::Value::String(b_ns),
-                    ..,
-                ] = t.as_slice()
-                    && (namespace.is_empty() || b_ns == namespace)
-                    && (self.include_builtins || !crate::builtins::is_builtin(p))
-                {
-                    principal_set.insert(p.clone());
-                }
+        for (principal, ..) in self.effective_permissions.iter().filter(
+            |(_, entry_ns, entry_ag, entry_resource, entry_verb)| {
+                permission_covers(
+                    permission(entry_ns, entry_ag, entry_resource, entry_verb),
+                    permission(namespace, apigroup, resource, verb),
+                )
+            },
+        ) {
+            if expected.contains(principal.as_str()) {
+                continue;
             }
-        }
-        if let Some(crb_tuples) = self.facts.get("subject_in_crb") {
-            for t in crb_tuples {
-                if let [mangle_common::Value::String(p), ..] = t.as_slice()
-                    && (self.include_builtins || !crate::builtins::is_builtin(p))
-                {
-                    principal_set.insert(p.clone());
-                }
+            if !self.include_builtins && crate::builtins::is_builtin(principal) {
+                continue;
             }
+            if !include_direct
+                && self.has_direct_permission(principal, namespace, apigroup, resource, verb)
+            {
+                continue;
+            }
+            principals.insert(principal.clone());
         }
 
-        let known_principals_owned: Vec<String> = principal_set.into_iter().collect();
-        let known_principals: Vec<&str> =
-            known_principals_owned.iter().map(String::as_str).collect();
-        if known_principals.is_empty() {
-            return vec![];
-        }
-
-        let witness = Z3String::new_const(self.ctx, "reaches_witness_principal");
-        let ns_ast = Z3String::from_str(self.ctx, namespace).unwrap();
-        let ag_ast = Z3String::from_str(self.ctx, apigroup).unwrap();
-        let resource_ast = Z3String::from_str(self.ctx, resource).unwrap();
-        let verb_ast = Z3String::from_str(self.ctx, verb).unwrap();
-
-        // effective_can/5: (principal, ns, apigroup, resource, verb)
-        let witness_reaches = eff_decl
-            .apply(&[
-                &witness as &dyn z3::ast::Ast,
-                &ns_ast as &dyn z3::ast::Ast,
-                &ag_ast as &dyn z3::ast::Ast,
-                &resource_ast as &dyn z3::ast::Ast,
-                &verb_ast as &dyn z3::ast::Ast,
-            ])
-            .as_bool()
-            .unwrap();
-
-        let known_eqs: Vec<Bool> = known_principals
-            .iter()
-            .map(|p| witness._eq(&Z3String::from_str(self.ctx, p).unwrap()))
-            .collect();
-        let witness_is_known = Bool::or(self.ctx, &known_eqs.iter().collect::<Vec<_>>());
-
-        let not_expected: Vec<Bool> = expected
-            .iter()
-            .map(|ep| {
-                witness
-                    ._eq(&Z3String::from_str(self.ctx, ep).unwrap())
-                    .not()
+        let mut violations: Vec<_> = principals
+            .into_iter()
+            .map(|principal| {
+                let paths = self
+                    .paths_for_principal(&principal, Some((namespace, apigroup, resource, verb)));
+                Violation {
+                    principal,
+                    namespace: namespace.to_string(),
+                    resource: resource.to_string(),
+                    verb: verb.to_string(),
+                    paths,
+                }
             })
             .collect();
-
-        self.solver.push();
-        self.solver.assert(&witness_reaches);
-        self.solver.assert(&witness_is_known);
-        if !not_expected.is_empty() {
-            self.solver.assert(&Bool::and(
-                self.ctx,
-                &not_expected.iter().collect::<Vec<_>>(),
-            ));
-        }
-
-        let mut violations = Vec::new();
-        loop {
-            if self.solver.check() != z3::SatResult::Sat {
-                break;
-            }
-            let Some(principal) = self
-                .solver
-                .get_model()
-                .and_then(|m| m.eval(&witness, true))
-                .and_then(|v| v.as_string())
-            else {
-                break;
-            };
-
-            self.solver.assert(
-                &witness
-                    ._eq(&Z3String::from_str(self.ctx, &principal).unwrap())
-                    .not(),
-            );
-            let paths = self.paths_for_principal(
-                &principal,
-                "",
-                Some((namespace, apigroup, resource, verb)),
-            );
-            violations.push(Violation {
-                principal,
-                namespace: namespace.to_string(),
-                resource: resource.to_string(),
-                verb: verb.to_string(),
-                paths,
-            });
-        }
-
-        self.solver.pop(1);
-
-        // When include_direct is false (default), omit principals that have a direct grant
-        // matching the query — only escalation paths are interesting.
-        if !include_direct {
-            let can = self.can_entries.get("").cloned().unwrap_or_default();
-            violations.retain(|v| {
-                !can.iter().any(|(ep, e_ns, e_ag, e_r, e_v)| {
-                    ep == &v.principal
-                        && ns_covers(e_ns, namespace)
-                        && (e_ag == "*" || apigroup == e_ag)
-                        && (e_r == "*" || resource == e_r)
-                        && (e_v == "*" || verb == e_v)
-                })
-            });
-        }
-
+        violations.sort_by(|a, b| a.principal.cmp(&b.principal));
         violations
     }
 
@@ -407,21 +285,15 @@ impl<'ctx> SmtEncoder<'ctx> {
         resource: &str,
         verb: &str,
     ) -> Vec<Violation> {
-        // entry covers query when the entry is "*" (grants all) or matches exactly.
-        // A query of "*" is only satisfied by an entry of "*"; a specific entry
-        // like "pods" does not cover a query of "*".
-        let wc = |entry: &str, query: &str| entry == "*" || entry == query;
         let matching: Vec<String> = {
             let mut seen = HashSet::new();
-            self.can_entries
-                .get("")
-                .into_iter()
-                .flatten()
+            self.direct_permissions
+                .iter()
                 .filter(|(_, e_ns, e_ag, e_r, e_v)| {
-                    ns_covers(e_ns, namespace)
-                        && wc(e_ag, apigroup)
-                        && wc(e_r, resource)
-                        && wc(e_v, verb)
+                    permission_covers(
+                        permission(e_ns, e_ag, e_r, e_v),
+                        permission(namespace, apigroup, resource, verb),
+                    )
                 })
                 .filter_map(|(p, ..)| {
                     if (self.include_builtins || !crate::builtins::is_builtin(p))
@@ -441,7 +313,7 @@ impl<'ctx> SmtEncoder<'ctx> {
                 // paths_for_principal with perm_filter + has_direct=true returns only
                 // the binding(s) that grant the queried permission — no via-chains.
                 let paths =
-                    self.paths_for_principal(&p, "", Some((namespace, apigroup, resource, verb)));
+                    self.paths_for_principal(&p, Some((namespace, apigroup, resource, verb)));
                 Violation {
                     principal: p,
                     namespace: namespace.to_string(),
@@ -451,6 +323,25 @@ impl<'ctx> SmtEncoder<'ctx> {
                 }
             })
             .collect()
+    }
+
+    fn has_direct_permission(
+        &self,
+        principal: &str,
+        namespace: &str,
+        apigroup: &str,
+        resource: &str,
+        verb: &str,
+    ) -> bool {
+        self.direct_permissions.iter().any(
+            |(entry_principal, entry_ns, entry_ag, entry_resource, entry_verb)| {
+                entry_principal == principal
+                    && permission_covers(
+                        permission(entry_ns, entry_ag, entry_resource, entry_verb),
+                        permission(namespace, apigroup, resource, verb),
+                    )
+            },
+        )
     }
 
     /// Return all binding/role paths that grant `principal` access, derived from
@@ -469,18 +360,17 @@ impl<'ctx> SmtEncoder<'ctx> {
     pub fn paths_for_principal(
         &self,
         principal: &str,
-        suffix: &str,
         perm_filter: Option<(&str, &str, &str, &str)>,
     ) -> Vec<AccessPath> {
         use mangle_common::Value;
 
-        let rb_key = fn_name("subject_in_rb", suffix);
-        let crb_key = fn_name("subject_in_crb", suffix);
-        let ci_key = fn_name("controls_identity", suffix);
+        let rb_key = "subject_in_rb";
+        let crb_key = "subject_in_crb";
+        let ci_key = "controls_identity";
 
         let rb_bindings: HashSet<(String, String)> = self
             .facts
-            .get(&rb_key)
+            .get(rb_key)
             .map(|rows| {
                 rows.iter()
                     .filter_map(|t| {
@@ -502,7 +392,7 @@ impl<'ctx> SmtEncoder<'ctx> {
 
         let crb_bindings: HashSet<String> = self
             .facts
-            .get(&crb_key)
+            .get(crb_key)
             .map(|rows| {
                 rows.iter()
                     .filter_map(|t| {
@@ -528,15 +418,16 @@ impl<'ctx> SmtEncoder<'ctx> {
         };
 
         // Check whether the principal has a direct grant matching the queried permission.
-        let has_direct = self.can_entries.get(suffix).is_some_and(|entries| {
-            entries.iter().any(|(ep, e_ns, e_ag, e_r, e_v)| {
+        let has_direct = self
+            .direct_permissions
+            .iter()
+            .any(|(ep, e_ns, e_ag, e_r, e_v)| {
                 ep == principal
-                    && ns_covers(e_ns, q_ns)
-                    && (e_ag == "*" || q_ag == e_ag)
-                    && (e_r == "*" || q_r == e_r)
-                    && (e_v == "*" || q_v == e_v)
-            })
-        });
+                    && permission_covers(
+                        permission(e_ns, e_ag, e_r, e_v),
+                        permission(q_ns, q_ag, q_r, q_v),
+                    )
+            });
 
         let mut paths = Vec::new();
 
@@ -558,7 +449,7 @@ impl<'ctx> SmtEncoder<'ctx> {
         // Collect controls_identity targets, excluding self.
         let via_targets: Vec<String> = self
             .facts
-            .get(&ci_key)
+            .get(ci_key)
             .map(|rows| {
                 rows.iter()
                     .filter_map(|t| {
@@ -576,23 +467,22 @@ impl<'ctx> SmtEncoder<'ctx> {
             })
             .unwrap_or_default();
 
-        // Filter via-targets by whether they have direct permission matching the query
-        // (can_entries, not eff_entries). This breaks mutual-impersonation cycles:
+        // Filter via-targets by whether they have DIRECT permission matching the query
+        // (direct_permissions, not effective_permissions). This breaks mutual-impersonation cycles:
         // a target that only has escalation access won't appear here, so cluster-admin
         // principals don't endlessly list each other as via-paths.
-        let can = self.can_entries.get(suffix);
         let relevant_targets: Vec<&String> = via_targets
             .iter()
             .filter(|target| {
-                can.is_some_and(|entries| {
-                    entries.iter().any(|(ep, e_ns, e_ag, e_r, e_v)| {
+                self.direct_permissions
+                    .iter()
+                    .any(|(ep, e_ns, e_ag, e_r, e_v)| {
                         ep == *target
-                            && ns_covers(e_ns, q_ns)
-                            && (e_ag == "*" || q_ag == e_ag)
-                            && (e_r == "*" || q_r == e_r)
-                            && (e_v == "*" || q_v == e_v)
+                            && permission_covers(
+                                permission(e_ns, e_ag, e_r, e_v),
+                                permission(q_ns, q_ag, q_r, q_v),
+                            )
                     })
-                })
             })
             .collect();
 
@@ -621,7 +511,7 @@ impl<'ctx> SmtEncoder<'ctx> {
 
             let target_rb: HashSet<(String, String)> = self
                 .facts
-                .get(&rb_key)
+                .get(rb_key)
                 .map(|rows| {
                     rows.iter()
                         .filter_map(|t| {
@@ -643,7 +533,7 @@ impl<'ctx> SmtEncoder<'ctx> {
 
             let target_crb: HashSet<String> = self
                 .facts
-                .get(&crb_key)
+                .get(crb_key)
                 .map(|rows| {
                     rows.iter()
                         .filter_map(|t| {
@@ -809,7 +699,6 @@ impl<'ctx> SmtEncoder<'ctx> {
     /// an entry of `"*"` — a specific entry like `"pods"` does not cover `"*"`.
     fn clusterrole_matches(&self, role_name: &str, q_ag: &str, q_r: &str, q_v: &str) -> bool {
         use mangle_common::Value;
-        let wc = |entry: &str, query: &str| entry == "*" || entry == query;
         self.facts.get("clusterrole_perm").is_some_and(|rows| {
             rows.iter().any(|t| {
                 if let [
@@ -819,7 +708,10 @@ impl<'ctx> SmtEncoder<'ctx> {
                     Value::String(e_v),
                 ] = t.as_slice()
                 {
-                    rn == role_name && wc(e_ag, q_ag) && wc(e_r, q_r) && wc(e_v, q_v)
+                    rn == role_name
+                        && value_covers(e_ag, q_ag)
+                        && value_covers(e_r, q_r)
+                        && value_covers(e_v, q_v)
                 } else {
                     false
                 }
@@ -838,7 +730,6 @@ impl<'ctx> SmtEncoder<'ctx> {
         q_v: &str,
     ) -> bool {
         use mangle_common::Value;
-        let wc = |entry: &str, query: &str| entry == "*" || entry == query;
         self.facts.get("role_perm").is_some_and(|rows| {
             rows.iter().any(|t| {
                 // role_perm: (Namespace, RoleName, ApiGroup, Resource, Verb)
@@ -852,9 +743,9 @@ impl<'ctx> SmtEncoder<'ctx> {
                 {
                     rns == role_ns
                         && rn == role_name
-                        && wc(e_ag, q_ag)
-                        && wc(e_r, q_r)
-                        && wc(e_v, q_v)
+                        && value_covers(e_ag, q_ag)
+                        && value_covers(e_r, q_r)
+                        && value_covers(e_v, q_v)
                 } else {
                     false
                 }
@@ -941,6 +832,42 @@ fn ns_covers(entry_ns: &str, query_ns: &str) -> bool {
     entry_ns.is_empty() || entry_ns == query_ns
 }
 
+/// A permission field covers a queried value when it is `*` (grants all) or an
+/// exact match. A query of `*` is only covered by an entry of `*`; a specific
+/// entry like `pods` does not cover the query `*`.
+fn value_covers(entry: &str, query: &str) -> bool {
+    entry == "*" || entry == query
+}
+
+#[derive(Clone, Copy)]
+struct PermissionPattern<'a> {
+    namespace: &'a str,
+    apigroup: &'a str,
+    resource: &'a str,
+    verb: &'a str,
+}
+
+fn permission<'a>(
+    namespace: &'a str,
+    apigroup: &'a str,
+    resource: &'a str,
+    verb: &'a str,
+) -> PermissionPattern<'a> {
+    PermissionPattern {
+        namespace,
+        apigroup,
+        resource,
+        verb,
+    }
+}
+
+fn permission_covers(entry: PermissionPattern<'_>, query: PermissionPattern<'_>) -> bool {
+    ns_covers(entry.namespace, query.namespace)
+        && value_covers(entry.apigroup, query.apigroup)
+        && value_covers(entry.resource, query.resource)
+        && value_covers(entry.verb, query.verb)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -948,7 +875,7 @@ mod tests {
     use mangle_common::Value;
     use mangle_interpreter::MemStore;
 
-    use super::super::SmtEncoder;
+    use super::RbacAccessModel;
     use crate::edb;
     use crate::engine::{Engine, InterpreterBackend};
 
@@ -958,7 +885,7 @@ mod tests {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir =
-            std::env::temp_dir().join(format!("pallograph-access-{}-{n}", std::process::id()));
+            std::env::temp_dir().join(format!("pallograph-rbac-access-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         std::fs::write(dir.join("extra.json"), extra).expect("write extra manifests");
         let mut edb = MemStore::new();
@@ -978,8 +905,10 @@ mod tests {
         // binding (like a controller's leader-election Role) that grants nothing
         // close to */*/*; it must not be shown as an explanation.
         let eval = load_engine_with(concat!(
-            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"Role","metadata":{"name":"leader-election","namespace":"kube-system"},"rules":[{"apiGroups":["coordination.k8s.io"],"resources":["leases"],"verbs":["get","update"]}]}"#, "\n",
-            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"leader-election","namespace":"kube-system"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"leader-election"},"subjects":[{"kind":"User","name":"admin@example.com"}]}"#, "\n",
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"Role","metadata":{"name":"leader-election","namespace":"kube-system"},"rules":[{"apiGroups":["coordination.k8s.io"],"resources":["leases"],"verbs":["get","update"]}]}"#,
+            "\n",
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"leader-election","namespace":"kube-system"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"leader-election"},"subjects":[{"kind":"User","name":"admin@example.com"}]}"#,
+            "\n",
         ))
         .evaluate()
         .expect("evaluate");
@@ -990,12 +919,8 @@ mod tests {
             "fixture binding was not loaded"
         );
 
-        let cfg = z3::Config::new();
-        let ctx = z3::Context::new(&cfg);
-        let mut enc = SmtEncoder::new(&ctx);
-        enc.assert_rbac_axioms(&eval);
-
-        let direct = enc.direct_violations("", "*", "*", "*");
+        let model = RbacAccessModel::from_store(&eval);
+        let direct = model.direct_violations("", "*", "*", "*");
         let admin = direct
             .iter()
             .find(|v| v.principal == "admin@example.com")
@@ -1024,9 +949,9 @@ mod tests {
             );
             for p in &v.paths {
                 let grants = if p.role_kind == "Role" {
-                    enc.role_matches(&p.binding_namespace, &p.role_name, "*", "*", "*")
+                    model.role_matches(&p.binding_namespace, &p.role_name, "*", "*", "*")
                 } else {
-                    enc.clusterrole_matches(&p.role_name, "*", "*", "*")
+                    model.clusterrole_matches(&p.role_name, "*", "*", "*")
                 };
                 assert!(
                     grants,
@@ -1041,18 +966,17 @@ mod tests {
     fn builtin_principals_hidden_by_default_and_shown_with_include_builtins() {
         // A built-in principal granted cluster-admin through a ClusterRoleBinding.
         let eval = load_engine_with(concat!(
-            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"builtin-admin"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"User","name":"system:kube-controller-manager"}]}"#, "\n",
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"builtin-admin"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"User","name":"system:kube-controller-manager"}]}"#,
+            "\n",
         ))
         .evaluate()
         .expect("evaluate");
 
         let principals = |include_builtins: bool| -> Vec<String> {
-            let cfg = z3::Config::new();
-            let ctx = z3::Context::new(&cfg);
-            let mut enc = SmtEncoder::new(&ctx);
-            enc.assert_rbac_axioms(&eval);
-            enc.include_builtins = include_builtins;
-            enc.direct_violations("", "*", "*", "*")
+            let mut model = RbacAccessModel::from_store(&eval);
+            model.include_builtins = include_builtins;
+            model
+                .direct_violations("", "*", "*", "*")
                 .into_iter()
                 .map(|v| v.principal)
                 .collect()
@@ -1104,13 +1028,11 @@ mod tests {
         ]
         .join("\n");
         let eval = load_engine_with(&extra).evaluate().expect("evaluate");
-        let cfg = z3::Config::new();
-        let ctx = z3::Context::new(&cfg);
-        let mut enc = SmtEncoder::new(&ctx);
-        enc.assert_rbac_axioms(&eval);
+        let model = RbacAccessModel::from_store(&eval);
 
         let mechanisms = |user: &str| -> Vec<String> {
-            enc.paths_for_principal(user, "", Some(("", "*", "*", "*")))
+            model
+                .paths_for_principal(user, Some(("", "*", "*", "*")))
                 .into_iter()
                 .flat_map(|p| p.hops)
                 .filter(|(id, _)| id == "system:serviceaccount:demo:target")
@@ -1156,12 +1078,9 @@ mod tests {
     /// as `(identity, mechanism)` per hop.
     fn hop_chains(extra: &str, principal: &str) -> Vec<Vec<(String, String)>> {
         let eval = load_engine_with(extra).evaluate().expect("evaluate");
-        let cfg = z3::Config::new();
-        let ctx = z3::Context::new(&cfg);
-        let mut enc = SmtEncoder::new(&ctx);
-        enc.assert_rbac_axioms(&eval);
+        let model = RbacAccessModel::from_store(&eval);
         let want = format!("system:serviceaccount:ns-{principal}:{principal}");
-        let found = enc.check_reaches("", "", "secrets", "get", &[], false);
+        let found = model.check_reaches("", "", "secrets", "get", &[], false);
         let v = found
             .iter()
             .find(|v| v.principal == want)
@@ -1234,23 +1153,20 @@ mod tests {
         // admin@example.com holds cluster-admin via a CRB
         // (stored with ns ""), so it must show up for any namespace query.
         let eval = load_engine_with("").evaluate().expect("evaluate");
-        let cfg = z3::Config::new();
-        let ctx = z3::Context::new(&cfg);
-        let mut enc = SmtEncoder::new(&ctx);
-        enc.assert_rbac_axioms(&eval);
+        let model = RbacAccessModel::from_store(&eval);
 
-        let iso = enc.check_namespace_isolation("default", &[]);
+        let iso = model.check_namespace_isolation("default", &[]);
         assert!(
             iso.iter().any(|v| v.principal == "admin@example.com"),
             "isolation: {:?}",
             iso.iter().map(|v| &v.principal).collect::<Vec<_>>()
         );
-        let acc = enc.check_access_invariant("default", "pods", "get", &[]);
+        let acc = model.check_access_invariant("default", "pods", "get", &[]);
         assert!(
             acc.iter().any(|v| v.principal == "admin@example.com"),
             "check_access missed cluster-wide grant"
         );
-        let direct = enc.direct_violations("default", "", "pods", "get");
+        let direct = model.direct_violations("default", "", "pods", "get");
         assert!(
             direct.iter().any(|v| v.principal == "admin@example.com"),
             "direct_violations missed cluster-wide grant"

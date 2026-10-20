@@ -68,5 +68,9 @@ harness = false
 name = "medium_provenance"
 harness = false
 
+[[bench]]
+name = "smt_access"
+harness = false
+
 [features]
 z3-static = ["z3/static-link-z3"]
