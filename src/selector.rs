@@ -5,7 +5,7 @@
 //
 // The kube crate provides the `Expression`/`Selector` types and converts the
 // structured `LabelSelector` (matchLabels/matchExpressions) into them, but it
-// does NOT parse the string form (e.g. "app=web,tier in (a,b)") — that grammar
+// does not parse the string form (e.g. "app=web,tier in (a,b)") — that grammar
 // only lives in `ListParams` and is shipped to the apiserver. This module fills
 // that gap so the REPL can accept selectors written the way an operator would.
 //

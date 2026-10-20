@@ -165,7 +165,7 @@ const SUPPORTED_CALL_FILTERS: &[&str] = &[
 ];
 
 /// True if `func` is a `CallFilter` builtin the DD backend can evaluate.
-pub(crate) fn is_supported_call_filter(func: &str) -> bool {
+pub fn is_supported_call_filter(func: &str) -> bool {
     SUPPORTED_CALL_FILTERS.contains(&func)
 }
 

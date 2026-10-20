@@ -294,7 +294,7 @@ fn aggregate_collect() {
     );
 }
 
-// NOTE: `fn:collect_distinct` is intentionally NOT tested because BOTH backends
+// NOTE: `fn:collect_distinct` is intentionally not tested because both backends
 // currently reject it. The mangle planner's aggregate allow-list
 // (`try_parse_aggregate` in mangle-analysis/src/planner.rs) includes `fn:collect`
 // but not `fn:collect_distinct`, so it is never routed as an aggregate and falls
@@ -302,6 +302,23 @@ fn aggregate_collect() {
 // on both backends. The `eval_aggregate` arms for it (interpreter + DD) are dead
 // code until the planner allow-list is updated upstream; this is not a
 // DD-vs-interpreter divergence.
+
+// A variable repeated within one body atom (`edge(X, X)`) loses its equality
+// check in the mangle planner: `bound_vars` in mangle-analysis planner.rs is
+// only updated after the scan, so no `Eq` constraint is emitted. The backends
+// then misbind differently (interpreter yields 2, 3; DD yields 1, 3), where
+// the correct answer is 3 alone. Ignored until fixed upstream.
+#[test]
+#[ignore = "upstream mangle planner drops the repeated-variable equality check"]
+fn repeated_variable_in_atom() {
+    let e = edb(&[("edge", vec![n(1), n(2)]), ("edge", vec![n(3), n(3)])]);
+    assert_parity(
+        "repeated_variable",
+        &e,
+        "Decl edge(A, B).\nDecl self_loop(X).\n\
+         self_loop(X) :- edge(X, X).",
+    );
+}
 
 #[test]
 fn self_join() {
