@@ -1,4 +1,4 @@
-# NOTE: On these EDB relations the `bound [...]` types are DOCUMENTARY ONLY, not
+# NOTE: On these EDB relations the `bound [...]` types are documentary only, not
 # enforced. The k8s facts are added to the MemStore *after* compile_units runs
 # (see src/engine.rs InterpreterBackend::evaluate), and the runtime type check
 # `has_type` is only ever called from mangle-analysis bounds_check.rs, never by the

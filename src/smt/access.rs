@@ -573,7 +573,7 @@ impl<'ctx> SmtEncoder<'ctx> {
             })
             .unwrap_or_default();
 
-        // Filter via-targets by whether they have DIRECT permission matching the query
+        // Filter via-targets by whether they have direct permission matching the query
         // (can_entries, not eff_entries). This breaks mutual-impersonation cycles:
         // a target that only has escalation access won't appear here, so cluster-admin
         // principals don't endlessly list each other as via-paths.

@@ -77,7 +77,7 @@ pub enum Step {
     ///
     /// - `left_key_cols`: positions in the **current schema** that are join keys.
     /// - `right_key_cols`: positions in `rel`'s columns that match those keys.
-    /// - `right_new_cols`: positions in `rel`'s columns that are NOT keys
+    /// - `right_new_cols`: positions in `rel`'s columns that are not keys
     ///   (these are appended to the schema after the join).
     ///
     /// Zero shared vars → cross product (key = empty Row).
@@ -515,9 +515,9 @@ fn lower_inner(
                     // vars ($scan_N) and expressing the key equality as a *separate*
                     // downstream Filter (`Compare $scan_N = key`).
                     //
-                    // Lower it as a real keyed Join, NOT a cross product: key the
+                    // Lower it as a real keyed Join, not a cross product: key the
                     // current schema column holding `key` against `relation`'s
-                    // `col_idx` column. Append ALL of `relation`'s columns (including
+                    // `col_idx` column. Append all of `relation`'s columns (including
                     // col_idx) so the output schema is byte-identical to the old
                     // plain-join path — that keeps the $scan_N column present for the
                     // planner's follow-up Filter, which then holds trivially (a no-op

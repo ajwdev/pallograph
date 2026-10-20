@@ -5,7 +5,7 @@
 # rule when materialising GroupBy sources.  Because the planner counter resets
 # for each rule, multiple GroupBy rules in one ruleset share the same temp name
 # and collide in the interpreter's store.  Until that upstream bug is fixed,
-# keep exactly ONE GroupBy rule here.  The DD backend is unaffected (it inlines
+# keep exactly one GroupBy rule here.  The DD backend is unaffected (it inlines
 # the temp relation and never materialises it).
 
 # Count live objects grouped by (Kind, Namespace).

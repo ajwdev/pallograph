@@ -90,7 +90,7 @@ pub enum Command {
         rel: String,
         resp: Sender<std::result::Result<Vec<Vec<Value>>, String>>,
     },
-    /// Snapshot EVERY relation's current contents (EDB + IDB) and send them back.
+    /// Snapshot every relation's current contents (EDB + IDB) and send them back.
     /// Used by the batch `DdBackend::evaluate` path.
     /// Responds with `Err` while any rule has live evaluation errors.
     SnapshotAll {
@@ -646,7 +646,7 @@ impl DdSession {
         let (tx, rx): (Sender<Command>, Receiver<Command>) = unbounded();
 
         // `timely::execute` spawns the worker onto a background thread and returns
-        // as soon as the thread is launched — it does NOT wait for the closure body
+        // as soon as the thread is launched — it does not wait for the closure body
         // to run.  Without this rendezvous, `spawn()` would return before the initial
         // EDB seed/settle below has actually happened, racing the caller against the
         // worker thread.  `ready_tx` carries `Ok(())` once settle completes, or
@@ -1580,7 +1580,7 @@ mod tests {
         Value::Number(n)
     }
 
-    /// Regression: an `IndexLookup` join must lower to a KEYED `Step::Join`
+    /// Regression: an `IndexLookup` join must lower to a keyed `Step::Join`
     /// (non-empty key columns), not a cross product. The mangle planner lowers
     /// `reachable(X,Z) :- reachable(X,Y), link(Y,Z)` as an IndexLookup keyed on
     /// Y; the DD backend must honor `col_idx` rather than cross-producting and
@@ -1866,7 +1866,7 @@ mod tests {
         assert!(!is_supported_call_filter(":string:matches"));
     }
 
-    /// A rule with a VALID string builtin must spawn successfully and produce
+    /// A rule with a valid string builtin must spawn successfully and produce
     /// the expected filtered results (the guard must not break valid rules).
     #[test]
     fn session_supported_call_filter_ok() {

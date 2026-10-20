@@ -754,7 +754,7 @@ mod tests {
                 {"matchLabels": {"key-a": "true", "key-b": "true"}}
             ]),
         );
-        // Source CR with only key-a — must NOT be aggregated.
+        // Source CR with only key-a — must not be aggregated.
         add_clusterrole(
             &mut store,
             "only-a",
@@ -763,7 +763,7 @@ mod tests {
                 {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}
             ]),
         );
-        // Source CR with both keys — MUST be aggregated.
+        // Source CR with both keys — must be aggregated.
         add_clusterrole(
             &mut store,
             "both-ab",

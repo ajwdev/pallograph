@@ -269,7 +269,7 @@ pub struct CoverageGap {
 
 /// Search for gaps in Karpenter NodePool coverage. Z3 synthesizes a concrete
 /// nodeSelector (a set of label key=value pairs drawn from the pools' own
-/// vocabularies) such that NO NodePool can provision a matching node. Each
+/// vocabularies) such that no NodePool can provision a matching node. Each
 /// value individually appears in some pool, but the combination falls through
 /// every pool's constraints.
 ///
