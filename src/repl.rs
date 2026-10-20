@@ -1392,11 +1392,11 @@ fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label:
             "  EFFECTIVE GAINED ({}) [escalation-aware]:",
             eff_gained.len()
         );
-        print_eff_diffs_grouped(&eff_gained, enc.escalation_via.get(after_label));
+        print_eff_diffs_grouped(&eff_gained, enc.permission_tables.get(after_label));
     }
     if !eff_lost.is_empty() {
         println!("  EFFECTIVE LOST ({}) [escalation-aware]:", eff_lost.len());
-        print_eff_diffs_grouped(&eff_lost, enc.escalation_via.get(before_label));
+        print_eff_diffs_grouped(&eff_lost, enc.permission_tables.get(before_label));
     }
 }
 
@@ -1433,24 +1433,20 @@ fn per_principal_verdicts(
 }
 
 /// Group effective-can diffs by (principal, escalation-target) and print.
-/// `escalation_via` says which identities each permission was reached
-/// through; permissions not found there were gained directly.
-fn print_eff_diffs_grouped(
-    diffs: &[smt::diff::EffDiff],
-    escalation_via: Option<&smt::EscalationVia>,
-) {
+/// `tables` says which identities and groups each permission was reached
+/// through; permissions reached through none were gained directly.
+fn print_eff_diffs_grouped(diffs: &[smt::diff::EffDiff], tables: Option<&rbac::PermissionTables>) {
     // (principal, target) → indices into diffs. No target = direct grant.
     let mut groups: BTreeMap<(rbac::Subject, Option<rbac::Subject>), Vec<usize>> = BTreeMap::new();
 
     for (i, d) in diffs.iter().enumerate() {
-        let key = (
-            d.principal.clone(),
+        let permission = (
             d.namespace.clone(),
             d.apigroup.clone(),
             d.resource.clone(),
             d.verb.clone(),
         );
-        let targets = escalation_via.and_then(|via| via.get(&key));
+        let targets = tables.map(|tables| tables.escalation_via(&d.principal, &permission));
         match targets {
             Some(targets) if !targets.is_empty() => {
                 for target in targets {

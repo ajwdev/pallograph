@@ -16,8 +16,8 @@ use crate::engine::EvalStore;
 
 pub(crate) mod facts;
 
-use facts::{Permission, PermissionTables, parse_binding_subject, parse_strings, unexpected_row};
-pub use facts::{Subject, SubjectKind};
+use facts::{Permission, parse_binding_subject, parse_strings, unexpected_row};
+pub use facts::{PermissionTables, Subject, SubjectKind};
 
 /// (principal, namespace, apigroup, resource, verb).
 pub type PermissionEntry = (Subject, String, String, String, String);
@@ -65,17 +65,9 @@ pub struct RbacAccessModel {
     /// When true, built-in Kubernetes/EKS principals are included in results.
     /// Default false: builtins are filtered out as expected-platform noise.
     pub include_builtins: bool,
-    /// (principal, namespace, apigroup, resource, verb) direct RBAC entries,
-    /// expanded through group membership. See `PermissionTables` for which
-    /// principals appear.
-    pub direct_permissions: Vec<PermissionEntry>,
-    /// (principal, namespace, apigroup, resource, verb) direct + escalation-aware entries.
-    /// Order is unspecified; callers that expose results should dedupe and sort.
-    pub effective_permissions: Vec<PermissionEntry>,
-    /// Subjects each known user or ServiceAccount acts as (`principal_subject`).
-    principal_subjects: HashMap<String, Vec<Subject>>,
-    /// Grants of each group named by a binding.
-    group_permissions: HashMap<String, HashSet<Permission>>,
+    /// Grants per binding subject, group membership and escalation edges,
+    /// joined per query. See `PermissionTables` for which principals appear.
+    tables: PermissionTables,
     /// `binding_subject`: the (binding namespace, binding name) pairs naming
     /// each subject.
     subject_bindings: HashMap<Subject, Vec<(String, String)>>,
@@ -83,11 +75,6 @@ pub struct RbacAccessModel {
     binding_roles: HashMap<(String, String), Vec<(String, String)>>,
     /// (apigroup, resource, verb) each role grants, after aggregation.
     role_grants: HashMap<RoleKey, Vec<(String, String, String)>>,
-    /// Identities (usernames) and groups each principal controls:
-    /// `controls_identity` and `controls_group` for users and
-    /// ServiceAccounts, their `group_` counterparts for groups.
-    controls_identity: HashMap<Subject, Vec<String>>,
-    controls_group: HashMap<Subject, Vec<String>>,
     /// `escalation_hop` and `group_escalation_hop`, by principal.
     escalation_hops: HashMap<Subject, Vec<String>>,
     /// Per mechanism label, the (principal, namespace, ServiceAccount) triples
@@ -149,18 +136,57 @@ impl RbacAccessModel {
 
         Self {
             include_builtins: false,
-            direct_permissions: tables.direct,
-            effective_permissions: tables.effective,
-            principal_subjects: tables.principal_subjects,
-            group_permissions: tables.group_permissions,
+            tables,
             subject_bindings,
             binding_roles,
             role_grants,
-            controls_identity: by_principal("controls_identity", "group_controls_identity"),
-            controls_group: by_principal("controls_group", "group_controls_group"),
             escalation_hops: by_principal("escalation_hop", "group_escalation_hop"),
             service_account_mechanisms,
         }
+    }
+
+    /// Number of (binding subject, permission) grants the model holds.
+    pub fn grant_count(&self) -> usize {
+        self.tables.grant_count()
+    }
+
+    /// Whether `principal` belongs in a report: not one of the `expected`
+    /// names (which match a principal of any kind), and not a built-in
+    /// principal unless `include_builtins` is set.
+    fn is_reported(&self, principal: &Subject, expected: &HashSet<&str>) -> bool {
+        !expected.contains(principal.name.as_str())
+            && (self.include_builtins || !crate::builtins::is_builtin(&principal.name))
+    }
+
+    /// The identities `principal` controls (`controls_identity`, or
+    /// `group_controls_identity` for a group).
+    fn controlled_identities<'a>(
+        &'a self,
+        principal: &Subject,
+    ) -> impl Iterator<Item = &'a Subject> + use<'a> {
+        self.escalation_targets(principal)
+            .filter(|target| target.kind != SubjectKind::Group)
+    }
+
+    /// The groups `principal` controls (`controls_group`, or
+    /// `group_controls_group` for a group).
+    fn controlled_groups<'a>(
+        &'a self,
+        principal: &Subject,
+    ) -> impl Iterator<Item = &'a Subject> + use<'a> {
+        self.escalation_targets(principal)
+            .filter(|target| target.kind == SubjectKind::Group)
+    }
+
+    fn escalation_targets<'a>(
+        &'a self,
+        principal: &Subject,
+    ) -> impl Iterator<Item = &'a Subject> + use<'a> {
+        self.tables
+            .escalation_targets
+            .get(principal)
+            .into_iter()
+            .flatten()
     }
 
     /// Check that every principal with can(_, namespace, resource, verb) is in `expected`.
@@ -168,7 +194,7 @@ impl RbacAccessModel {
     /// `expected` (here and in the other checks) lists names, which match a
     /// principal of any kind.
     ///
-    /// `direct_permissions` is already the closed-world finite RBAC relation derived by Mangle, so this
+    /// `direct_perm` is already the closed-world finite RBAC relation derived by Mangle, so this
     /// scans those entries directly instead of asking Z3 to synthesize string witnesses.
     pub fn check_access_invariant(
         &self,
@@ -178,28 +204,14 @@ impl RbacAccessModel {
         expected: &[&str],
     ) -> Vec<Violation> {
         let expected: HashSet<&str> = expected.iter().copied().collect();
-        let mut principals = HashSet::new();
-
-        for (principal, ..) in
-            self.direct_permissions
-                .iter()
-                .filter(|(_, entry_ns, _, entry_resource, entry_verb)| {
-                    ns_covers(entry_ns, namespace)
-                        && value_covers(entry_resource, resource)
-                        && value_covers(entry_verb, verb)
-                })
-        {
-            if expected.contains(principal.name.as_str()) {
-                continue;
-            }
-            if !self.include_builtins && crate::builtins::is_builtin(&principal.name) {
-                continue;
-            }
-            principals.insert(principal.clone());
-        }
-
-        let mut violations: Vec<_> = principals
+        self.tables
+            .principals_with_direct(|(entry_namespace, _, entry_resource, entry_verb)| {
+                ns_covers(entry_namespace, namespace)
+                    && value_covers(entry_resource, resource)
+                    && value_covers(entry_verb, verb)
+            })
             .into_iter()
+            .filter(|principal| self.is_reported(principal, &expected))
             .map(|principal| {
                 let paths = self.paths_for_principal(&principal, None);
                 Violation {
@@ -210,9 +222,7 @@ impl RbacAccessModel {
                     paths,
                 }
             })
-            .collect();
-        violations.sort_by(|a, b| a.principal.cmp(&b.principal));
-        violations
+            .collect()
     }
 
     /// Check that only the `allowed` principals have any direct access in `namespace`.
@@ -223,28 +233,26 @@ impl RbacAccessModel {
         let allowed: HashSet<&str> = allowed.iter().copied().collect();
         // The smallest (resource, verb) per principal, so the reported example
         // does not depend on hash order.
-        let mut by_principal: BTreeMap<Subject, (String, String)> = BTreeMap::new();
+        let mut by_principal: BTreeMap<Subject, (&str, &str)> = BTreeMap::new();
 
-        for (principal, _, _, entry_resource, entry_verb) in self
-            .direct_permissions
-            .iter()
-            .filter(|(_, entry_ns, _, _, _)| ns_covers(entry_ns, namespace))
-        {
-            if allowed.contains(principal.name.as_str()) {
+        for (subject, permissions) in &self.tables.grants {
+            let Some(example) = permissions
+                .iter()
+                .filter(|(entry_namespace, ..)| ns_covers(entry_namespace, namespace))
+                .map(|(_, _, resource, verb)| (resource.as_str(), verb.as_str()))
+                .min()
+            else {
                 continue;
+            };
+            for principal in self.tables.holders(subject) {
+                if !self.is_reported(&principal, &allowed) {
+                    continue;
+                }
+                by_principal
+                    .entry(principal)
+                    .and_modify(|current| *current = example.min(*current))
+                    .or_insert(example);
             }
-            if !self.include_builtins && crate::builtins::is_builtin(&principal.name) {
-                continue;
-            }
-            let example = (entry_resource.clone(), entry_verb.clone());
-            by_principal
-                .entry(principal.clone())
-                .and_modify(|current| {
-                    if example < *current {
-                        *current = example.clone();
-                    }
-                })
-                .or_insert(example);
         }
 
         by_principal
@@ -254,8 +262,8 @@ impl RbacAccessModel {
                 Violation {
                     principal,
                     namespace: namespace.to_string(),
-                    resource,
-                    verb,
+                    resource: resource.to_string(),
+                    verb: verb.to_string(),
                     paths,
                 }
             })
@@ -276,32 +284,12 @@ impl RbacAccessModel {
         include_direct: bool,
     ) -> Vec<Violation> {
         let expected: HashSet<&str> = expected.iter().copied().collect();
-        let mut principals = HashSet::new();
-
-        for (principal, ..) in self.effective_permissions.iter().filter(
-            |(_, entry_ns, entry_ag, entry_resource, entry_verb)| {
-                permission_covers(
-                    permission(entry_ns, entry_ag, entry_resource, entry_verb),
-                    permission(namespace, apigroup, resource, verb),
-                )
-            },
-        ) {
-            if expected.contains(principal.name.as_str()) {
-                continue;
-            }
-            if !self.include_builtins && crate::builtins::is_builtin(&principal.name) {
-                continue;
-            }
-            if !include_direct
-                && self.has_direct_permission(principal, namespace, apigroup, resource, verb)
-            {
-                continue;
-            }
-            principals.insert(principal.clone());
-        }
-
-        let mut violations: Vec<_> = principals
+        let query = permission(namespace, apigroup, resource, verb);
+        self.tables
+            .principals_with_effective(|granted| permission_covers(granted, query))
             .into_iter()
+            .filter(|principal| self.is_reported(principal, &expected))
+            .filter(|principal| include_direct || !self.has_direct_permission(principal, query))
             .map(|principal| {
                 let paths = self
                     .paths_for_principal(&principal, Some((namespace, apigroup, resource, verb)));
@@ -313,22 +301,7 @@ impl RbacAccessModel {
                     paths,
                 }
             })
-            .collect();
-        violations.sort_by(|a, b| a.principal.cmp(&b.principal));
-        violations
-    }
-
-    /// The binding subjects whose grants appear under `principal` in
-    /// `direct_permissions`: a known user or ServiceAccount's own subject and
-    /// groups, or the group itself.
-    fn subjects_of(&self, principal: &Subject) -> Vec<Subject> {
-        if principal.kind == SubjectKind::Group {
-            return vec![principal.clone()];
-        }
-        self.principal_subjects
-            .get(&principal.name)
-            .cloned()
-            .unwrap_or_else(|| vec![principal.clone()])
+            .collect()
     }
 
     /// Return all principals with a direct `can` entry matching (namespace, apigroup,
@@ -341,28 +314,18 @@ impl RbacAccessModel {
         resource: &str,
         verb: &str,
     ) -> Vec<Violation> {
-        let matching: BTreeSet<Subject> = self
-            .direct_permissions
-            .iter()
-            .filter(|(_, e_ns, e_ag, e_r, e_v)| {
-                permission_covers(
-                    permission(e_ns, e_ag, e_r, e_v),
-                    permission(namespace, apigroup, resource, verb),
-                )
-            })
-            .filter(|(p, ..)| self.include_builtins || !crate::builtins::is_builtin(&p.name))
-            .map(|(p, ..)| p.clone())
-            .collect();
-
-        matching
+        let query = permission(namespace, apigroup, resource, verb);
+        self.tables
+            .principals_with_direct(|granted| permission_covers(granted, query))
             .into_iter()
-            .map(|p| {
+            .filter(|principal| self.is_reported(principal, &HashSet::new()))
+            .map(|principal| {
                 // paths_for_principal with perm_filter + has_direct=true returns only
                 // the binding(s) that grant the queried permission — no via-chains.
-                let paths =
-                    self.paths_for_principal(&p, Some((namespace, apigroup, resource, verb)));
+                let paths = self
+                    .paths_for_principal(&principal, Some((namespace, apigroup, resource, verb)));
                 Violation {
-                    principal: p,
+                    principal,
                     namespace: namespace.to_string(),
                     resource: resource.to_string(),
                     verb: verb.to_string(),
@@ -372,40 +335,32 @@ impl RbacAccessModel {
             .collect()
     }
 
-    fn has_direct_permission(
-        &self,
-        principal: &Subject,
-        namespace: &str,
-        apigroup: &str,
-        resource: &str,
-        verb: &str,
-    ) -> bool {
-        self.direct_permissions.iter().any(
-            |(entry_principal, entry_ns, entry_ag, entry_resource, entry_verb)| {
-                entry_principal == principal
-                    && permission_covers(
-                        permission(entry_ns, entry_ag, entry_resource, entry_verb),
-                        permission(namespace, apigroup, resource, verb),
-                    )
-            },
-        )
+    fn has_direct_permission(&self, principal: &Subject, query: PermissionPattern<'_>) -> bool {
+        self.tables
+            .direct_grants(principal)
+            .any(|granted| permission_covers(granted, query))
     }
 
-    /// True when `principal` itself (not through escalation) may impersonate
-    /// groups, in any namespace, like `perm_group_impersonate` in escalation.mg.
-    fn can_impersonate_groups(&self, principal: &Subject) -> bool {
-        self.direct_permissions.iter().any(|(p, _, ag, r, v)| {
-            p == principal
-                && value_covers(ag, "")
-                && value_covers(r, "groups")
-                && value_covers(v, "impersonate")
-        })
+    /// True when the escalation `target` brings a grant covering `query`.
+    fn target_has_permission(&self, target: &Subject, query: PermissionPattern<'_>) -> bool {
+        self.tables
+            .target_grants(target)
+            .any(|granted| permission_covers(granted, query))
+    }
+
+    /// May impersonate groups, in any namespace, like
+    /// `perm_group_impersonate` in escalation.mg.
+    fn impersonates_groups(granted: &Permission) -> bool {
+        let (_, api_group, resource, verb) = granted;
+        value_covers(api_group, "")
+            && value_covers(resource, "groups")
+            && value_covers(verb, "impersonate")
     }
 
     /// Return binding/role paths for `principal`.
     ///
     /// Direct bindings are always included. Escalation via-paths are included only
-    /// when `perm_filter` is `Some((ns, ag, r, v))`, and only for targets that
+    /// when `perm_filter` is `Some((namespace, apigroup, resource, verb))`, and only for targets that
     /// actually satisfy that query (using the same wildcard semantics as the Z3
     /// RecFuncDecl). Targets are identities from `controls_identity` and groups
     /// from `controls_group`, or their `group_` counterparts when `principal`
@@ -418,67 +373,56 @@ impl RbacAccessModel {
         principal: &Subject,
         perm_filter: Option<(&str, &str, &str, &str)>,
     ) -> Vec<AccessPath> {
-        let subjects = self.subjects_of(principal);
+        let subjects = self.tables.subjects_of(principal);
 
         // Without a perm_filter (check_access_invariant mode): always show direct bindings.
-        let Some((q_ns, q_ag, q_r, q_v)) = perm_filter else {
+        let Some((query_namespace, query_api_group, query_resource, query_verb)) = perm_filter
+        else {
             let mut paths = Vec::new();
             self.collect_binding_paths(&subjects, vec![], None, &mut paths);
             return paths;
         };
-        let query = permission(q_ns, q_ag, q_r, q_v);
+        let query = permission(query_namespace, query_api_group, query_resource, query_verb);
 
         let mut paths = Vec::new();
 
         // For principals with direct access, show their binding — it IS the explanation.
         // Via-paths would be redundant noise. Filter to only the binding(s) that grant
         // the queried permission so irrelevant sibling bindings don't appear.
-        if self.has_direct_permission(principal, q_ns, q_ag, q_r, q_v) {
+        if self.has_direct_permission(principal, query) {
             self.collect_binding_paths(&subjects, vec![], perm_filter, &mut paths);
             return paths;
         }
 
         // Principal only reaches the permission via escalation chains.
         //
-        // Identity targets are filtered by whether they have a direct permission
-        // matching the query (direct_permissions, not effective_permissions).
-        // This breaks mutual-impersonation cycles: a target that only has
-        // escalation access won't appear here, so cluster-admin principals
-        // don't endlessly list each other as via-paths.
+        // Identity targets are filtered by whether their own grants (not what
+        // they reach through escalation) match the query. This breaks
+        // mutual-impersonation cycles: a target that only has escalation
+        // access won't appear here, so cluster-admin principals don't
+        // endlessly list each other as via-paths.
         let mut target_chains: Vec<(Vec<Subject>, Vec<(String, String)>)> = Vec::new();
-        for target in self.controls_identity.get(principal).into_iter().flatten() {
-            let target_principal = Subject::username(target.as_str());
-            if target_principal != *principal
-                && self.has_direct_permission(&target_principal, q_ns, q_ag, q_r, q_v)
-            {
+        for target in self.controlled_identities(principal) {
+            if self.target_has_permission(target, query) {
                 target_chains.push((
-                    self.subjects_of(&target_principal),
-                    self.build_hop_chain(principal, target),
+                    self.tables.target_subjects(target),
+                    self.build_hop_chain(principal, &target.name),
                 ));
             }
         }
 
         // Group targets: reached by impersonating the group, from the
         // principal itself or the nearest identity it controls that may.
-        let group_targets: Vec<&String> = self
-            .controls_group
-            .get(principal)
-            .into_iter()
-            .flatten()
-            .filter(|group| {
-                self.group_permissions.get(*group).is_some_and(|grants| {
-                    grants
-                        .iter()
-                        .any(|(ns, ag, r, v)| permission_covers(permission(ns, ag, r, v), query))
-                })
-            })
+        let group_targets: Vec<&Subject> = self
+            .controlled_groups(principal)
+            .filter(|group| self.target_has_permission(group, query))
             .collect();
         if !group_targets.is_empty() {
             let impersonator_chain = self.group_impersonator_chain(principal);
             for group in group_targets {
                 let mut hops = impersonator_chain.clone();
-                hops.push((group.clone(), "impersonate".to_string()));
-                target_chains.push((vec![Subject::group(group.as_str())], hops));
+                hops.push((group.name.clone(), "impersonate".to_string()));
+                target_chains.push((vec![group.clone()], hops));
             }
         }
 
@@ -507,18 +451,20 @@ impl RbacAccessModel {
     /// Hops from `principal` to the nearest identity that may impersonate
     /// groups: empty when `principal` may itself.
     fn group_impersonator_chain(&self, principal: &Subject) -> Vec<(String, String)> {
-        if self.can_impersonate_groups(principal) {
+        if self
+            .tables
+            .direct_grants(principal)
+            .any(Self::impersonates_groups)
+        {
             return vec![];
         }
-        self.controls_identity
-            .get(principal)
-            .into_iter()
-            .flatten()
+        self.controlled_identities(principal)
             .filter(|target| {
-                let target_principal = Subject::username(target.as_str());
-                target_principal != *principal && self.can_impersonate_groups(&target_principal)
+                self.tables
+                    .target_grants(target)
+                    .any(Self::impersonates_groups)
             })
-            .map(|target| self.build_hop_chain(principal, target))
+            .map(|target| self.build_hop_chain(principal, &target.name))
             .min_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
             .unwrap_or_default()
     }
@@ -607,7 +553,7 @@ impl RbacAccessModel {
     /// or `entry == query` (exact match). A query of `"*"` is only covered by
     /// an entry of `"*"` — a specific entry like `"pods"` does not cover `"*"`.
     /// Rules limited to some resourceNames count, as they do in
-    /// `direct_permissions`.
+    /// `direct_perm`.
     fn role_key_matches(&self, key: &RoleKey, q_ag: &str, q_r: &str, q_v: &str) -> bool {
         self.role_grants.get(key).is_some_and(|grants| {
             grants.iter().any(|(ag, r, v)| {
@@ -776,11 +722,13 @@ fn permission<'a>(
     }
 }
 
-fn permission_covers(entry: PermissionPattern<'_>, query: PermissionPattern<'_>) -> bool {
-    ns_covers(entry.namespace, query.namespace)
-        && value_covers(entry.apigroup, query.apigroup)
-        && value_covers(entry.resource, query.resource)
-        && value_covers(entry.verb, query.verb)
+/// A granted permission covers a query when every field does.
+fn permission_covers(granted: &Permission, query: PermissionPattern<'_>) -> bool {
+    let (namespace, api_group, resource, verb) = granted;
+    ns_covers(namespace, query.namespace)
+        && value_covers(api_group, query.apigroup)
+        && value_covers(resource, query.resource)
+        && value_covers(verb, query.verb)
 }
 
 #[cfg(test)]
@@ -1100,8 +1048,11 @@ mod tests {
         let eval = load_engine_with("").evaluate().expect("evaluate");
         let model = RbacAccessModel::from_store(&eval);
 
-        assert!(!model.direct_permissions.is_empty(), "direct_perm");
-        assert!(!model.principal_subjects.is_empty(), "principal_subject");
+        assert!(!model.tables.grants.is_empty(), "direct_perm");
+        assert!(
+            !model.tables.principal_subjects.is_empty(),
+            "principal_subject"
+        );
         assert!(!model.subject_bindings.is_empty(), "binding_subject");
         assert!(!model.binding_roles.is_empty(), "binding_roleref");
         assert!(
@@ -1115,23 +1066,28 @@ mod tests {
                 .any(|(kind, ..)| *kind == "ClusterRole"),
             "clusterrole_rule joined with policy_rule_perm"
         );
-        assert!(!model.controls_identity.is_empty(), "controls_identity");
+        assert!(
+            model
+                .tables
+                .escalation_targets
+                .values()
+                .flatten()
+                .any(|target| target.kind != SubjectKind::Group),
+            "controls_identity"
+        );
         assert!(!model.escalation_hops.is_empty(), "escalation_hop");
         for (label, reached) in &model.service_account_mechanisms {
             assert!(!reached.is_empty(), "{label} relation");
         }
         assert!(
-            model.effective_permissions.len() > model.direct_permissions.len(),
-            "escalation added nothing to effective_permissions"
+            model.tables.effective_entries().len() > model.tables.direct_entries().len(),
+            "escalation added nothing to the effective entries"
         );
         assert!(
-            model.direct_permissions.contains(&(
-                Subject::username("admin@example.com"),
-                String::new(),
-                "*".to_string(),
-                "*".to_string(),
-                "*".to_string()
-            )),
+            model
+                .tables
+                .direct_grants(&Subject::username("admin@example.com"))
+                .any(|granted| granted == &(String::new(), "*".into(), "*".into(), "*".into())),
             "admin@example.com cluster-admin grant missing"
         );
     }

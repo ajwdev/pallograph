@@ -8,8 +8,8 @@ use z3::ast::Ast;
 use z3::ast::String as Z3String;
 
 use super::SmtEncoder;
-use crate::rbac::Subject;
 use crate::rbac::facts::relation_name;
+use crate::rbac::{PermissionEntry, PermissionTables, Subject};
 
 pub struct CanDiff {
     pub principal: Subject,
@@ -55,6 +55,19 @@ impl<'ctx> SmtEncoder<'ctx> {
         self.eff_diff_witnesses(before, after)
     }
 
+    /// The (principal, permission) entries of the tables loaded under `suffix`,
+    /// expanded by `expand`; empty when nothing was loaded under it.
+    fn entries(
+        &self,
+        suffix: &str,
+        expand: fn(&PermissionTables) -> HashSet<PermissionEntry>,
+    ) -> HashSet<PermissionEntry> {
+        self.permission_tables
+            .get(suffix)
+            .map(expand)
+            .unwrap_or_default()
+    }
+
     // Iterate over tuples literally in `have_entries` but not `not_have_entries`, then
     // use Z3 to filter out any that are semantically subsumed by a wildcard in not_have.
     // This avoids the infinite-loop that results from asking Z3 to search the full string
@@ -65,13 +78,8 @@ impl<'ctx> SmtEncoder<'ctx> {
             None => return vec![],
         };
 
-        let have_set: HashSet<_> = self.can_entries.get(have).into_iter().flatten().collect();
-        let not_have_set: HashSet<_> = self
-            .can_entries
-            .get(not_have)
-            .into_iter()
-            .flatten()
-            .collect();
+        let have_set = self.entries(have, PermissionTables::direct_entries);
+        let not_have_set = self.entries(not_have, PermissionTables::direct_entries);
 
         let mut results = Vec::new();
         for (principal, namespace, apigroup, resource, verb) in have_set.difference(&not_have_set) {
@@ -108,13 +116,8 @@ impl<'ctx> SmtEncoder<'ctx> {
             None => return vec![],
         };
 
-        let have_set: HashSet<_> = self.eff_entries.get(have).into_iter().flatten().collect();
-        let not_have_set: HashSet<_> = self
-            .eff_entries
-            .get(not_have)
-            .into_iter()
-            .flatten()
-            .collect();
+        let have_set = self.entries(have, PermissionTables::effective_entries);
+        let not_have_set = self.entries(not_have, PermissionTables::effective_entries);
 
         let mut results = Vec::new();
         for (principal, namespace, apigroup, resource, verb) in have_set.difference(&not_have_set) {
@@ -304,17 +307,21 @@ mod tests {
         let mut enc = SmtEncoder::new(&ctx);
         enc.assert_rbac_axioms(&eval);
 
-        let can = &enc.can_entries[""];
-        let effective = &enc.eff_entries[""];
+        let tables = &enc.permission_tables[""];
+        let can = tables.direct_entries();
+        let effective = tables.effective_entries();
         assert!(!can.is_empty(), "can has no entries");
         assert!(
             effective.len() > can.len(),
             "escalation added nothing to effective_can"
         );
         assert!(
-            !enc.escalation_via[""].is_empty(),
+            !tables.escalation_targets.is_empty(),
             "no escalation targets recorded"
         );
+        for name in ["subject_grants", "can", "effective_can"] {
+            assert!(enc.rec_decls.contains_key(name), "{name} not defined");
+        }
         for rel in ["direct_perm", "principal_subject", "controls_identity"] {
             assert!(enc.facts.contains_key(rel), "{rel} not loaded");
         }
@@ -380,5 +387,92 @@ mod tests {
             gained,
             [(user, "secrets".to_string()), (group, "pods".to_string())]
         );
+    }
+
+    /// Evaluate the rules over NDJSON manifests alone.
+    fn evaluate_manifests(manifests: &[&str]) -> crate::engine::EvalStore {
+        // Unique per call: tests run in parallel threads of one process.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("pallograph-access-diff-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("manifests.json"), manifests.join("\n")).expect("write manifests");
+        let mut edb = MemStore::new();
+        let loaded = edb::load_from_manifests(&mut edb, vec![dir.to_string_lossy().into_owned()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        loaded.expect("load manifests");
+        Engine::new(edb, Path::new("rules"), Box::new(InterpreterBackend))
+            .expect("engine")
+            .evaluate()
+            .expect("evaluate")
+    }
+
+    #[test]
+    fn a_principal_known_in_one_snapshot_keeps_its_implicit_groups() {
+        // Every authenticated user may create selfsubjectreviews. The second
+        // snapshot adds bob's first binding, so only it knows bob; the first
+        // must still count bob as authenticated rather than report the
+        // system:authenticated grant as gained.
+        let shared = [
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"self-review"},"rules":[{"apiGroups":["authentication.k8s.io"],"resources":["selfsubjectreviews"],"verbs":["create"]}]}"#,
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"self-review"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"self-review"},"subjects":[{"kind":"Group","name":"system:authenticated"}]}"#,
+        ];
+        let bob = [
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"Role","metadata":{"name":"pod-reader","namespace":"demo"},"rules":[{"apiGroups":[""],"resources":["pods"],"verbs":["get"]}]}"#,
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"bob","namespace":"demo"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"pod-reader"},"subjects":[{"kind":"User","name":"bob"}]}"#,
+        ];
+        let without_bob = evaluate_manifests(&shared);
+        let with_bob = evaluate_manifests(&[&shared[..], &bob[..]].concat());
+
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let mut enc = SmtEncoder::new(&ctx);
+        enc.assert_rbac_axioms_as(&without_bob, "without");
+        enc.assert_rbac_axioms_as(&with_bob, "with");
+
+        let bob_reads_pods = || {
+            (
+                Subject::username("bob"),
+                "demo".to_string(),
+                "pods".to_string(),
+            )
+        };
+        let can = |diffs: Vec<super::CanDiff>| -> Vec<(Subject, String, String)> {
+            diffs
+                .into_iter()
+                .map(|d| (d.principal, d.namespace, d.resource))
+                .collect()
+        };
+        let effective = |diffs: Vec<super::EffDiff>| -> Vec<(Subject, String, String)> {
+            diffs
+                .into_iter()
+                .map(|d| (d.principal, d.namespace, d.resource))
+                .collect()
+        };
+
+        // Adding the binding gains bob's pod read and nothing else.
+        assert_eq!(
+            can(enc.check_permission_expansion("without", "with")),
+            [bob_reads_pods()]
+        );
+        assert_eq!(
+            effective(enc.check_effective_can_expansion("without", "with")),
+            [bob_reads_pods()]
+        );
+        assert!(can(enc.check_permission_contraction("without", "with")).is_empty());
+        assert!(effective(enc.check_effective_can_contraction("without", "with")).is_empty());
+
+        // Deleting bob's last binding loses only that read.
+        assert_eq!(
+            can(enc.check_permission_contraction("with", "without")),
+            [bob_reads_pods()]
+        );
+        assert_eq!(
+            effective(enc.check_effective_can_contraction("with", "without")),
+            [bob_reads_pods()]
+        );
+        assert!(can(enc.check_permission_expansion("with", "without")).is_empty());
+        assert!(effective(enc.check_effective_can_expansion("with", "without")).is_empty());
     }
 }

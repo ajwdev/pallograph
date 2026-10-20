@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use mangle_common::Value;
 use z3::ast::String as Z3String;
@@ -9,13 +9,10 @@ use z3::ast::{Ast, Dynamic, Int};
 use z3::{FuncDecl, RecFuncDecl, Solver, Sort};
 
 use crate::engine::EvalStore;
-use crate::rbac::{PermissionEntry, Subject};
+use crate::rbac::PermissionTables;
 pub mod diff;
 pub mod rbac_model;
 pub mod scheduling;
-
-/// Escalation targets per effective permission entry.
-pub type EscalationVia = HashMap<PermissionEntry, BTreeSet<Subject>>;
 
 /// Encodes Mangle ground facts as Z3 assertions and exposes the solver for
 /// constraint checking.
@@ -27,14 +24,9 @@ pub struct SmtEncoder<'ctx> {
     /// RecFuncDecl derefs to FuncDecl; use `get_decl` for a unified lookup.
     pub rec_decls: HashMap<String, RecFuncDecl<'ctx>>,
     pub facts: HashMap<String, Vec<Vec<Value>>>,
-    /// (principal, namespace, apigroup, resource, verb) entries per named suffix.
+    /// The RBAC tables behind `can` and `effective_can`, per named suffix.
     /// Key is the suffix passed to assert_rbac_axioms_as (empty string = bare "can").
-    pub can_entries: HashMap<String, Vec<PermissionEntry>>,
-    /// (principal, namespace, apigroup, resource, verb) entries for effective_can, same keying.
-    pub eff_entries: HashMap<String, Vec<PermissionEntry>>,
-    /// For effective_can entries reached through escalation, the identities they
-    /// were reached through, same keying.
-    pub escalation_via: HashMap<String, EscalationVia>,
+    pub permission_tables: HashMap<String, PermissionTables>,
 }
 
 impl<'ctx> SmtEncoder<'ctx> {
@@ -45,9 +37,7 @@ impl<'ctx> SmtEncoder<'ctx> {
             decls: HashMap::new(),
             rec_decls: HashMap::new(),
             facts: HashMap::new(),
-            can_entries: HashMap::new(),
-            eff_entries: HashMap::new(),
-            escalation_via: HashMap::new(),
+            permission_tables: HashMap::new(),
         }
     }
 

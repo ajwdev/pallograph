@@ -92,7 +92,7 @@ fn main() {
         Scenario::LoadAccessModel => {
             for _ in 0..args.iters {
                 let model = access_model(&store, args.include_builtins);
-                total += black_box(model.direct_permissions.len());
+                total += black_box(model.grant_count());
             }
         }
         Scenario::EncodeZ3 => {
@@ -100,7 +100,11 @@ fn main() {
                 let cfg = z3::Config::new();
                 let ctx = z3::Context::new(&cfg);
                 let enc = z3_encoder(&ctx, &store);
-                total += black_box(enc.can_entries.get("").map_or(0, Vec::len));
+                total += black_box(
+                    enc.permission_tables
+                        .get("")
+                        .map_or(0, |tables| tables.grant_count()),
+                );
             }
         }
         Scenario::DirectClusterAdmin => {

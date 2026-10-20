@@ -161,7 +161,7 @@ fn bench_backend_pipeline(
                     |(edb_c, rules_c)| {
                         let store = evaluate_with_backend(backend, &edb_c, &rules_c);
                         let enc = access_model(&store);
-                        black_box(enc.direct_permissions.len() + enc.effective_permissions.len());
+                        black_box(enc.grant_count());
                     },
                     BatchSize::SmallInput,
                 )
