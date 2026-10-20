@@ -8,7 +8,8 @@
 #   rolebinding/3, clusterrolebinding/2       (type filters)
 #   binding_subject/4, binding_roleref/4      (one shape for both binding kinds)
 #   service_account_principal/3               (SA namespace/name to username)
-#   known_principal/2, principal_group/2      (principals and their groups)
+#   known_principal/2, implicit_group/2,
+#   principal_group/2                         (principals and their groups)
 #   principal_subject/3                       (the subjects a principal acts as)
 #
 # A subject is identified by a kind, one of /user, /group or /serviceaccount,
@@ -134,33 +135,46 @@ known_principal(Kind, Name) :- binding_subject(_, _, Kind, Name).
 known_principal(/serviceaccount, Username) :- service_account_principal(_, _, Username).
 known_principal(/user, Username) :- user_groups(Username, _).
 
-# The groups the authenticator puts a principal in. user_groups supplies
-# them for users. ServiceAccount tokens always carry system:serviceaccounts
-# and system:serviceaccounts:<ns>. Everyone except system:anonymous is in
-# system:authenticated, and system:anonymous is in system:unauthenticated
-# (authenticatedGroups in tools/rbac-oracle/request.go).
+# The groups Kubernetes itself puts an identity in, whichever authenticator
+# or impersonation produced it. ServiceAccounts always carry
+# system:serviceaccounts and system:serviceaccounts:<ns>, and everyone except
+# system:anonymous is in system:authenticated (authenticatedGroups in
+# tools/rbac-oracle/request.go). escalation.mg gives an identity assumed
+# through escalation only these groups.
+Decl implicit_group(Username, Group)
+  descr [
+    doc("Groups Kubernetes adds to a known user or ServiceAccount itself, not taken from user_groups."),
+    arg(Username, "user name or system:serviceaccount:<ns>:<name>"),
+    arg(Group, "group name")
+  ].
+
+implicit_group(Username, "system:serviceaccounts") :-
+    service_account_principal(_, _, Username).
+
+implicit_group(Username, Group) :-
+    service_account_principal(Namespace, _, Username)
+    |> let Group = fn:string:concat("system:serviceaccounts:", Namespace).
+
+implicit_group(Username, "system:authenticated") :-
+    service_account_principal(_, _, Username).
+
+implicit_group(Username, "system:authenticated") :-
+    known_principal(/user, Username),
+    Username != "system:anonymous".
+
+# The groups a principal has when it logs in: user_groups supplies the
+# authenticator's groups for users, on top of implicit_group, and an
+# unauthenticated request (system:anonymous) is in system:unauthenticated.
 Decl principal_group(Username, Group)
   descr [
-    doc("Groups a known user or ServiceAccount belongs to, from user_groups plus the groups Kubernetes adds."),
+    doc("Groups a known user or ServiceAccount belongs to when it logs in, from user_groups plus the groups Kubernetes adds."),
     arg(Username, "user name or system:serviceaccount:<ns>:<name>"),
     arg(Group, "group name")
   ].
 
 principal_group(Username, Group) :- user_groups(Username, Group).
 
-principal_group(Username, "system:serviceaccounts") :-
-    service_account_principal(_, _, Username).
-
-principal_group(Username, Group) :-
-    service_account_principal(Namespace, _, Username)
-    |> let Group = fn:string:concat("system:serviceaccounts:", Namespace).
-
-principal_group(Username, "system:authenticated") :-
-    service_account_principal(_, _, Username).
-
-principal_group(Username, "system:authenticated") :-
-    known_principal(/user, Username),
-    Username != "system:anonymous".
+principal_group(Username, Group) :- implicit_group(Username, Group).
 
 principal_group(Username, "system:unauthenticated") :-
     known_principal(/user, Username),

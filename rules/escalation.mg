@@ -4,7 +4,8 @@
 # another identity. The key predicates:
 #
 #   controls_identity(P, Target) - P can assume Target's identity via at least
-#       one escalation path. Transitively closed: if A->B->C then A controls C.
+#       one escalation path. Transitively closed: if A->B->C then A controls C,
+#       also when a step goes through a group P can impersonate.
 #   controls_group(P, Group) - P, or an identity it controls, can impersonate
 #       Group, which holds grants.
 #
@@ -13,12 +14,12 @@
 #       gains what they reach.
 #
 # Principals (P, Target) are users and ServiceAccounts, by username. A group
-# is never a principal: nobody authenticates as one, so a group is never
-# hopped to. Impersonating a group is recorded in controls_group instead, and
-# the group's grants are not followed further: Kubernetes only accepts
-# Impersonate-Group alongside Impersonate-User, and impersonating a user is
-# modelled as its own hop. A group can be where a path starts, though; see
-# "Escalation from groups" at the end of this file.
+# is never a principal: nobody authenticates as one. Impersonating a group is
+# recorded in controls_group, and P then holds the group's grants, so
+# whatever the group reaches (group_escalation_hop) P reaches too.
+# Kubernetes only accepts Impersonate-Group alongside Impersonate-User; that
+# second permission is not required here, which over-approximates. A group
+# can also be where a path starts; see "Escalation from groups".
 #
 # Escalation paths modeled:
 #   1. Impersonation  - impersonate verb on users/serviceaccounts/groups
@@ -26,9 +27,19 @@
 #   3. Pod exec/attach - create on pods/exec or pods/attach exposes mounted token
 #   4. Pod creation   - create on pods lets you run as any SA in that namespace
 #
+# Logging in and being assumed are different. A principal that logs in acts
+# as itself and its principal_group groups, user_groups included. An
+# identity assumed through escalation acts as itself and only the groups
+# Kubernetes adds (implicit_group): an impersonated request carries the
+# impersonated username plus system:authenticated (and, for a ServiceAccount,
+# its ServiceAccount groups), and other groups only through Impersonate-Group
+# headers, which controls_group models. A token or a pod gives a
+# ServiceAccount its usual groups. So the first hop of a path uses
+# principal_subject, and every later hop uses assumed_subject.
+#
 # What P can do through escalation is not materialized. Join on demand:
 #
-#   controls_identity(P, Target), principal_subject(Target, Kind, Name),
+#   controls_identity(P, Target), assumed_subject(Target, Kind, Name),
 #       direct_perm(Name, Kind, Ns, ApiGroup, Resource, ResourceName, Verb)
 #   controls_group(P, Group), direct_perm(Group, /group, Ns, ...)
 #   group_controls_identity(G, Target), then as for controls_identity
@@ -38,15 +49,12 @@
 # grant_X(Name, Kind, Ns): the binding subject (Kind, Name) holds permission X
 # in Ns. direct_perm stores "*" literals for apiGroup, resource and verb, so
 # each guard checks all 8 combinations (2^3) of wildcard vs literal. Grants
-# are filtered here, per subject, before principal_subject expands them to
-# the principals that hold them: perm_X(P, Ns).
+# are filtered here, per subject, before principal_subject or
+# assumed_subject expands them to the identities that hold them.
 #
 # The ResourceName column is ignored (_): a grant limited to some object names
 # still counts. That over-approximates, the safe side for finding escalation
 # paths.
-#
-# perm_X looks grant_X up by subject name, its first column, so the join is
-# keyed on Name rather than on Kind (see rbac.mg).
 
 grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts/token", _, "create").
 grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts/token", _, "*").
@@ -57,10 +65,6 @@ grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "servi
 grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",                     _, "create").
 grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",                     _, "*").
 
-perm_sa_token_create(P, Ns) :-
-    principal_subject(P, Kind, Name),
-    grant_sa_token_create(Name, Kind, Ns).
-
 grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "pods/exec", _, "create").
 grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "pods/exec", _, "*").
 grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",         _, "create").
@@ -69,10 +73,6 @@ grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "pods
 grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "pods/exec", _, "*").
 grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",         _, "create").
 grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",         _, "*").
-
-perm_pods_exec_create(P, Ns) :-
-    principal_subject(P, Kind, Name),
-    grant_pods_exec_create(Name, Kind, Ns).
 
 grant_pods_attach_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "pods/attach", _, "create").
 grant_pods_attach_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "pods/attach", _, "*").
@@ -83,10 +83,6 @@ grant_pods_attach_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "po
 grant_pods_attach_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",           _, "create").
 grant_pods_attach_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",           _, "*").
 
-perm_pods_attach_create(P, Ns) :-
-    principal_subject(P, Kind, Name),
-    grant_pods_attach_create(Name, Kind, Ns).
-
 grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "pods", _, "create").
 grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "pods", _, "*").
 grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",    _, "create").
@@ -95,10 +91,6 @@ grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "pods", _,
 grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "pods", _, "*").
 grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",    _, "create").
 grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",    _, "*").
-
-perm_pods_create(P, Ns) :-
-    principal_subject(P, Kind, Name),
-    grant_pods_create(Name, Kind, Ns).
 
 grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts", _, "impersonate").
 grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts", _, "*").
@@ -109,10 +101,6 @@ grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "servic
 grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",               _, "impersonate").
 grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",               _, "*").
 
-perm_sa_impersonate(P, Ns) :-
-    principal_subject(P, Kind, Name),
-    grant_sa_impersonate(Name, Kind, Ns).
-
 grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "users", _, "impersonate").
 grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "users", _, "*").
 grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",     _, "impersonate").
@@ -121,10 +109,6 @@ grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "user
 grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "users", _, "*").
 grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",     _, "impersonate").
 grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",     _, "*").
-
-perm_user_impersonate(P, Ns) :-
-    principal_subject(P, Kind, Name),
-    grant_user_impersonate(Name, Kind, Ns).
 
 grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "groups", _, "impersonate").
 grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "groups", _, "*").
@@ -135,109 +119,186 @@ grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "gro
 grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",      _, "impersonate").
 grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",      _, "*").
 
-perm_group_impersonate(P, Ns) :-
+# ---- Subjects of an assumed identity ----
+
+Decl assumed_subject(Username, Kind, Name)
+  descr [
+    doc("Binding subjects a user or ServiceAccount matches when assumed through escalation (impersonation, a token or a pod): itself and the groups Kubernetes adds (implicit_group), but not its user_groups groups."),
+    arg(Username, "user name or system:serviceaccount:<ns>:<name>"),
+    arg(Kind, "/user, /group or /serviceaccount"),
+    arg(Name, "Username itself for /user and /serviceaccount, else the group name")
+  ].
+
+assumed_subject(Username, /user, Username) :-
+    known_principal(/user, Username).
+
+assumed_subject(Username, /serviceaccount, Username) :-
+    known_principal(/serviceaccount, Username).
+
+assumed_subject(Username, /group, Group) :-
+    implicit_group(Username, Group).
+
+# ---- Escalation from one binding subject ----
+#
+# subject_X(Name, Kind, ...): what the grants of binding subject (Kind, Name)
+# alone reach. Each mechanism has two forms: namespace-scoped (Ns matches
+# directly) and cluster-wide (Ns=""). CRBs produce direct_perm with Ns=""
+# which means "all namespaces" in K8s, so the cluster-wide variants join
+# against all real namespaces where the target resource exists.
+#
+# Name comes first, the column a principal_subject or assumed_subject join
+# binds, because the planner keys a lookup on an atom's first bound column.
+
+subject_token_accessible_sa(Name, Kind, SANs, SAName) :-
+    grant_sa_token_create(Name, Kind, SANs),
+    serviceaccount(SANs, SAName, _).
+
+subject_token_accessible_sa(Name, Kind, SANs, SAName) :-
+    grant_sa_token_create(Name, Kind, ""),
+    serviceaccount(SANs, SAName, _).
+
+subject_exec_reachable_sa(Name, Kind, PodNs, SAName) :-
+    grant_pods_exec_create(Name, Kind, PodNs),
+    pod_sa(PodNs, _, SAName).
+
+subject_exec_reachable_sa(Name, Kind, PodNs, SAName) :-
+    grant_pods_exec_create(Name, Kind, ""),
+    pod_sa(PodNs, _, SAName).
+
+subject_exec_reachable_sa(Name, Kind, PodNs, SAName) :-
+    grant_pods_attach_create(Name, Kind, PodNs),
+    pod_sa(PodNs, _, SAName).
+
+subject_exec_reachable_sa(Name, Kind, PodNs, SAName) :-
+    grant_pods_attach_create(Name, Kind, ""),
+    pod_sa(PodNs, _, SAName).
+
+subject_pod_creatable_sa(Name, Kind, SANs, SAName) :-
+    grant_pods_create(Name, Kind, SANs),
+    serviceaccount(SANs, SAName, _).
+
+subject_pod_creatable_sa(Name, Kind, SANs, SAName) :-
+    grant_pods_create(Name, Kind, ""),
+    serviceaccount(SANs, SAName, _).
+
+subject_impersonatable_sa(Name, Kind, SANs, SAName) :-
+    grant_sa_impersonate(Name, Kind, SANs),
+    serviceaccount(SANs, SAName, _).
+
+subject_impersonatable_sa(Name, Kind, SANs, SAName) :-
+    grant_sa_impersonate(Name, Kind, ""),
+    serviceaccount(SANs, SAName, _).
+
+# An impersonated user acts as itself plus system:authenticated, and the
+# impersonator is already in system:authenticated, so impersonating a user
+# only gains something when the user holds grants of its own.
+user_has_own_grant(Username) :-
+    direct_perm(Username, /user, _, _, _, _, _).
+
+Decl subject_escalation_hop(Name, Kind, Target)
+  descr [
+    doc("Single-step escalation using only the grants of binding subject (Kind, Name): whoever acts as that subject can assume Target's identity via one mechanism."),
+    arg(Name, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
+    arg(Kind, "/user, /group or /serviceaccount"),
+    arg(Target, "the user or ServiceAccount whose identity can be directly assumed")
+  ].
+
+subject_escalation_hop(Name, Kind, Target) :-
+    subject_impersonatable_sa(Name, Kind, SANs, SAName)
+    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+subject_escalation_hop(Name, Kind, Target) :-
+    subject_token_accessible_sa(Name, Kind, SANs, SAName)
+    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+subject_escalation_hop(Name, Kind, Target) :-
+    subject_exec_reachable_sa(Name, Kind, PodNs, SAName)
+    |> let Target = fn:string:concat("system:serviceaccount:", PodNs, ":", SAName).
+
+subject_escalation_hop(Name, Kind, Target) :-
+    subject_pod_creatable_sa(Name, Kind, SANs, SAName)
+    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+subject_escalation_hop(Name, Kind, Target) :-
+    grant_user_impersonate(Name, Kind, _),
+    user_has_own_grant(Target).
+
+# ---- Escalation from a principal ----
+#
+# The ServiceAccounts a principal reaches by each mechanism when it logs in,
+# for explaining a hop. Paths themselves are built from escalation_hop.
+
+token_accessible_sa(P, SANs, SAName) :-
     principal_subject(P, Kind, Name),
-    grant_group_impersonate(Name, Kind, Ns).
-
-# ---- Escalation path helpers ----
-#
-# Each helper has two forms: namespace-scoped (Ns matches directly) and
-# cluster-wide (Ns=""). CRBs produce direct_perm with Ns="" which means
-# "all namespaces" in K8s, so the cluster-wide variants join against all
-# real namespaces where the target resource exists.
-
-token_accessible_sa(P, SANs, SAName) :-
-    perm_sa_token_create(P, SANs),
-    serviceaccount(SANs, SAName, _).
-
-token_accessible_sa(P, SANs, SAName) :-
-    perm_sa_token_create(P, ""),
-    serviceaccount(SANs, SAName, _).
+    subject_token_accessible_sa(Name, Kind, SANs, SAName).
 
 exec_reachable_sa(P, PodNs, SAName) :-
-    perm_pods_exec_create(P, PodNs),
-    pod_sa(PodNs, _, SAName).
-
-exec_reachable_sa(P, PodNs, SAName) :-
-    perm_pods_exec_create(P, ""),
-    pod_sa(PodNs, _, SAName).
-
-exec_reachable_sa(P, PodNs, SAName) :-
-    perm_pods_attach_create(P, PodNs),
-    pod_sa(PodNs, _, SAName).
-
-exec_reachable_sa(P, PodNs, SAName) :-
-    perm_pods_attach_create(P, ""),
-    pod_sa(PodNs, _, SAName).
+    principal_subject(P, Kind, Name),
+    subject_exec_reachable_sa(Name, Kind, PodNs, SAName).
 
 pod_creatable_sa(P, SANs, SAName) :-
-    perm_pods_create(P, SANs),
-    serviceaccount(SANs, SAName, _).
-
-pod_creatable_sa(P, SANs, SAName) :-
-    perm_pods_create(P, ""),
-    serviceaccount(SANs, SAName, _).
+    principal_subject(P, Kind, Name),
+    subject_pod_creatable_sa(Name, Kind, SANs, SAName).
 
 impersonatable_sa(P, SANs, SAName) :-
-    perm_sa_impersonate(P, SANs),
-    serviceaccount(SANs, SAName, _).
+    principal_subject(P, Kind, Name),
+    subject_impersonatable_sa(Name, Kind, SANs, SAName).
 
-impersonatable_sa(P, SANs, SAName) :-
-    perm_sa_impersonate(P, ""),
-    serviceaccount(SANs, SAName, _).
-
-# A principal holds some grant, directly or through one of its groups.
-principal_has_grant(Username) :-
-    principal_subject(Username, Kind, Name),
-    direct_perm(Name, Kind, _, _, _, _, _).
-
-# ---- escalation_hop ----
-#
 # Single-step escalation: P can directly assume Target's identity via exactly
 # one mechanism. Keeping this as a separate predicate (rather than inlining into
 # controls_identity) is what makes the transitive closure below BFS-ordered:
-# semi-naive evaluation extends controls_identity by one escalation_hop per
-# fixpoint iteration, so shorter paths are always derived before longer ones.
-# Because provenance records only the first (is_new) insertion, \why on any
+# semi-naive evaluation extends controls_identity by one hop per fixpoint
+# iteration, so shorter paths are always derived before longer ones. Because
+# provenance records only the first (is_new) insertion, \why on any
 # controls_identity fact will show the shortest path to the target.
 
 Decl escalation_hop(Principal, Target)
   descr [
-    doc("Single-step escalation: Principal can assume Target's identity via one mechanism."),
+    doc("Single-step escalation: Principal, logged in with all its groups, can assume Target's identity via one mechanism."),
     arg(Principal, "the user or ServiceAccount performing the escalation"),
     arg(Target, "the user or ServiceAccount whose identity Principal can directly assume")
   ].
 
 escalation_hop(P, Target) :-
-    impersonatable_sa(P, SANs, SAName)
-    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+    principal_subject(P, Kind, Name),
+    subject_escalation_hop(Name, Kind, Target).
 
-escalation_hop(P, Target) :-
-    token_accessible_sa(P, SANs, SAName)
-    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+Decl assumed_escalation_hop(Identity, Target)
+  descr [
+    doc("Single-step escalation from an identity assumed through escalation, which acts only as its assumed_subject subjects."),
+    arg(Identity, "the user or ServiceAccount reached by an earlier hop"),
+    arg(Target, "the user or ServiceAccount whose identity Identity can directly assume")
+  ].
 
-escalation_hop(P, Target) :-
-    exec_reachable_sa(P, PodNs, SAName)
-    |> let Target = fn:string:concat("system:serviceaccount:", PodNs, ":", SAName).
+assumed_escalation_hop(Identity, Target) :-
+    assumed_subject(Identity, Kind, Name),
+    subject_escalation_hop(Name, Kind, Target).
 
-escalation_hop(P, Target) :-
-    pod_creatable_sa(P, SANs, SAName)
-    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+# Group impersonation, from a principal as it logs in and from an assumed
+# identity. Like user impersonation, the namespace of the grant is ignored.
+perm_group_impersonate(P) :-
+    principal_subject(P, Kind, Name),
+    grant_group_impersonate(Name, Kind, _).
 
-# Impersonating a user is only recorded when the user holds some grant.
-escalation_hop(P, Target) :-
-    perm_user_impersonate(P, _),
-    known_principal(/user, Target),
-    principal_has_grant(Target).
+assumed_group_impersonate(Identity) :-
+    assumed_subject(Identity, Kind, Name),
+    grant_group_impersonate(Name, Kind, _).
 
-# ---- controls_identity ----
+group_has_grant(Group) :-
+    direct_perm(Group, /group, _, _, _, _, _).
+
+# ---- controls_identity and controls_group ----
 #
-# Transitive closure over escalation_hop. The recursive rule extends by exactly
-# one escalation_hop (not controls_identity on both sides), preserving BFS order.
+# One closure over three kinds of step: a hop from P as it logs in, a hop
+# from an identity already assumed, and a hop from a group P can
+# impersonate, whose grants P then holds. Each recursive rule extends a path
+# by exactly one hop, preserving BFS order. The two relations are mutually
+# recursive: impersonating groups can be what an assumed identity is
+# allowed to do, and a group's grants can reach the next identity.
 
 Decl controls_identity(Principal, Target)
   descr [
-    doc("Principal can assume Target's identity via one or more escalation hops (transitively closed)."),
+    doc("Principal can assume Target's identity via one or more escalation hops, through identities and impersonated groups (transitively closed)."),
     arg(Principal, "the user or ServiceAccount that gains control"),
     arg(Target, "the user or ServiceAccount Principal ultimately controls")
   ].
@@ -246,30 +307,28 @@ controls_identity(P, Target) :- escalation_hop(P, Target), P != Target.
 
 controls_identity(P, Target) :-
     controls_identity(P, Mid),
-    escalation_hop(Mid, Target).
+    assumed_escalation_hop(Mid, Target).
 
-# ---- controls_group ----
-#
-# Group impersonation reaches every group that holds a grant. Like user
-# impersonation, the guard ignores the namespace of the impersonate grant.
+controls_identity(P, Target) :-
+    controls_group(P, Group),
+    group_escalation_hop(Group, Target),
+    P != Target.
 
-group_has_grant(Group) :-
-    direct_perm(Group, /group, _, _, _, _, _).
-
+# Group impersonation reaches every group that holds a grant.
 Decl controls_group(Principal, Group)
   descr [
-    doc("Principal, or an identity it controls, can impersonate Group, which holds grants. Groups do not hop further."),
+    doc("Principal, or an identity it controls, can impersonate Group, which holds grants."),
     arg(Principal, "user name or system:serviceaccount:<ns>:<name>"),
     arg(Group, "group whose direct_perm grants Principal can use")
   ].
 
 controls_group(P, Group) :-
-    perm_group_impersonate(P, _),
+    perm_group_impersonate(P),
     group_has_grant(Group).
 
 controls_group(P, Group) :-
     controls_identity(P, Mid),
-    perm_group_impersonate(Mid, _),
+    assumed_group_impersonate(Mid),
     group_has_grant(Group).
 
 # ---- Escalation from groups ----
@@ -277,54 +336,22 @@ controls_group(P, Group) :-
 # A group is never a principal, but a binding can grant a group the
 # permissions above. Group members are mostly unknown (membership comes from
 # the authenticator, and user_groups only lists what the caller supplied), so
-# the escalation_hop rules, which start from known users and ServiceAccounts,
-# would lose such a grant. These relations start from the group instead,
-# using only its own grants, direct_perm(Group, /group, ...): whatever they
-# reach, any member reaches too.
-#
-# Each helper looks up its grant_X guard with Kind bound to /group. The guard
-# is already filtered on resource and verb, so this is a scan of a small
-# relation, not of direct_perm.
+# paths that start from known users and ServiceAccounts would lose such a
+# grant. These relations start from the group instead, using only its own
+# grants, direct_perm(Group, /group, ...): whatever they reach, any member
+# reaches too.
 
 group_token_accessible_sa(Group, SANs, SAName) :-
-    grant_sa_token_create(Group, /group, SANs),
-    serviceaccount(SANs, SAName, _).
-
-group_token_accessible_sa(Group, SANs, SAName) :-
-    grant_sa_token_create(Group, /group, ""),
-    serviceaccount(SANs, SAName, _).
+    subject_token_accessible_sa(Group, /group, SANs, SAName).
 
 group_exec_reachable_sa(Group, PodNs, SAName) :-
-    grant_pods_exec_create(Group, /group, PodNs),
-    pod_sa(PodNs, _, SAName).
-
-group_exec_reachable_sa(Group, PodNs, SAName) :-
-    grant_pods_exec_create(Group, /group, ""),
-    pod_sa(PodNs, _, SAName).
-
-group_exec_reachable_sa(Group, PodNs, SAName) :-
-    grant_pods_attach_create(Group, /group, PodNs),
-    pod_sa(PodNs, _, SAName).
-
-group_exec_reachable_sa(Group, PodNs, SAName) :-
-    grant_pods_attach_create(Group, /group, ""),
-    pod_sa(PodNs, _, SAName).
+    subject_exec_reachable_sa(Group, /group, PodNs, SAName).
 
 group_pod_creatable_sa(Group, SANs, SAName) :-
-    grant_pods_create(Group, /group, SANs),
-    serviceaccount(SANs, SAName, _).
-
-group_pod_creatable_sa(Group, SANs, SAName) :-
-    grant_pods_create(Group, /group, ""),
-    serviceaccount(SANs, SAName, _).
+    subject_pod_creatable_sa(Group, /group, SANs, SAName).
 
 group_impersonatable_sa(Group, SANs, SAName) :-
-    grant_sa_impersonate(Group, /group, SANs),
-    serviceaccount(SANs, SAName, _).
-
-group_impersonatable_sa(Group, SANs, SAName) :-
-    grant_sa_impersonate(Group, /group, ""),
-    serviceaccount(SANs, SAName, _).
+    subject_impersonatable_sa(Group, /group, SANs, SAName).
 
 Decl group_escalation_hop(Group, Target)
   descr [
@@ -334,28 +361,10 @@ Decl group_escalation_hop(Group, Target)
   ].
 
 group_escalation_hop(Group, Target) :-
-    group_impersonatable_sa(Group, SANs, SAName)
-    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+    subject_escalation_hop(Group, /group, Target).
 
-group_escalation_hop(Group, Target) :-
-    group_token_accessible_sa(Group, SANs, SAName)
-    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
-
-group_escalation_hop(Group, Target) :-
-    group_exec_reachable_sa(Group, PodNs, SAName)
-    |> let Target = fn:string:concat("system:serviceaccount:", PodNs, ":", SAName).
-
-group_escalation_hop(Group, Target) :-
-    group_pod_creatable_sa(Group, SANs, SAName)
-    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
-
-group_escalation_hop(Group, Target) :-
-    grant_user_impersonate(Group, /group, _),
-    known_principal(/user, Target),
-    principal_has_grant(Target).
-
-# One group hop, then the user and ServiceAccount closure. Not recursive:
-# after the first hop the path continues from an identity, never a group.
+# The same closure as controls_identity and controls_group, from the
+# group's own grants.
 Decl group_controls_identity(Group, Target)
   descr [
     doc("Any member of Group can assume Target's identity via one or more escalation hops, starting from the group's own grants."),
@@ -366,8 +375,12 @@ Decl group_controls_identity(Group, Target)
 group_controls_identity(Group, Target) :- group_escalation_hop(Group, Target).
 
 group_controls_identity(Group, Target) :-
-    group_escalation_hop(Group, Mid),
-    controls_identity(Mid, Target).
+    group_controls_identity(Group, Mid),
+    assumed_escalation_hop(Mid, Target).
+
+group_controls_identity(Group, Target) :-
+    group_controls_group(Group, Other),
+    group_escalation_hop(Other, Target).
 
 Decl group_controls_group(Group, Other)
   descr [
@@ -383,6 +396,6 @@ group_controls_group(Group, Other) :-
 
 group_controls_group(Group, Other) :-
     group_controls_identity(Group, Mid),
-    perm_group_impersonate(Mid, _),
+    assumed_group_impersonate(Mid),
     group_has_grant(Other),
     Group != Other.
