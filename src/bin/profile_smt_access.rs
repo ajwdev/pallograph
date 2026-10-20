@@ -18,6 +18,7 @@ use clap::{Parser, ValueEnum};
 use pallograph::engine::{
     Backend, EvalStore, InterpreterBackend, load_bench_fixtures, load_medium_bench_fixtures,
 };
+use pallograph::rbac::RbacAccessModel;
 use pallograph::smt::SmtEncoder;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -68,18 +69,10 @@ fn load_store(fixture: Fixture) -> EvalStore {
         .expect("evaluate fixtures")
 }
 
-fn facts_encoder<'ctx>(
-    ctx: &'ctx z3::Context,
-    store: &EvalStore,
-    include_builtins: bool,
-) -> SmtEncoder<'ctx> {
-    let mut enc = SmtEncoder::new(ctx);
-    // Baseline-compatible: the perf patch changes the production command path
-    // to skip Z3 encoding, but the benchmark commit should compile before that
-    // API exists.
-    enc.assert_rbac_axioms(store);
-    enc.include_builtins = include_builtins;
-    enc
+fn access_model(store: &EvalStore, include_builtins: bool) -> RbacAccessModel {
+    let mut model = RbacAccessModel::from_store(store);
+    model.include_builtins = include_builtins;
+    model
 }
 
 fn z3_encoder<'ctx>(
@@ -103,10 +96,8 @@ fn main() {
     match args.scenario {
         Scenario::LoadAccessModel => {
             for _ in 0..args.iters {
-                let cfg = z3::Config::new();
-                let ctx = z3::Context::new(&cfg);
-                let enc = facts_encoder(&ctx, &store, args.include_builtins);
-                total += black_box(enc.can_entries.get("").map_or(0, Vec::len));
+                let model = access_model(&store, args.include_builtins);
+                total += black_box(model.direct_permissions.len());
             }
         }
         Scenario::EncodeZ3 => {
@@ -118,30 +109,25 @@ fn main() {
             }
         }
         Scenario::DirectClusterAdmin => {
-            let cfg = z3::Config::new();
-            let ctx = z3::Context::new(&cfg);
-            let enc = facts_encoder(&ctx, &store, args.include_builtins);
+            let model = access_model(&store, args.include_builtins);
             for _ in 0..args.iters {
-                total += black_box(enc.direct_violations("", "*", "*", "*").len());
+                total += black_box(model.direct_violations("", "*", "*", "*").len());
             }
         }
         Scenario::ClusterAdmin => {
-            let cfg = z3::Config::new();
-            let ctx = z3::Context::new(&cfg);
-            let enc = facts_encoder(&ctx, &store, args.include_builtins);
+            let model = access_model(&store, args.include_builtins);
             for _ in 0..args.iters {
                 total += black_box(
-                    enc.check_reaches("", "*", "*", "*", &[], args.include_direct)
+                    model
+                        .check_reaches("", "*", "*", "*", &[], args.include_direct)
                         .len(),
                 );
             }
         }
         Scenario::NamespaceIsolation => {
-            let cfg = z3::Config::new();
-            let ctx = z3::Context::new(&cfg);
-            let enc = facts_encoder(&ctx, &store, args.include_builtins);
+            let model = access_model(&store, args.include_builtins);
             for _ in 0..args.iters {
-                total += black_box(enc.check_namespace_isolation("default", &[]).len());
+                total += black_box(model.check_namespace_isolation("default", &[]).len());
             }
         }
     }

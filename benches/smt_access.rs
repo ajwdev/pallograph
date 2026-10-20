@@ -21,6 +21,7 @@ use pallograph::engine::{
     Backend, DdBackend, EvalStore, InterpreterBackend, load_bench_fixtures,
     load_medium_bench_fixtures,
 };
+use pallograph::rbac::RbacAccessModel;
 use pallograph::smt::SmtEncoder;
 
 #[derive(Clone, Copy)]
@@ -62,16 +63,8 @@ fn evaluated_medium() -> Option<pallograph::engine::EvalStore> {
     )
 }
 
-fn facts_encoder<'ctx>(
-    ctx: &'ctx z3::Context,
-    store: &pallograph::engine::EvalStore,
-) -> SmtEncoder<'ctx> {
-    let mut enc = SmtEncoder::new(ctx);
-    // Baseline-compatible: the perf patch changes the production command path
-    // to skip Z3 encoding, but the benchmark commit should compile before that
-    // API exists.
-    enc.assert_rbac_axioms(store);
-    enc
+fn access_model(store: &pallograph::engine::EvalStore) -> RbacAccessModel {
+    RbacAccessModel::from_store(store)
 }
 
 fn z3_encoder<'ctx>(
@@ -90,14 +83,7 @@ fn bench_store(c: &mut Criterion, name: &str, store: pallograph::engine::EvalSto
     group.measurement_time(Duration::from_secs(10));
 
     group.bench_function("load_access_model", |b| {
-        b.iter_batched(
-            z3::Config::new,
-            |cfg| {
-                let ctx = z3::Context::new(&cfg);
-                black_box(facts_encoder(&ctx, &store));
-            },
-            BatchSize::SmallInput,
-        )
+        b.iter(|| black_box(access_model(&store)))
     });
 
     group.bench_function("assert_rbac_axioms_z3", |b| {
@@ -112,35 +98,23 @@ fn bench_store(c: &mut Criterion, name: &str, store: pallograph::engine::EvalSto
     });
 
     group.bench_function("load_access_model_and_cluster_admin", |b| {
-        b.iter_batched(
-            z3::Config::new,
-            |cfg| {
-                let ctx = z3::Context::new(&cfg);
-                let enc = facts_encoder(&ctx, &store);
-                black_box(
-                    enc.direct_violations("", "*", "*", "*").len()
-                        + enc.check_reaches("", "*", "*", "*", &[], false).len(),
-                );
-            },
-            BatchSize::SmallInput,
-        )
+        b.iter(|| {
+            let enc = access_model(&store);
+            black_box(
+                enc.direct_violations("", "*", "*", "*").len()
+                    + enc.check_reaches("", "*", "*", "*", &[], false).len(),
+            );
+        })
     });
 
     group.bench_function("load_access_model_and_namespace_isolation", |b| {
-        b.iter_batched(
-            z3::Config::new,
-            |cfg| {
-                let ctx = z3::Context::new(&cfg);
-                let enc = facts_encoder(&ctx, &store);
-                black_box(enc.check_namespace_isolation("default", &[]).len());
-            },
-            BatchSize::SmallInput,
-        )
+        b.iter(|| {
+            let enc = access_model(&store);
+            black_box(enc.check_namespace_isolation("default", &[]).len());
+        })
     });
 
-    let cfg = z3::Config::new();
-    let ctx = z3::Context::new(&cfg);
-    let enc = facts_encoder(&ctx, &store);
+    let enc = access_model(&store);
 
     group.bench_function("direct_cluster_admin", |b| {
         b.iter(|| black_box(enc.direct_violations("", "*", "*", "*")))
@@ -186,13 +160,8 @@ fn bench_backend_pipeline(
                     || (edb.to_vec(), rules.to_vec()),
                     |(edb_c, rules_c)| {
                         let store = evaluate_with_backend(backend, &edb_c, &rules_c);
-                        let cfg = z3::Config::new();
-                        let ctx = z3::Context::new(&cfg);
-                        let enc = facts_encoder(&ctx, &store);
-                        black_box(
-                            enc.can_entries.get("").map_or(0, Vec::len)
-                                + enc.eff_entries.get("").map_or(0, Vec::len),
-                        );
+                        let enc = access_model(&store);
+                        black_box(enc.direct_permissions.len() + enc.effective_permissions.len());
                     },
                     BatchSize::SmallInput,
                 )
@@ -206,9 +175,7 @@ fn bench_backend_pipeline(
                     || (edb.to_vec(), rules.to_vec()),
                     |(edb_c, rules_c)| {
                         let store = evaluate_with_backend(backend, &edb_c, &rules_c);
-                        let cfg = z3::Config::new();
-                        let ctx = z3::Context::new(&cfg);
-                        let enc = facts_encoder(&ctx, &store);
+                        let enc = access_model(&store);
                         black_box(
                             enc.direct_violations("", "*", "*", "*").len()
                                 + enc.check_reaches("", "*", "*", "*", &[], false).len(),
