@@ -18,6 +18,7 @@ use crate::edb::{K8sManifestsSource, ShellSource};
 use crate::engine::{Engine, EvalStore, RelationDoc};
 use crate::load;
 use crate::query;
+use crate::rbac;
 use crate::smt;
 use crate::snapshot::{Diff, Scope, Snapshot};
 
@@ -207,12 +208,12 @@ fn print_help() {
         "  \\access-diff <name1> <name2>           — diff RBAC can/5 between two named snapshots"
     );
     println!();
-    println!("SMT / Z3");
+    println!("RBAC access / SMT / Z3");
     println!(
-        "  \\smt check_access <ns> <r> <v> [p...] — find principals in can(_,ns,r,v) outside expected set (ns=\"\" for cluster-wide)"
+        "  \\smt check_access <ns> <r> <v> [p...] — find RBAC principals in can(_,ns,r,v) outside expected set (ns=\"\" for cluster-wide)"
     );
     println!(
-        "  \\smt reaches <ns> <ag> <r> <v> [p...] — find principals that effective_can reach (ag,r,v), escalation-aware"
+        "  \\smt reaches <ns> <ag> <r> <v> [p...] — find RBAC principals that effective_can reach (ag,r,v), escalation-aware"
     );
     println!(
         "  \\smt cluster-admin [p...]              — shorthand for reaches \"\" \"*\" \"*\" \"*\""
@@ -1227,7 +1228,7 @@ fn extract_vars(body: &str) -> Vec<String> {
     vars
 }
 
-fn fmt_binding(p: &smt::AccessPath) -> String {
+fn fmt_binding(p: &rbac::AccessPath) -> String {
     let ns = if p.binding_namespace.is_empty() {
         String::new()
     } else {
@@ -1248,7 +1249,7 @@ fn mech_str(mech: &str) -> String {
 }
 
 /// Serialize an access path to a stable string key for grouping.
-fn path_sig(p: &smt::AccessPath) -> String {
+fn path_sig(p: &rbac::AccessPath) -> String {
     let hops: String = p
         .hops
         .iter()
@@ -1261,10 +1262,10 @@ fn path_sig(p: &smt::AccessPath) -> String {
     )
 }
 
-fn print_violation_paths(paths: &[smt::AccessPath]) {
+fn print_violation_paths(paths: &[rbac::AccessPath]) {
     // Group paths by identical hop chain: print "via X [mech]" once, then list
     // all bindings of the target underneath it rather than repeating the header.
-    let mut by_hops: BTreeMap<&Vec<(String, String)>, Vec<&smt::AccessPath>> = BTreeMap::new();
+    let mut by_hops: BTreeMap<&Vec<(String, String)>, Vec<&rbac::AccessPath>> = BTreeMap::new();
     for p in paths {
         by_hops.entry(&p.hops).or_default().push(p);
     }
@@ -1291,10 +1292,10 @@ fn print_violation_paths(paths: &[smt::AccessPath]) {
 /// This avoids repeating the same path for every one of N principals.
 /// `kind_of` annotates non-serviceaccount principals with their subject kind.
 /// Pass `|_| ""` to suppress annotation.
-fn print_reaches_grouped(violations: &[smt::Violation], kind_of: &dyn Fn(&str) -> &'static str) {
+fn print_reaches_grouped(violations: &[rbac::Violation], kind_of: &dyn Fn(&str) -> &'static str) {
     // Preserve first-seen order for paths; use a Vec<key> + BTreeMap for lookup.
     let mut order: Vec<String> = Vec::new();
-    let mut groups: BTreeMap<String, (Vec<smt::AccessPath>, Vec<String>)> = BTreeMap::new();
+    let mut groups: BTreeMap<String, (Vec<rbac::AccessPath>, Vec<String>)> = BTreeMap::new();
     for v in violations {
         let sig: String = {
             let mut parts: Vec<String> = v.paths.iter().map(path_sig).collect();
@@ -1524,7 +1525,7 @@ fn find_via_targets(
 }
 
 /// JSON form of a violation's explaining binding paths (ndjson output).
-fn paths_json(paths: &[smt::AccessPath]) -> Vec<serde_json::Value> {
+fn paths_json(paths: &[rbac::AccessPath]) -> Vec<serde_json::Value> {
     paths
         .iter()
         .map(|p| {
@@ -1574,12 +1575,9 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                 .collect();
             let expected: Vec<&str> = expected_owned.iter().map(String::as_str).collect();
 
-            let cfg = z3::Config::new();
-            let ctx = z3::Context::new(&cfg);
-            let mut enc = smt::SmtEncoder::new(&ctx);
-            enc.assert_rbac_axioms(store);
+            let model = rbac::RbacAccessModel::from_store(store);
 
-            let violations = enc.check_access_invariant(namespace, resource, verb, &expected);
+            let violations = model.check_access_invariant(namespace, resource, verb, &expected);
             if violations.is_empty() {
                 if ndjson {
                     println!(
@@ -1667,14 +1665,11 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
             };
             let expected: Vec<&str> = expected.iter().map(String::as_str).collect();
 
-            let cfg = z3::Config::new();
-            let ctx = z3::Context::new(&cfg);
-            let mut enc = smt::SmtEncoder::new(&ctx);
-            enc.assert_rbac_axioms(store);
+            let mut model = rbac::RbacAccessModel::from_store(store);
 
-            enc.include_builtins = include_builtins;
-            let direct = enc.direct_violations(namespace, apigroup, resource, verb);
-            let via = enc.check_reaches(
+            model.include_builtins = include_builtins;
+            let direct = model.direct_violations(namespace, apigroup, resource, verb);
+            let via = model.check_reaches(
                 namespace,
                 apigroup,
                 resource,
@@ -1697,7 +1692,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                 true
             } else {
                 if ndjson {
-                    let emit_violations = |violations: &[smt::Violation], kind: &str| {
+                    let emit_violations = |violations: &[rbac::Violation], kind: &str| {
                         for v in violations {
                             println!(
                                 "{}",
@@ -1722,7 +1717,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                     println!(
                         "FAIL  {total} principal(s) can reach ({namespace:?}, {apigroup:?}, {resource:?}, {verb:?}):"
                     );
-                    let kind_of = |p: &str| enc.principal_kind(p);
+                    let kind_of = |p: &str| model.principal_kind(p);
                     if !direct.is_empty() {
                         println!("  direct ({}):", direct.len());
                         print_reaches_grouped(&direct, &kind_of);
@@ -1741,7 +1736,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
             let Some(ns_raw) = args.next() else {
                 eprintln!("Usage: ::smt check_isolation <namespace> [allowed_principal ...]");
                 eprintln!(
-                    "       Proves that ONLY the listed principals have any access in <namespace>."
+                    "       Checks that only the listed principals have any RBAC access in <namespace>."
                 );
                 return true;
             };
@@ -1752,12 +1747,9 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                 .collect();
             let allowed: Vec<&str> = allowed_owned.iter().map(String::as_str).collect();
 
-            let cfg = z3::Config::new();
-            let ctx = z3::Context::new(&cfg);
-            let mut enc = smt::SmtEncoder::new(&ctx);
-            enc.assert_rbac_axioms(store);
+            let model = rbac::RbacAccessModel::from_store(store);
 
-            let violations = enc.check_namespace_isolation(namespace, &allowed);
+            let violations = model.check_namespace_isolation(namespace, &allowed);
             if violations.is_empty() {
                 if ndjson {
                     println!(
@@ -1766,7 +1758,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                     );
                 } else {
                     println!(
-                        "PASS  namespace {namespace:?} is isolated to the expected principals (Z3 UNSAT proof)"
+                        "PASS  namespace {namespace:?} is isolated to the expected principals"
                     );
                 }
                 true
@@ -2575,7 +2567,7 @@ mod query_helper_tests {
 #[cfg(test)]
 mod binding_format_tests {
     use super::fmt_binding;
-    use crate::smt::AccessPath;
+    use crate::rbac::AccessPath;
 
     fn path(binding_kind: &'static str, ns: &str, role_kind: &'static str) -> AccessPath {
         AccessPath {
