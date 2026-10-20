@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use mangle_common::Value;
 use z3::ast::String as Z3String;
@@ -9,9 +9,13 @@ use z3::ast::{Ast, Dynamic, Int};
 use z3::{FuncDecl, RecFuncDecl, Solver, Sort};
 
 use crate::engine::EvalStore;
+use crate::rbac::PermissionEntry;
 pub mod diff;
 pub mod rbac_model;
 pub mod scheduling;
+
+/// Escalation targets per effective permission entry.
+pub type EscalationVia = HashMap<PermissionEntry, BTreeSet<String>>;
 
 /// Encodes Mangle ground facts as Z3 assertions and exposes the solver for
 /// constraint checking.
@@ -28,6 +32,9 @@ pub struct SmtEncoder<'ctx> {
     pub can_entries: HashMap<String, Vec<(String, String, String, String, String)>>,
     /// (principal, namespace, apigroup, resource, verb) entries for effective_can, same keying.
     pub eff_entries: HashMap<String, Vec<(String, String, String, String, String)>>,
+    /// For effective_can entries reached through escalation, the identities they
+    /// were reached through, same keying.
+    pub escalation_via: HashMap<String, EscalationVia>,
 }
 
 impl<'ctx> SmtEncoder<'ctx> {
@@ -40,6 +47,7 @@ impl<'ctx> SmtEncoder<'ctx> {
             facts: HashMap::new(),
             can_entries: HashMap::new(),
             eff_entries: HashMap::new(),
+            escalation_via: HashMap::new(),
         }
     }
 

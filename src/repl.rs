@@ -1392,13 +1392,11 @@ fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label:
             "  EFFECTIVE GAINED ({}) [escalation-aware]:",
             eff_gained.len()
         );
-        let via_rel = rbac::facts::relation_name("indirect_perm", after_label);
-        print_eff_diffs_grouped(&eff_gained, &via_rel, &enc.facts);
+        print_eff_diffs_grouped(&eff_gained, enc.escalation_via.get(after_label));
     }
     if !eff_lost.is_empty() {
         println!("  EFFECTIVE LOST ({}) [escalation-aware]:", eff_lost.len());
-        let via_rel = rbac::facts::relation_name("indirect_perm", before_label);
-        print_eff_diffs_grouped(&eff_lost, &via_rel, &enc.facts);
+        print_eff_diffs_grouped(&eff_lost, enc.escalation_via.get(before_label));
     }
 }
 
@@ -1435,38 +1433,37 @@ fn per_principal_verdicts(
 }
 
 /// Group effective-can diffs by (principal, escalation-target) and print.
-/// Looks up `indirect_perm` facts to find which SA each permission came
-/// through. Permissions not found there were gained directly.
+/// `escalation_via` says which identities each permission was reached
+/// through; permissions not found there were gained directly.
 fn print_eff_diffs_grouped(
     diffs: &[smt::diff::EffDiff],
-    via_rel: &str,
-    facts: &HashMap<String, Vec<Vec<mangle_common::Value>>>,
+    escalation_via: Option<&smt::EscalationVia>,
 ) {
     // (principal, target) → indices into diffs. Empty target = direct grant.
     let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
 
     for (i, d) in diffs.iter().enumerate() {
-        let targets = find_via_targets(
-            facts,
-            via_rel,
-            &d.principal,
-            &d.namespace,
-            &d.apigroup,
-            &d.resource,
-            &d.verb,
+        let key = (
+            d.principal.clone(),
+            d.namespace.clone(),
+            d.apigroup.clone(),
+            d.resource.clone(),
+            d.verb.clone(),
         );
-        if targets.is_empty() {
-            groups
+        let targets = escalation_via.and_then(|via| via.get(&key));
+        match targets {
+            Some(targets) if !targets.is_empty() => {
+                for target in targets {
+                    groups
+                        .entry((d.principal.clone(), target.clone()))
+                        .or_default()
+                        .push(i);
+                }
+            }
+            _ => groups
                 .entry((d.principal.clone(), String::new()))
                 .or_default()
-                .push(i);
-        } else {
-            for target in targets {
-                groups
-                    .entry((d.principal.clone(), target))
-                    .or_default()
-                    .push(i);
-            }
+                .push(i),
         }
     }
 
@@ -1484,44 +1481,6 @@ fn print_eff_diffs_grouped(
             );
         }
     }
-}
-
-/// Return all Target values from `indirect_perm` matching the given 5-tuple.
-fn find_via_targets(
-    facts: &HashMap<String, Vec<Vec<mangle_common::Value>>>,
-    rel_name: &str,
-    principal: &str,
-    namespace: &str,
-    apigroup: &str,
-    resource: &str,
-    verb: &str,
-) -> Vec<String> {
-    use mangle_common::Value;
-    facts
-        .get(rel_name)
-        .into_iter()
-        .flatten()
-        .filter_map(|row| {
-            if let [
-                Value::String(p),
-                Value::String(ns),
-                Value::String(ag),
-                Value::String(r),
-                Value::String(v),
-                Value::String(target),
-            ] = row.as_slice()
-            {
-                if p == principal && ns == namespace && ag == apigroup && r == resource && v == verb
-                {
-                    Some(target.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .collect()
 }
 
 /// JSON form of a violation's explaining binding paths (ndjson output).

@@ -156,6 +156,19 @@ mod tests {
     use crate::engine::{Engine, InterpreterBackend};
     use crate::snapshot::{Scope, Snapshot};
 
+    /// A `direct_perm` row granting a User subject, for any object name.
+    fn user_grant(user: &str, ns: &str, apigroup: &str, resource: &str, verb: &str) -> Vec<Value> {
+        vec![
+            Value::String(user.into()),
+            Value::Name("/user".into()),
+            Value::String(ns.into()),
+            Value::String(apigroup.into()),
+            Value::String(resource.into()),
+            Value::Name("/any".into()),
+            Value::String(verb.into()),
+        ]
+    }
+
     fn load_engine() -> Engine {
         let mut edb = MemStore::new();
         edb::load_from_manifests(&mut edb, vec!["fixtures/testdata/small".to_string()])
@@ -197,13 +210,7 @@ mod tests {
             let mut store = MemStore::new();
             store.add_fact(
                 "direct_perm",
-                vec![
-                    Value::String("alice".into()),
-                    Value::String("default".into()),
-                    Value::String("".into()),
-                    Value::String("pods".into()),
-                    Value::String("get".into()),
-                ],
+                user_grant("alice", "default", "", "pods", "get"),
             );
             Snapshot::from_store(&store, Scope::All)
         };
@@ -236,13 +243,7 @@ mod tests {
             let mut store = MemStore::new();
             store.add_fact(
                 "direct_perm",
-                vec![
-                    Value::String("alice".into()),
-                    Value::String("default".into()),
-                    Value::String("".into()),
-                    Value::String("pods".into()),
-                    Value::String("*".into()), // wildcard verb
-                ],
+                user_grant("alice", "default", "", "pods", "*"),
             );
             Snapshot::from_store(&store, Scope::All)
         };
@@ -252,24 +253,12 @@ mod tests {
             // Same wildcard grant as before.
             store.add_fact(
                 "direct_perm",
-                vec![
-                    Value::String("alice".into()),
-                    Value::String("default".into()),
-                    Value::String("".into()),
-                    Value::String("pods".into()),
-                    Value::String("*".into()),
-                ],
+                user_grant("alice", "default", "", "pods", "*"),
             );
             // Additionally: an explicit narrow grant (subsumed by the wildcard above).
             store.add_fact(
                 "direct_perm",
-                vec![
-                    Value::String("alice".into()),
-                    Value::String("default".into()),
-                    Value::String("".into()),
-                    Value::String("pods".into()),
-                    Value::String("get".into()),
-                ],
+                user_grant("alice", "default", "", "pods", "get"),
             );
             Snapshot::from_store(&store, Scope::All)
         };
@@ -295,5 +284,34 @@ mod tests {
                 ))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn rbac_axioms_read_the_small_fixture() {
+        // can, effective_can and the access-diff escalation labels are built
+        // from relations scanned by name; an empty result means a rename or
+        // reshape went unnoticed.
+        let engine = load_engine();
+        let eval = engine.evaluate().expect("evaluate");
+
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let mut enc = SmtEncoder::new(&ctx);
+        enc.assert_rbac_axioms(&eval);
+
+        let can = &enc.can_entries[""];
+        let effective = &enc.eff_entries[""];
+        assert!(!can.is_empty(), "can has no entries");
+        assert!(
+            effective.len() > can.len(),
+            "escalation added nothing to effective_can"
+        );
+        assert!(
+            !enc.escalation_via[""].is_empty(),
+            "no escalation targets recorded"
+        );
+        for rel in ["direct_perm", "principal_subject", "controls_identity"] {
+            assert!(enc.facts.contains_key(rel), "{rel} not loaded");
+        }
     }
 }

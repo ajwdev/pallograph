@@ -3,21 +3,21 @@
 
 // RBAC model for Z3 using RecFuncDecl.
 //
-// Mangle provides the primitive IDB facts: role/binding relations,
-// ClusterRole aggregation closure, group memberships, escalation closure.
-// This module assembles those facts into two Z3 functions:
+// Mangle provides the derived facts (IDB): grants per binding subject
+// (direct_perm), the subjects each principal acts as (principal_subject) and
+// the escalation closure (controls_identity, controls_group).
+// `PermissionTables` joins them, and this module turns the result into two Z3
+// functions:
 //
 //   can(principal, namespace, apigroup, resource, verb) → Bool
-//     True when the RBAC binding chain grants the permission.
-//     Encodes three Kubernetes binding paths:
-//       1. RoleBinding → Role
-//       2. RoleBinding → ClusterRole (namespace-scoped)
-//       3. ClusterRoleBinding → ClusterRole (applies in every namespace)
+//     True when some binding grants the permission to the principal, itself
+//     or through one of its groups. Groups named by a binding are principals
+//     too (see `PermissionTables`).
 //     Wildcard matching ("*" in any position) is modeled in Z3 via `matches`.
 //
-//   effective_can(principal, namespace, resource, verb) → Bool
-//     Like can/5 but collapses apiGroup and folds in escalation paths from
-//     Mangle's `controls_identity` transitive closure.
+//   effective_can(principal, namespace, apigroup, resource, verb) → Bool
+//     Like can/5 but folds in what escalation reaches through
+//     controls_identity and controls_group.
 //
 // Both functions are defined as Z3 RecFuncDecls: finite case analyses with no
 // quantifiers. This avoids the quantifier-instantiation overhead of the
@@ -34,9 +34,7 @@ use z3::{RecFuncDecl, Sort};
 
 use super::SmtEncoder;
 use crate::engine::EvalStore;
-use crate::rbac::facts::{
-    compute_subject_in_crb, compute_subject_in_rb, effective_permission_entries, relation_name,
-};
+use crate::rbac::facts::{PermissionTables, relation_name};
 
 impl<'ctx> SmtEncoder<'ctx> {
     /// Load Mangle RBAC primitives and define `can` and `effective_can` as
@@ -63,32 +61,31 @@ impl<'ctx> SmtEncoder<'ctx> {
     }
 
     fn assert_rbac_axioms_named<F: Fn(&str) -> Vec<Vec<Value>>>(&mut self, scan: F, suffix: &str) {
-        let subject_in_rb = compute_subject_in_rb(&scan);
-        let subject_in_crb = compute_subject_in_crb(&scan);
+        let tables = PermissionTables::from_scan(&scan);
 
-        let direct_perm = scan("direct_perm");
-        let indirect_perm = scan("indirect_perm");
-        let (can_entries, eff_entries) = effective_permission_entries(&direct_perm, &indirect_perm);
-
-        for rel in &["user_groups", "controls_identity"] {
+        for rel in [
+            "direct_perm",
+            "principal_subject",
+            "controls_identity",
+            "controls_group",
+        ] {
             self.load_relation(&relation_name(rel, suffix), &scan(rel));
         }
-        self.load_relation(&relation_name("direct_perm", suffix), &direct_perm);
-        self.load_relation(&relation_name("indirect_perm", suffix), &indirect_perm);
-        self.load_relation(&relation_name("subject_in_rb", suffix), &subject_in_rb);
-        self.load_relation(&relation_name("subject_in_crb", suffix), &subject_in_crb);
 
-        let can_fn = build_can_rec_func(self.ctx, &relation_name("can", suffix), &can_entries);
+        let can_fn = build_can_rec_func(self.ctx, &relation_name("can", suffix), &tables.direct);
         let eff_fn = build_effective_can_rec_func(
             self.ctx,
             &relation_name("effective_can", suffix),
-            &eff_entries,
+            &tables.effective,
         );
         self.rec_decls.insert(relation_name("can", suffix), can_fn);
         self.rec_decls
             .insert(relation_name("effective_can", suffix), eff_fn);
-        self.can_entries.insert(suffix.to_string(), can_entries);
-        self.eff_entries.insert(suffix.to_string(), eff_entries);
+        self.can_entries.insert(suffix.to_string(), tables.direct);
+        self.eff_entries
+            .insert(suffix.to_string(), tables.effective);
+        self.escalation_via
+            .insert(suffix.to_string(), tables.escalation_via);
     }
 }
 

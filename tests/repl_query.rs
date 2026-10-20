@@ -65,7 +65,7 @@ fn default_listing_names_columns() {
     let (stdout, _) = run_session(&format!("{ADMIN}\n::quit\n"));
     assert!(
         stdout.contains(
-            r#"Principal = "admin@example.com", Namespace = "", ApiGroup = "*", Resource = "*", Verb = "*""#
+            r#"Principal = "admin@example.com", Kind = /user, Namespace = "", ApiGroup = "*", Resource = "*", ResourceName = /any, Verb = "*""#
         ),
         "stdout: {stdout}"
     );
@@ -75,7 +75,7 @@ fn default_listing_names_columns() {
 fn compact_format_prints_tuples() {
     let (stdout, _) = run_session(&format!("\\format compact\n{ADMIN}\n::quit\n"));
     assert!(
-        stdout.contains(r#"direct_perm("admin@example.com", "", "*", "*", "*")"#),
+        stdout.contains(r#"direct_perm("admin@example.com", /user, "", "*", "*", /any, "*")"#),
         "stdout: {stdout}"
     );
     assert!(!stdout.contains("Principal ="), "stdout: {stdout}");
@@ -110,10 +110,11 @@ fn unknown_relation_suggests_near_names() {
 
 #[test]
 fn too_many_arguments_is_an_error() {
-    let (stdout, stderr) =
-        run_session("?- direct_perm(\"a\", \"b\", \"c\", \"d\", \"e\", \"f\")\n::quit\n");
+    let (stdout, stderr) = run_session(
+        "?- direct_perm(\"a\", \"b\", \"c\", \"d\", \"e\", \"f\", \"g\", \"h\")\n::quit\n",
+    );
     assert!(
-        stderr.contains("direct_perm has 5 columns, got 6 arguments."),
+        stderr.contains("direct_perm has 7 columns, got 8 arguments."),
         "stderr: {stderr}"
     );
     assert!(!stdout.contains("Principal ="), "stdout: {stdout}");
