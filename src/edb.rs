@@ -304,13 +304,14 @@ fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str
 ///
 /// The sel_obj_candidate Case 2 rule in labels.mg (Namespace="") then pairs these
 /// selectors against all cluster-scoped objects, which includes ClusterRoles.
-/// The aggregation rule in rbac.mg pins the object to "rbac.authorization.k8s.io/v1"
-/// / "ClusterRole" / "" to extract SourceCR from the matches.
+/// The aggregation rule in rbac_roles.mg pins the object to
+/// "rbac.authorization.k8s.io/v1" / "ClusterRole" / "" to extract the source
+/// ClusterRole from the matches.
 ///
-/// Note: an empty clusterRoleSelector (no matchLabels, no matchExpressions) produces
-/// no requirements, so selector_has_requirements is false and it matches nothing —
-/// fail-closed behavior. This is safer for security analysis than the K8s controller
-/// behavior (which treats an empty selector as "match all").
+/// Every entry also gets a `clusterrole_aggregation_selector(Name, Index)` fact,
+/// even one with no requirements. An empty selector (`{}` or `{matchLabels: {}}`)
+/// matches every ClusterRole in Kubernetes, and selector_matches cannot see a
+/// selector without requirements, so rbac_roles.mg uses this fact to handle it.
 fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Json) {
     let selectors = data
         .get("aggregationRule")
@@ -325,6 +326,13 @@ fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Js
             Value::String(i.to_string()),
             Value::String(name.to_string()),
         ];
+        store.add_fact(
+            "clusterrole_aggregation_selector",
+            vec![
+                Value::String(name.to_string()),
+                Value::String(i.to_string()),
+            ],
+        );
         emit_selector_requirements(store, owner, selector);
     }
 }
@@ -724,6 +732,8 @@ mod tests {
         );
     }
 
+    /// True if `role` grants `verb` on `resource` in `apigroup` for any object
+    /// name (ResourceName ""), after aggregation.
     fn has_clusterrole_perm(
         result: &crate::engine::EvalStore,
         role: &str,
@@ -736,6 +746,7 @@ mod tests {
                 Value::String(role.into()),
                 Value::String(apigroup.into()),
                 Value::String(resource.into()),
+                Value::String(String::new()),
                 Value::String(verb.into()),
             ]
         })
@@ -955,15 +966,178 @@ mod tests {
             .scan("clusterrole_perm")
             .iter()
             .filter(|row| {
-                row.len() == 4
+                row.len() == 5
                     && row[0] == Value::String("my-agg".into())
-                    && row[3] == Value::String("get".into())
+                    && row[4] == Value::String("get".into())
             })
             .count();
         assert_eq!(
             count, 1,
             "duplicate derivation paths must collapse to a single fact"
         );
+    }
+
+    // Replace semantics: when aggregation yields rules, they replace the
+    // aggregating role's own rules, as the aggregation controller does.
+    #[test]
+    fn aggregation_replaces_own_rules() {
+        let mut store = MemStore::new();
+
+        let obj: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": { "name": "my-agg" },
+            "aggregationRule": {
+                "clusterRoleSelectors": [{"matchLabels": {"agg-to-me": "true"}}]
+            },
+            "rules": [
+                {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}
+            ]
+        }))
+        .unwrap();
+        add_object(
+            &mut store,
+            &obj,
+            Some(("rbac.authorization.k8s.io/v1", "ClusterRole")),
+        );
+        add_clusterrole(
+            &mut store,
+            "src-cr",
+            json!({"agg-to-me": "true"}),
+            json!([
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+            ]),
+        );
+
+        let result = engine_from_store(store).evaluate().unwrap();
+
+        assert!(has_clusterrole_perm(&result, "my-agg", "", "pods", "get"));
+        assert!(
+            !has_clusterrole_perm(&result, "my-agg", "", "secrets", "get"),
+            "own rules are replaced when aggregation yields rules"
+        );
+    }
+
+    // When no matching role has rules, the aggregating role keeps its own.
+    #[test]
+    fn aggregation_without_source_rules_keeps_own_rules() {
+        let mut store = MemStore::new();
+
+        let obj: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": { "name": "my-agg" },
+            "aggregationRule": {
+                "clusterRoleSelectors": [{"matchLabels": {"agg-to-me": "true"}}]
+            },
+            "rules": [
+                {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}
+            ]
+        }))
+        .unwrap();
+        add_object(
+            &mut store,
+            &obj,
+            Some(("rbac.authorization.k8s.io/v1", "ClusterRole")),
+        );
+        add_clusterrole(
+            &mut store,
+            "empty-src",
+            json!({"agg-to-me": "true"}),
+            json!([]),
+        );
+
+        let result = engine_from_store(store).evaluate().unwrap();
+
+        assert!(has_clusterrole_perm(
+            &result, "my-agg", "", "secrets", "get"
+        ));
+    }
+
+    // Chained aggregation: a source that is itself aggregated contributes its
+    // aggregated rules, not its own.
+    #[test]
+    fn aggregation_chains_through_aggregated_sources() {
+        let mut store = MemStore::new();
+
+        add_aggregating_clusterrole(
+            &mut store,
+            "top",
+            json!([{"matchLabels": {"to-top": "true"}}]),
+        );
+        let middle: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": { "name": "middle", "labels": {"to-top": "true"} },
+            "aggregationRule": {
+                "clusterRoleSelectors": [{"matchLabels": {"to-middle": "true"}}]
+            },
+            "rules": [
+                {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}
+            ]
+        }))
+        .unwrap();
+        add_object(
+            &mut store,
+            &middle,
+            Some(("rbac.authorization.k8s.io/v1", "ClusterRole")),
+        );
+        add_clusterrole(
+            &mut store,
+            "leaf",
+            json!({"to-middle": "true"}),
+            json!([
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+            ]),
+        );
+
+        let result = engine_from_store(store).evaluate().unwrap();
+
+        assert!(has_clusterrole_perm(&result, "top", "", "pods", "get"));
+        assert!(!has_clusterrole_perm(&result, "top", "", "secrets", "get"));
+    }
+
+    // An empty selector, {} or {matchLabels: {}}, matches every ClusterRole
+    // except the aggregating role itself.
+    #[test]
+    fn aggregation_empty_selector_matches_every_clusterrole() {
+        for selector in [json!({}), json!({"matchLabels": {}})] {
+            let mut store = MemStore::new();
+
+            add_aggregating_clusterrole(&mut store, "everything", json!([selector]));
+            add_clusterrole(
+                &mut store,
+                "unlabelled",
+                json!({}),
+                json!([
+                    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+                ]),
+            );
+            add_clusterrole(
+                &mut store,
+                "labelled",
+                json!({"any": "label"}),
+                json!([
+                    {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["list"]}
+                ]),
+            );
+
+            let result = engine_from_store(store).evaluate().unwrap();
+
+            assert!(
+                has_clusterrole_perm(&result, "everything", "", "pods", "get"),
+                "{selector} should match an unlabelled ClusterRole"
+            );
+            assert!(
+                has_clusterrole_perm(&result, "everything", "apps", "deployments", "list"),
+                "{selector} should match a labelled ClusterRole"
+            );
+            let aggregates_itself = result.scan("clusterrole_aggregates").iter().any(|row| {
+                row[0] == Value::String("everything".into())
+                    && row[1] == Value::String("everything".into())
+            });
+            assert!(!aggregates_itself, "{selector} must not match its own role");
+        }
     }
 
     fn kinds(objects: &[(DynamicObject, Option<(String, String)>)]) -> Vec<&str> {

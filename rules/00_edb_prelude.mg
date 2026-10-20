@@ -50,7 +50,7 @@ Decl pod_anti_affinity_req(Namespace, Name, MatchKey, MatchValue, TopologyKey)
 
 Decl user_groups(Username, Group)
   descr [
-    doc("User-to-group membership, one row per membership."),
+    doc("User-to-group membership supplied by the caller, one row per membership; principal_group adds the groups Kubernetes derives."),
     arg(Username, "user name"),
     arg(Group, "group the user belongs to")
   ]
@@ -148,6 +148,14 @@ Decl selector_expr_notexists(ApiVersion, Kind, Namespace, Name, LabelKey)
     arg(LabelKey, "label key that must not exist")
   ]
   bound [/string, /string, /string, /string, /string].
+
+Decl clusterrole_aggregation_selector(ClusterRole, Index)
+  descr [
+    doc("ClusterRole aggregationRule.clusterRoleSelectors entries, one row per entry, including empty ones."),
+    arg(ClusterRole, "aggregating ClusterRole name"),
+    arg(Index, "entry index as a string; the Namespace of its synthetic pallograph.dev/agg selector owner")
+  ]
+  bound [/string, /string].
 
 Decl nodepool_requirement(Pool, Key, Operator, Value)
   descr [

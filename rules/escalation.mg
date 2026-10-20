@@ -12,78 +12,83 @@
 #   3. Pod exec/attach — create on pods/exec or pods/attach exposes mounted token
 #   4. Pod creation   — create on pods lets you run as any SA in that namespace
 #
-# Wildcard handling: perm/5 stores "*" literals for apiGroup, resource, and verb.
-# Permission guards below check all 8 combinations (2^3) of wildcard vs literal
-# for each (apiGroup, resource, verb) tuple escalation cares about.
+# Wildcard handling: direct_perm/6 stores "*" literals for apiGroup, resource,
+# and verb. Permission guards below check all 8 combinations (2^3) of wildcard
+# vs literal for each (apiGroup, resource, verb) tuple escalation cares about.
 # Each guard rule is safe Datalog: every head variable is bound by the body.
+#
+# The ResourceName column is ignored (_): a grant limited to some object names
+# still counts. That over-approximates, the safe side for finding escalation
+# paths.
 
 # ---- Permission guards ----
 #
 # perm_X(P, Ns): P has permission X in Ns under any combination of wildcards.
-# Format: can(P, Ns, ApiGroup, Resource, Verb) with "*" matching any value.
+# Format: direct_perm(P, Ns, ApiGroup, Resource, ResourceName, Verb) with "*"
+# matching any value.
 
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "",  "serviceaccounts/token", "create").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "",  "serviceaccounts/token", "*").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "",  "*",                     "create").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "",  "*",                     "*").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "*", "serviceaccounts/token", "create").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "*", "serviceaccounts/token", "*").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "*", "*",                     "create").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "*", "*",                     "*").
+perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "",  "serviceaccounts/token", _, "create").
+perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "",  "serviceaccounts/token", _, "*").
+perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "",  "*",                     _, "create").
+perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "",  "*",                     _, "*").
+perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "*", "serviceaccounts/token", _, "create").
+perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "*", "serviceaccounts/token", _, "*").
+perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "*", "*",                     _, "create").
+perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "*", "*",                     _, "*").
 
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "",  "pods/exec", "create").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "",  "pods/exec", "*").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "",  "*",         "create").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "",  "*",         "*").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "*", "pods/exec", "create").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "*", "pods/exec", "*").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "*", "*",         "create").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "*", "*",         "*").
+perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "",  "pods/exec", _, "create").
+perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "",  "pods/exec", _, "*").
+perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "",  "*",         _, "create").
+perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "",  "*",         _, "*").
+perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "*", "pods/exec", _, "create").
+perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "*", "pods/exec", _, "*").
+perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "*", "*",         _, "create").
+perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "*", "*",         _, "*").
 
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "",  "pods/attach", "create").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "",  "pods/attach", "*").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "",  "*",           "create").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "",  "*",           "*").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "*", "pods/attach", "create").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "*", "pods/attach", "*").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "*", "*",           "create").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "*", "*",           "*").
+perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "",  "pods/attach", _, "create").
+perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "",  "pods/attach", _, "*").
+perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "",  "*",           _, "create").
+perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "",  "*",           _, "*").
+perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "*", "pods/attach", _, "create").
+perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "*", "pods/attach", _, "*").
+perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "*", "*",           _, "create").
+perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "*", "*",           _, "*").
 
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "",  "pods", "create").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "",  "pods", "*").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "",  "*",    "create").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "",  "*",    "*").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "*", "pods", "create").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "*", "pods", "*").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "*", "*",    "create").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "*", "*",    "*").
+perm_pods_create(P, Ns) :- direct_perm(P, Ns, "",  "pods", _, "create").
+perm_pods_create(P, Ns) :- direct_perm(P, Ns, "",  "pods", _, "*").
+perm_pods_create(P, Ns) :- direct_perm(P, Ns, "",  "*",    _, "create").
+perm_pods_create(P, Ns) :- direct_perm(P, Ns, "",  "*",    _, "*").
+perm_pods_create(P, Ns) :- direct_perm(P, Ns, "*", "pods", _, "create").
+perm_pods_create(P, Ns) :- direct_perm(P, Ns, "*", "pods", _, "*").
+perm_pods_create(P, Ns) :- direct_perm(P, Ns, "*", "*",    _, "create").
+perm_pods_create(P, Ns) :- direct_perm(P, Ns, "*", "*",    _, "*").
 
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "serviceaccounts", "impersonate").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "serviceaccounts", "*").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",               "impersonate").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",               "*").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "serviceaccounts", "impersonate").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "serviceaccounts", "*").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",               "impersonate").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",               "*").
+perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "serviceaccounts", _, "impersonate").
+perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "serviceaccounts", _, "*").
+perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",               _, "impersonate").
+perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",               _, "*").
+perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "serviceaccounts", _, "impersonate").
+perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "serviceaccounts", _, "*").
+perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",               _, "impersonate").
+perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",               _, "*").
 
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "users", "impersonate").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "users", "*").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",     "impersonate").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",     "*").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "users", "impersonate").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "users", "*").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",     "impersonate").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",     "*").
+perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "users", _, "impersonate").
+perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "users", _, "*").
+perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",     _, "impersonate").
+perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",     _, "*").
+perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "users", _, "impersonate").
+perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "users", _, "*").
+perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",     _, "impersonate").
+perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",     _, "*").
 
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "groups", "impersonate").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "groups", "*").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",      "impersonate").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",      "*").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "groups", "impersonate").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "groups", "*").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",      "impersonate").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",      "*").
+perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "groups", _, "impersonate").
+perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "groups", _, "*").
+perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",      _, "impersonate").
+perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",      _, "*").
+perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "groups", _, "impersonate").
+perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "groups", _, "*").
+perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",      _, "impersonate").
+perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",      _, "*").
 
 # ---- Escalation path helpers ----
 #
@@ -165,13 +170,16 @@ escalation_hop(P, Target) :-
     pod_creatable_sa(P, SANs, SAName)
     |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
 
+# Impersonating a user or group is only recorded when the target holds some
+# permission.
 escalation_hop(P, Target) :-
     perm_user_impersonate(P, _),
-    all_user_perm(Target, _, _, _, _).
+    known_principal(/user, Target),
+    direct_perm(Target, _, _, _, _, _).
 
 escalation_hop(P, Target) :-
     perm_group_impersonate(P, _),
-    all_group_perm(Target, _, _, _, _).
+    subject_perm(/group, Target, _, _, _, _, _).
 
 # ---- controls_identity ----
 #
@@ -210,5 +218,5 @@ Decl indirect_perm(Principal, Namespace, ApiGroup, Resource, Verb, ViaIdentity)
 
 indirect_perm(P, Ns, ApiGroup, Resource, Verb, Target) :-
     controls_identity(P, Target),
-    direct_perm(Target, Ns, ApiGroup, Resource, Verb).
+    direct_perm(Target, Ns, ApiGroup, Resource, _, Verb).
 
