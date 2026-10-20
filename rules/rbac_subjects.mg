@@ -9,6 +9,7 @@
 #   binding_subject/4, binding_roleref/4      (one shape for both binding kinds)
 #   service_account_principal/3               (SA namespace/name to username)
 #   known_principal/2, principal_group/2      (principals and their groups)
+#   principal_subject/3                       (the subjects a principal acts as)
 #
 # A subject is identified by a kind, one of /user, /group or /serviceaccount,
 # and a name. Kinds are kept apart because Kubernetes matches them
@@ -164,3 +165,31 @@ principal_group(Username, "system:authenticated") :-
 principal_group(Username, "system:unauthenticated") :-
     known_principal(/user, Username),
     Username = "system:anonymous".
+
+# A principal (a user or ServiceAccount username) matches binding subjects
+# of two shapes: a User or ServiceAccount subject naming it, and a Group
+# subject naming one of its groups. Grants live per subject in direct_perm,
+# so this relation is what expands a principal into everything it acts as:
+#
+#   principal_subject(P, Kind, Name), direct_perm(Name, Kind, ...)
+#
+# Only the kinds a principal is known by are listed: a direct_perm row for
+# (Kind, Name) comes from a binding subject, which makes (Kind, Name) a
+# known_principal, so no grant is missed. Groups are subjects but never
+# principals: nobody authenticates as a group.
+Decl principal_subject(Username, Kind, Name)
+  descr [
+    doc("Binding subjects a known user or ServiceAccount matches: itself, and each of its groups as /group."),
+    arg(Username, "user name or system:serviceaccount:<ns>:<name>"),
+    arg(Kind, "/user, /group or /serviceaccount"),
+    arg(Name, "Username itself for /user and /serviceaccount, else the group name")
+  ].
+
+principal_subject(Username, /user, Username) :-
+    known_principal(/user, Username).
+
+principal_subject(Username, /serviceaccount, Username) :-
+    known_principal(/serviceaccount, Username).
+
+principal_subject(Username, /group, Group) :-
+    principal_group(Username, Group).

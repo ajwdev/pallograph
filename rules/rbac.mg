@@ -2,89 +2,83 @@
 # authorization requests the way the kube-apiserver RBAC authorizer does.
 #
 # The model is split across three files:
-#   rbac_roles.mg     - what each Role and ClusterRole grants (role_perm,
-#                       clusterrole_perm, clusterrole_url_perm), including
+#   rbac_roles.mg     - what each Role and ClusterRole grants (role_rule,
+#                       clusterrole_rule, policy_rule_perm), including
 #                       ClusterRole aggregation
 #   rbac_subjects.mg  - who each binding applies to (binding_subject,
-#                       binding_roleref) and the groups principals are in
-#                       (principal_group)
-#   rbac.mg           - this file: subject_perm, subject_url_perm,
-#                       direct_perm and rbac_allowed
+#                       binding_roleref) and the subjects a principal acts
+#                       as (principal_group, principal_subject)
+#   rbac.mg           - this file: direct_perm, direct_url_perm and
+#                       rbac_allowed
 #
 # Facts loaded from the cluster or supplied by the caller (EDB) used here:
 #   access_request/9, access_request_group/2  - requests to decide
 #
 # Derived relations (IDB):
-#   subject_perm/7, subject_url_perm/4  (grants per binding subject)
-#   direct_perm/6                       (grants per principal, groups expanded)
-#   rbac_allowed/1                      (decisions for access_request)
+#   direct_perm/7, direct_url_perm/4  (grants per binding subject)
+#   rbac_allowed/1                    (decisions for access_request)
+#
+# Grants are kept per binding subject, not copied to every member of a
+# group: a grant to system:authenticated would otherwise be repeated for
+# every principal. To ask what a principal can do, join principal_subject
+# with direct_perm:
+#
+#   principal_subject(P, Kind, Name), direct_perm(Name, Kind, Ns, G, R, N, V)
 #
 # Wildcards ("*") are kept as literal strings in the permission relations and
-# only interpreted by rbac_allowed. A ResourceName of "" means any name.
+# only interpreted by rbac_allowed. A ResourceName of /any means any name.
 
 # ---- Grants per binding subject ----
+#
+# The subject name comes first in these relations because the planner looks
+# a relation up by the first argument already bound (or constant) and checks
+# the rest afterwards. Keyed on Kind, which only has three values, a join
+# would compare every request against almost every grant.
 
-Decl subject_perm(Kind, Name, Namespace, ApiGroup, Resource, ResourceName, Verb)
+Decl direct_perm(Principal, Kind, Namespace, ApiGroup, Resource, ResourceName, Verb)
   descr [
-    doc("Resource permissions each binding subject holds, before group membership is expanded."),
+    doc("Resource permissions each binding subject holds directly, before group membership or escalation; join principal_subject to expand groups."),
+    arg(Principal, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
     arg(Kind, "/user, /group or /serviceaccount"),
-    arg(Name, "user or group name, or system:serviceaccount:<ns>:<name>"),
     arg(Namespace, "namespace the grant applies in; empty for cluster-wide"),
     arg(ApiGroup, "API group; * is a literal wildcard"),
     arg(Resource, "resource or resource/subresource; * and */sub are literal wildcards"),
-    arg(ResourceName, "object name; empty for any name, * is a literal name"),
-    arg(Verb, "verb; * is a literal wildcard")
+    arg(ResourceName, "object name, or /any for every name; the empty name and * are literal names"),
+    arg(Verb, "verb, e.g. get/list/create; * is a literal wildcard")
   ].
 
 # RoleBinding to a Role: the Role lives in the binding's namespace, and the
 # grant applies there.
-subject_perm(Kind, Name, Namespace, ApiGroup, Resource, ResourceName, Verb) :-
+direct_perm(Name, Kind, Namespace, ApiGroup, Resource, ResourceName, Verb) :-
     binding_subject(Namespace, Binding, Kind, Name),
     binding_roleref(Namespace, Binding, "Role", Role),
-    role_perm(Namespace, Role, ApiGroup, Resource, ResourceName, Verb).
+    role_rule(Namespace, Role, Rule),
+    policy_rule_perm(Rule, ApiGroup, Resource, ResourceName, Verb).
 
 # RoleBinding to a ClusterRole applies in the binding's namespace;
 # ClusterRoleBinding (binding namespace "") applies cluster-wide.
-subject_perm(Kind, Name, Namespace, ApiGroup, Resource, ResourceName, Verb) :-
+direct_perm(Name, Kind, Namespace, ApiGroup, Resource, ResourceName, Verb) :-
     binding_subject(Namespace, Binding, Kind, Name),
     binding_roleref(Namespace, Binding, "ClusterRole", Role),
-    clusterrole_perm(Role, ApiGroup, Resource, ResourceName, Verb).
+    clusterrole_rule(Role, Rule),
+    policy_rule_perm(Rule, ApiGroup, Resource, ResourceName, Verb).
 
 # Non-resource requests are never namespaced, so the authorizer only reaches
 # URL rules through ClusterRoleBindings.
-Decl subject_url_perm(Kind, Name, Url, Verb)
+Decl direct_url_perm(Principal, Kind, Url, Verb)
   descr [
     doc("Non-resource URL permissions each binding subject holds via ClusterRoleBindings."),
+    arg(Principal, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
     arg(Kind, "/user, /group or /serviceaccount"),
-    arg(Name, "user or group name, or system:serviceaccount:<ns>:<name>"),
     arg(Url, "nonResourceURLs entry; * and a trailing * are literal wildcards"),
     arg(Verb, "verb; * is a literal wildcard")
   ].
 
-subject_url_perm(Kind, Name, Url, Verb) :-
+direct_url_perm(Name, Kind, Url, Verb) :-
     binding_subject("", Binding, Kind, Name),
     binding_roleref("", Binding, "ClusterRole", Role),
-    clusterrole_url_perm(Role, Url, Verb).
-
-# ---- direct_perm ----
-
-Decl direct_perm(Principal, Namespace, ApiGroup, Resource, ResourceName, Verb)
-  descr [
-    doc("Effective RBAC permissions granted directly by a binding (no escalation), including grants to the principal's groups."),
-    arg(Principal, "user, group, or system:serviceaccount:<ns>:<name>"),
-    arg(Namespace, "namespace the grant applies in; empty for cluster-wide"),
-    arg(ApiGroup, "API group; * is a literal wildcard"),
-    arg(Resource, "resource or resource/subresource; * and */sub are literal wildcards"),
-    arg(ResourceName, "object name; empty for any name, * is a literal name"),
-    arg(Verb, "verb, e.g. get/list/create; * is a literal wildcard")
-  ].
-
-direct_perm(Principal, Namespace, ApiGroup, Resource, ResourceName, Verb) :-
-    subject_perm(_, Principal, Namespace, ApiGroup, Resource, ResourceName, Verb).
-
-direct_perm(Principal, Namespace, ApiGroup, Resource, ResourceName, Verb) :-
-    principal_group(Principal, Group),
-    subject_perm(/group, Group, Namespace, ApiGroup, Resource, ResourceName, Verb).
+    clusterrole_rule(Role, Rule),
+    policy_rule_url_perm(Rule, Url, Verb).
 
 # ---- Access decisions ----
 #
@@ -95,7 +89,7 @@ direct_perm(Principal, Namespace, ApiGroup, Resource, ResourceName, Verb) :-
 #
 # The request_* relations list, per request, every value a grant could hold
 # and still match one field of the request. A request is allowed when some
-# subject_perm row is built entirely from such values.
+# direct_perm row is built entirely from such values.
 
 Decl rbac_allowed(Id)
   descr [
@@ -191,15 +185,14 @@ request_grant_resource(Id, AnyResource) :-
 request_grant_resource(Id, "*") :-
     access_request(Id, _, _, _, _, _, _, _, _).
 
-# A grant without resourceNames ("") matches any request; a named grant only
-# matches a request for that name. A request without a name (list, create)
-# never matches a named grant.
-request_grant_resource_name(Id, "") :-
+# A grant without resourceNames (/any) matches any request; a named grant only
+# matches a request for exactly that name. A request without a name (list,
+# create) has Name "", so it only matches a grant with resourceNames: [""].
+request_grant_resource_name(Id, /any) :-
     access_request(Id, _, _, _, _, _, _, _, _).
 
 request_grant_resource_name(Id, Name) :-
-    access_request(Id, _, _, _, _, _, Name, _, _),
-    Name != "".
+    access_request(Id, _, _, _, _, _, Name, _, _).
 
 request_grant_verb(Id, Verb) :-
     access_request(Id, _, _, _, _, _, _, Verb, _).
@@ -207,19 +200,12 @@ request_grant_verb(Id, Verb) :-
 request_grant_verb(Id, "*") :-
     access_request(Id, _, _, _, _, _, _, _, _).
 
-# The planner looks a relation up by the first argument already bound and
-# checks the rest afterwards. In subject_perm that is Kind, which only has
-# three values, so a join on it compares every request against almost every
-# grant. This copy puts the subject name first, making the lookup selective.
-subject_perm_by_name(Name, Kind, Namespace, ApiGroup, Resource, ResourceName, Verb) :-
-    subject_perm(Kind, Name, Namespace, ApiGroup, Resource, ResourceName, Verb).
-
 # Resource requests are the ones without a Path.
 rbac_allowed(Id) :-
     access_request(Id, _, _, _, _, _, _, _, Path),
     Path = "",
     request_subject(Id, Kind, Name),
-    subject_perm_by_name(Name, Kind, Namespace, ApiGroup, Resource, ResourceName, Verb),
+    direct_perm(Name, Kind, Namespace, ApiGroup, Resource, ResourceName, Verb),
     request_grant_namespace(Id, Namespace),
     request_grant_api_group(Id, ApiGroup),
     request_grant_resource(Id, Resource),
@@ -237,7 +223,7 @@ rbac_allowed(Id) :-
 # as an end marker and "*\n" replaced: that is always the last "*". Paths
 # never contain a newline.
 url_trim_step(Url, Url) :-
-    clusterrole_url_perm(_, Url, _),
+    policy_rule_url_perm(_, Url, _),
     :string:ends_with(Url, "*").
 
 url_trim_step(Url, Shorter) :-
@@ -264,4 +250,4 @@ rbac_allowed(Id) :-
     request_grant_url(Id, Url),
     request_subject(Id, Kind, Name),
     request_grant_verb(Id, Verb),
-    subject_url_perm(Kind, Name, Url, Verb).
+    direct_url_perm(Name, Kind, Url, Verb).

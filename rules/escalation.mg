@@ -1,94 +1,137 @@
 # Privilege escalation rules.
 #
 # Models paths by which one principal can acquire the effective permissions of
-# another identity. The key predicate:
+# another identity. The key predicates:
 #
-#   controls_identity(P, Target) — P can assume Target's identity via at least
-#       one escalation path. Transitively closed: if A→B→C then A controls C.
+#   controls_identity(P, Target) - P can assume Target's identity via at least
+#       one escalation path. Transitively closed: if A->B->C then A controls C.
+#   controls_group(P, Group) - P, or an identity it controls, can impersonate
+#       Group, which holds grants.
+#
+# Principals (P, Target) are users and ServiceAccounts, by username. A group
+# is never a principal: nobody authenticates as one, so a group neither hops
+# nor is hopped to. Impersonating a group is recorded in controls_group
+# instead, and the group's grants are not followed further: Kubernetes only
+# accepts Impersonate-Group alongside Impersonate-User, and impersonating a
+# user is modelled as its own hop.
 #
 # Escalation paths modeled:
-#   1. Impersonation  — impersonate verb on users/serviceaccounts/groups
-#   2. SA token       — create on serviceaccounts/token subresource
-#   3. Pod exec/attach — create on pods/exec or pods/attach exposes mounted token
-#   4. Pod creation   — create on pods lets you run as any SA in that namespace
+#   1. Impersonation  - impersonate verb on users/serviceaccounts/groups
+#   2. SA token       - create on serviceaccounts/token subresource
+#   3. Pod exec/attach - create on pods/exec or pods/attach exposes mounted token
+#   4. Pod creation   - create on pods lets you run as any SA in that namespace
 #
-# Wildcard handling: direct_perm/6 stores "*" literals for apiGroup, resource,
-# and verb. Permission guards below check all 8 combinations (2^3) of wildcard
-# vs literal for each (apiGroup, resource, verb) tuple escalation cares about.
-# Each guard rule is safe Datalog: every head variable is bound by the body.
+# What P can do through escalation is not materialized. Join on demand:
+#
+#   controls_identity(P, Target), principal_subject(Target, Kind, Name),
+#       direct_perm(Name, Kind, Ns, ApiGroup, Resource, ResourceName, Verb)
+#   controls_group(P, Group), direct_perm(Group, /group, Ns, ...)
+
+# ---- Permission guards ----
+#
+# grant_X(Name, Kind, Ns): the binding subject (Kind, Name) holds permission X
+# in Ns. direct_perm stores "*" literals for apiGroup, resource and verb, so
+# each guard checks all 8 combinations (2^3) of wildcard vs literal. Grants
+# are filtered here, per subject, before principal_subject expands them to
+# the principals that hold them: perm_X(P, Ns).
 #
 # The ResourceName column is ignored (_): a grant limited to some object names
 # still counts. That over-approximates, the safe side for finding escalation
 # paths.
-
-# ---- Permission guards ----
 #
-# perm_X(P, Ns): P has permission X in Ns under any combination of wildcards.
-# Format: direct_perm(P, Ns, ApiGroup, Resource, ResourceName, Verb) with "*"
-# matching any value.
+# perm_X looks grant_X up by subject name, its first column, so the join is
+# keyed on Name rather than on Kind (see rbac.mg).
 
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "",  "serviceaccounts/token", _, "create").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "",  "serviceaccounts/token", _, "*").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "",  "*",                     _, "create").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "",  "*",                     _, "*").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "*", "serviceaccounts/token", _, "create").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "*", "serviceaccounts/token", _, "*").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "*", "*",                     _, "create").
-perm_sa_token_create(P, Ns) :- direct_perm(P, Ns, "*", "*",                     _, "*").
+grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts/token", _, "create").
+grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts/token", _, "*").
+grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",                     _, "create").
+grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",                     _, "*").
+grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "serviceaccounts/token", _, "create").
+grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "serviceaccounts/token", _, "*").
+grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",                     _, "create").
+grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",                     _, "*").
 
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "",  "pods/exec", _, "create").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "",  "pods/exec", _, "*").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "",  "*",         _, "create").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "",  "*",         _, "*").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "*", "pods/exec", _, "create").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "*", "pods/exec", _, "*").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "*", "*",         _, "create").
-perm_pods_exec_create(P, Ns) :- direct_perm(P, Ns, "*", "*",         _, "*").
+perm_sa_token_create(P, Ns) :-
+    principal_subject(P, Kind, Name),
+    grant_sa_token_create(Name, Kind, Ns).
 
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "",  "pods/attach", _, "create").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "",  "pods/attach", _, "*").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "",  "*",           _, "create").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "",  "*",           _, "*").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "*", "pods/attach", _, "create").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "*", "pods/attach", _, "*").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "*", "*",           _, "create").
-perm_pods_attach_create(P, Ns) :- direct_perm(P, Ns, "*", "*",           _, "*").
+grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "pods/exec", _, "create").
+grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "pods/exec", _, "*").
+grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",         _, "create").
+grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",         _, "*").
+grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "pods/exec", _, "create").
+grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "pods/exec", _, "*").
+grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",         _, "create").
+grant_pods_exec_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",         _, "*").
 
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "",  "pods", _, "create").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "",  "pods", _, "*").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "",  "*",    _, "create").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "",  "*",    _, "*").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "*", "pods", _, "create").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "*", "pods", _, "*").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "*", "*",    _, "create").
-perm_pods_create(P, Ns) :- direct_perm(P, Ns, "*", "*",    _, "*").
+perm_pods_exec_create(P, Ns) :-
+    principal_subject(P, Kind, Name),
+    grant_pods_exec_create(Name, Kind, Ns).
 
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "serviceaccounts", _, "impersonate").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "serviceaccounts", _, "*").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",               _, "impersonate").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",               _, "*").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "serviceaccounts", _, "impersonate").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "serviceaccounts", _, "*").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",               _, "impersonate").
-perm_sa_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",               _, "*").
+grant_pods_attach_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "pods/attach", _, "create").
+grant_pods_attach_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "pods/attach", _, "*").
+grant_pods_attach_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",           _, "create").
+grant_pods_attach_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",           _, "*").
+grant_pods_attach_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "pods/attach", _, "create").
+grant_pods_attach_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "pods/attach", _, "*").
+grant_pods_attach_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",           _, "create").
+grant_pods_attach_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",           _, "*").
 
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "users", _, "impersonate").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "users", _, "*").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",     _, "impersonate").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",     _, "*").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "users", _, "impersonate").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "users", _, "*").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",     _, "impersonate").
-perm_user_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",     _, "*").
+perm_pods_attach_create(P, Ns) :-
+    principal_subject(P, Kind, Name),
+    grant_pods_attach_create(Name, Kind, Ns).
 
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "groups", _, "impersonate").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "groups", _, "*").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",      _, "impersonate").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "",  "*",      _, "*").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "groups", _, "impersonate").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "groups", _, "*").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",      _, "impersonate").
-perm_group_impersonate(P, Ns) :- direct_perm(P, Ns, "*", "*",      _, "*").
+grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "pods", _, "create").
+grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "pods", _, "*").
+grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",    _, "create").
+grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",    _, "*").
+grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "pods", _, "create").
+grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "pods", _, "*").
+grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",    _, "create").
+grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",    _, "*").
+
+perm_pods_create(P, Ns) :-
+    principal_subject(P, Kind, Name),
+    grant_pods_create(Name, Kind, Ns).
+
+grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts", _, "impersonate").
+grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts", _, "*").
+grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",               _, "impersonate").
+grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",               _, "*").
+grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "serviceaccounts", _, "impersonate").
+grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "serviceaccounts", _, "*").
+grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",               _, "impersonate").
+grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",               _, "*").
+
+perm_sa_impersonate(P, Ns) :-
+    principal_subject(P, Kind, Name),
+    grant_sa_impersonate(Name, Kind, Ns).
+
+grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "users", _, "impersonate").
+grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "users", _, "*").
+grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",     _, "impersonate").
+grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",     _, "*").
+grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "users", _, "impersonate").
+grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "users", _, "*").
+grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",     _, "impersonate").
+grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",     _, "*").
+
+perm_user_impersonate(P, Ns) :-
+    principal_subject(P, Kind, Name),
+    grant_user_impersonate(Name, Kind, Ns).
+
+grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "groups", _, "impersonate").
+grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "groups", _, "*").
+grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",      _, "impersonate").
+grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",      _, "*").
+grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "groups", _, "impersonate").
+grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "groups", _, "*").
+grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",      _, "impersonate").
+grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",      _, "*").
+
+perm_group_impersonate(P, Ns) :-
+    principal_subject(P, Kind, Name),
+    grant_group_impersonate(Name, Kind, Ns).
 
 # ---- Escalation path helpers ----
 #
@@ -137,6 +180,11 @@ impersonatable_sa(P, SANs, SAName) :-
     perm_sa_impersonate(P, ""),
     serviceaccount(SANs, SAName, _).
 
+# A principal holds some grant, directly or through one of its groups.
+principal_has_grant(Username) :-
+    principal_subject(Username, Kind, Name),
+    direct_perm(Name, Kind, _, _, _, _, _).
+
 # ---- escalation_hop ----
 #
 # Single-step escalation: P can directly assume Target's identity via exactly
@@ -150,8 +198,8 @@ impersonatable_sa(P, SANs, SAName) :-
 Decl escalation_hop(Principal, Target)
   descr [
     doc("Single-step escalation: Principal can assume Target's identity via one mechanism."),
-    arg(Principal, "the principal performing the escalation"),
-    arg(Target, "the identity Principal can directly assume")
+    arg(Principal, "the user or ServiceAccount performing the escalation"),
+    arg(Target, "the user or ServiceAccount whose identity Principal can directly assume")
   ].
 
 escalation_hop(P, Target) :-
@@ -170,16 +218,11 @@ escalation_hop(P, Target) :-
     pod_creatable_sa(P, SANs, SAName)
     |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
 
-# Impersonating a user or group is only recorded when the target holds some
-# permission.
+# Impersonating a user is only recorded when the user holds some grant.
 escalation_hop(P, Target) :-
     perm_user_impersonate(P, _),
     known_principal(/user, Target),
-    direct_perm(Target, _, _, _, _, _).
-
-escalation_hop(P, Target) :-
-    perm_group_impersonate(P, _),
-    subject_perm(/group, Target, _, _, _, _, _).
+    principal_has_grant(Target).
 
 # ---- controls_identity ----
 #
@@ -189,8 +232,8 @@ escalation_hop(P, Target) :-
 Decl controls_identity(Principal, Target)
   descr [
     doc("Principal can assume Target's identity via one or more escalation hops (transitively closed)."),
-    arg(Principal, "the principal that gains control"),
-    arg(Target, "the identity Principal ultimately controls")
+    arg(Principal, "the user or ServiceAccount that gains control"),
+    arg(Target, "the user or ServiceAccount Principal ultimately controls")
   ].
 
 controls_identity(P, Target) :- escalation_hop(P, Target), P != Target.
@@ -199,24 +242,26 @@ controls_identity(P, Target) :-
     controls_identity(P, Mid),
     escalation_hop(Mid, Target).
 
-# ---- indirect_perm ----
+# ---- controls_group ----
 #
-# Permissions P gains via escalation, with the intermediate identity recorded.
-# Target is the identity P controls that holds the direct_perm. Wildcards
-# preserved as-is. Does not include P's own direct_perm.
+# Group impersonation reaches every group that holds a grant. Like user
+# impersonation, the guard ignores the namespace of the impersonate grant.
 
-Decl indirect_perm(Principal, Namespace, ApiGroup, Resource, Verb, ViaIdentity)
+group_has_grant(Group) :-
+    direct_perm(Group, /group, _, _, _, _, _).
+
+Decl controls_group(Principal, Group)
   descr [
-    doc("Permissions Principal gains through escalation, with the borrowed identity recorded."),
-    arg(Principal, "the principal that gains the permission"),
-    arg(Namespace, "namespace the grant applies in; empty for cluster-wide"),
-    arg(ApiGroup, "API group; * is a literal wildcard"),
-    arg(Resource, "resource; * is a literal wildcard"),
-    arg(Verb, "verb; * is a literal wildcard"),
-    arg(ViaIdentity, "the controlled identity that actually holds the grant")
+    doc("Principal, or an identity it controls, can impersonate Group, which holds grants. Groups do not hop further."),
+    arg(Principal, "user name or system:serviceaccount:<ns>:<name>"),
+    arg(Group, "group whose direct_perm grants Principal can use")
   ].
 
-indirect_perm(P, Ns, ApiGroup, Resource, Verb, Target) :-
-    controls_identity(P, Target),
-    direct_perm(Target, Ns, ApiGroup, Resource, _, Verb).
+controls_group(P, Group) :-
+    perm_group_impersonate(P, _),
+    group_has_grant(Group).
 
+controls_group(P, Group) :-
+    controls_identity(P, Mid),
+    perm_group_impersonate(Mid, _),
+    group_has_grant(Group).

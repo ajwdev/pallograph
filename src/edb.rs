@@ -732,8 +732,28 @@ mod tests {
         );
     }
 
+    /// The (ApiGroup, Resource, ResourceName, Verb) rows `role` grants after
+    /// aggregation: clusterrole_rule joined with policy_rule_perm, the join
+    /// rules/rbac_roles.mg describes. One entry per joined row, so a
+    /// duplicate would show up twice.
+    fn clusterrole_perms(result: &crate::engine::EvalStore, role: &str) -> Vec<Vec<Value>> {
+        let role = Value::String(role.into());
+        let rules = result.scan("clusterrole_rule");
+        let perms = result.scan("policy_rule_perm");
+        rules
+            .iter()
+            .filter(|rule_row| rule_row[0] == role)
+            .flat_map(|rule_row| {
+                perms
+                    .iter()
+                    .filter(move |perm_row| perm_row[0] == rule_row[1])
+                    .map(|perm_row| perm_row[1..].to_vec())
+            })
+            .collect()
+    }
+
     /// True if `role` grants `verb` on `resource` in `apigroup` for any object
-    /// name (ResourceName ""), after aggregation.
+    /// name (ResourceName /any), after aggregation.
     fn has_clusterrole_perm(
         result: &crate::engine::EvalStore,
         role: &str,
@@ -741,15 +761,12 @@ mod tests {
         resource: &str,
         verb: &str,
     ) -> bool {
-        result.scan("clusterrole_perm").iter().any(|row| {
-            row == &vec![
-                Value::String(role.into()),
-                Value::String(apigroup.into()),
-                Value::String(resource.into()),
-                Value::String(String::new()),
-                Value::String(verb.into()),
-            ]
-        })
+        clusterrole_perms(result, role).contains(&vec![
+            Value::String(apigroup.into()),
+            Value::String(resource.into()),
+            Value::Name("/any".into()),
+            Value::String(verb.into()),
+        ])
     }
 
     // AND semantics: all matchLabels within one selector must be satisfied.
@@ -962,14 +979,9 @@ mod tests {
         let result = engine_from_store(store).evaluate().unwrap();
 
         // Datalog relations are sets: duplicate derivations collapse.
-        let count = result
-            .scan("clusterrole_perm")
+        let count = clusterrole_perms(&result, "my-agg")
             .iter()
-            .filter(|row| {
-                row.len() == 5
-                    && row[0] == Value::String("my-agg".into())
-                    && row[4] == Value::String("get".into())
-            })
+            .filter(|row| row[3] == Value::String("get".into()))
             .count();
         assert_eq!(
             count, 1,

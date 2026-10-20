@@ -11,14 +11,14 @@
 #   clusterrole_aggregates/2                        (aggregation sources)
 #   clusterrole_rule/2                              (rules after aggregation)
 #   policy_rule_perm/5, policy_rule_url_perm/3      (one PolicyRule, flattened)
-#   role_perm/6, clusterrole_perm/5                 (resource permissions)
-#   clusterrole_url_perm/3                          (non-resource URL permissions)
 #
 # Wildcards: "*" in apiGroups, resources, verbs and nonResourceURLs is stored
 # as the literal string "*"; rbac.mg matches it at decision time. In
 # resourceNames, "*" is not a wildcard: Kubernetes compares it as a literal
 # name. A rule with no resourceNames (absent or empty) applies to every name
-# and is flattened to ResourceName "".
+# and is flattened to ResourceName /any, a name constant rather than a
+# string, so it cannot collide with a resourceNames entry. resourceNames: [""]
+# is the literal empty name: it only matches requests that name no object.
 
 # ---- Type filters ----
 
@@ -137,11 +137,11 @@ policy_rule_resource_name(Rule, Name) :-
     :match_field(Rule, /resourceNames, Names),
     :list:member(Name, Names).
 
-# resourceNames absent and resourceNames: [] both mean "any name".
+# resourceNames absent and resourceNames: [] both mean "any name" (/any).
 policy_rule_has_resource_names(Rule) :-
     policy_rule_resource_name(Rule, _).
 
-policy_rule_name_scope(Rule, "") :-
+policy_rule_name_scope(Rule, /any) :-
     policy_rule(Rule),
     !policy_rule_has_resource_names(Rule).
 
@@ -154,7 +154,7 @@ Decl policy_rule_perm(Rule, ApiGroup, Resource, ResourceName, Verb)
     arg(Rule, "the PolicyRule struct"),
     arg(ApiGroup, "API group; * is a literal wildcard"),
     arg(Resource, "resource or resource/subresource; * and */sub are literal wildcards"),
-    arg(ResourceName, "object name; empty for any name, * is a literal name"),
+    arg(ResourceName, "object name, or /any for every name; the empty name and * are literal names"),
     arg(Verb, "verb; * is a literal wildcard")
   ].
 
@@ -183,46 +183,15 @@ policy_rule_url_perm(Rule, Url, Verb) :-
     :list:member(Verb, Verbs).
 
 # ---- Role and ClusterRole permissions ----
-
-Decl role_perm(Namespace, Role, ApiGroup, Resource, ResourceName, Verb)
-  descr [
-    doc("Resource permissions a Role grants, one row per (group, resource, name, verb)."),
-    arg(Namespace, "Role namespace"),
-    arg(Role, "Role name"),
-    arg(ApiGroup, "API group; * is a literal wildcard"),
-    arg(Resource, "resource or resource/subresource; * and */sub are literal wildcards"),
-    arg(ResourceName, "object name; empty for any name, * is a literal name"),
-    arg(Verb, "verb; * is a literal wildcard")
-  ].
-
-role_perm(Namespace, Role, ApiGroup, Resource, ResourceName, Verb) :-
-    role_rule(Namespace, Role, Rule),
-    policy_rule_perm(Rule, ApiGroup, Resource, ResourceName, Verb).
-
-Decl clusterrole_perm(Role, ApiGroup, Resource, ResourceName, Verb)
-  descr [
-    doc("Resource permissions a ClusterRole grants after aggregation."),
-    arg(Role, "ClusterRole name"),
-    arg(ApiGroup, "API group; * is a literal wildcard"),
-    arg(Resource, "resource or resource/subresource; * and */sub are literal wildcards"),
-    arg(ResourceName, "object name; empty for any name, * is a literal name"),
-    arg(Verb, "verb; * is a literal wildcard")
-  ].
-
-clusterrole_perm(Role, ApiGroup, Resource, ResourceName, Verb) :-
-    clusterrole_rule(Role, Rule),
-    policy_rule_perm(Rule, ApiGroup, Resource, ResourceName, Verb).
-
+#
+# What a role grants is not stored per role. Many roles repeat the same
+# rules (an aggregated ClusterRole holds a copy of each source's rules), so
+# the flattened rows are stored once per distinct PolicyRule and joined on
+# demand:
+#
+#   role_rule(Namespace, Role, Rule), policy_rule_perm(Rule, G, R, N, V)
+#   clusterrole_rule(Role, Rule), policy_rule_perm(Rule, G, R, N, V)
+#   clusterrole_rule(Role, Rule), policy_rule_url_perm(Rule, Url, Verb)
+#
 # Roles cannot hold nonResourceURLs (API validation rejects them), so only
 # ClusterRoles have URL permissions.
-Decl clusterrole_url_perm(Role, Url, Verb)
-  descr [
-    doc("Non-resource URL permissions a ClusterRole grants after aggregation."),
-    arg(Role, "ClusterRole name"),
-    arg(Url, "nonResourceURLs entry; * and a trailing * are literal wildcards"),
-    arg(Verb, "verb; * is a literal wildcard")
-  ].
-
-clusterrole_url_perm(Role, Url, Verb) :-
-    clusterrole_rule(Role, Rule),
-    policy_rule_url_perm(Rule, Url, Verb).

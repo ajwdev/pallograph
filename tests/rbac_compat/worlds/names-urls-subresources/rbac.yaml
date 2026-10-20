@@ -57,6 +57,33 @@ roleRef:
   kind: Role
   name: star-named-secret
 ---
+# resourceNames: [""] is the literal empty name, not "any name": it grants
+# only requests that name no object, such as list and create.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: empty-named-pod
+  namespace: team-a
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  resourceNames: [""]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: frank-empty-named-pod
+  namespace: team-a
+subjects:
+- kind: User
+  name: frank
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: empty-named-pod
+---
 # "*/scale" matches the scale subresource of any resource (but not the
 # resource itself); "pods/*" only matches the literal subresource "*".
 apiVersion: rbac.authorization.k8s.io/v1

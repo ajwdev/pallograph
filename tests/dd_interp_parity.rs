@@ -586,6 +586,35 @@ fn mixed_value_types() {
 }
 
 #[test]
+fn name_constant_and_strings_in_one_column() {
+    // One column holding a /name constant next to strings, as ResourceName
+    // does in rules/rbac_roles.mg: /any for every name, or a literal name,
+    // including "". A join on the column must not equate /any with a string.
+    let e = edb(&[
+        ("rule", vec![s("r1")]),
+        ("rule", vec![s("r2")]),
+        ("rule", vec![s("r3")]),
+        ("rule_name", vec![s("r2"), s("web")]),
+        ("rule_name", vec![s("r3"), s("")]),
+        ("request", vec![n(1), s("web")]),
+        ("request", vec![n(2), s("")]),
+        ("request", vec![n(3), s("other")]),
+    ]);
+    assert_parity(
+        "name_and_strings",
+        &e,
+        "Decl rule(R).\nDecl rule_name(R, N).\nDecl request(I, N).\n\
+         Decl named(R).\nDecl scope(R, N).\nDecl request_name(I, N).\nDecl allowed(I, R).\n\
+         named(R) :- rule_name(R, _).\n\
+         scope(R, /any) :- rule(R), !named(R).\n\
+         scope(R, N) :- rule_name(R, N).\n\
+         request_name(I, /any) :- request(I, _).\n\
+         request_name(I, N) :- request(I, N).\n\
+         allowed(I, R) :- request_name(I, N), scope(R, N).",
+    );
+}
+
+#[test]
 fn infix_numeric_comparison() {
     // Infix <, >, <=, >= as body terms (bound var vs constant) -> Cmp Lt/Gt/Le/Ge.
     let e = edb(&[
