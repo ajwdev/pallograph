@@ -216,14 +216,8 @@ impl RbacAccessModel {
         for (principal, ..) in self.effective_permissions.iter().filter(
             |(_, entry_ns, entry_ag, entry_resource, entry_verb)| {
                 permission_covers(
-                    entry_ns,
-                    entry_ag,
-                    entry_resource,
-                    entry_verb,
-                    namespace,
-                    apigroup,
-                    resource,
-                    verb,
+                    permission(entry_ns, entry_ag, entry_resource, entry_verb),
+                    permission(namespace, apigroup, resource, verb),
                 )
             },
         ) {
@@ -295,7 +289,10 @@ impl RbacAccessModel {
             self.direct_permissions
                 .iter()
                 .filter(|(_, e_ns, e_ag, e_r, e_v)| {
-                    permission_covers(e_ns, e_ag, e_r, e_v, namespace, apigroup, resource, verb)
+                    permission_covers(
+                        permission(e_ns, e_ag, e_r, e_v),
+                        permission(namespace, apigroup, resource, verb),
+                    )
                 })
                 .filter_map(|(p, ..)| {
                     if (self.include_builtins || !crate::builtins::is_builtin(p))
@@ -339,14 +336,8 @@ impl RbacAccessModel {
             |(entry_principal, entry_ns, entry_ag, entry_resource, entry_verb)| {
                 entry_principal == principal
                     && permission_covers(
-                        entry_ns,
-                        entry_ag,
-                        entry_resource,
-                        entry_verb,
-                        namespace,
-                        apigroup,
-                        resource,
-                        verb,
+                        permission(entry_ns, entry_ag, entry_resource, entry_verb),
+                        permission(namespace, apigroup, resource, verb),
                     )
             },
         )
@@ -430,7 +421,11 @@ impl RbacAccessModel {
             .direct_permissions
             .iter()
             .any(|(ep, e_ns, e_ag, e_r, e_v)| {
-                ep == principal && permission_covers(e_ns, e_ag, e_r, e_v, q_ns, q_ag, q_r, q_v)
+                ep == principal
+                    && permission_covers(
+                        permission(e_ns, e_ag, e_r, e_v),
+                        permission(q_ns, q_ag, q_r, q_v),
+                    )
             });
 
         let mut paths = Vec::new();
@@ -482,7 +477,10 @@ impl RbacAccessModel {
                     .iter()
                     .any(|(ep, e_ns, e_ag, e_r, e_v)| {
                         ep == *target
-                            && permission_covers(e_ns, e_ag, e_r, e_v, q_ns, q_ag, q_r, q_v)
+                            && permission_covers(
+                                permission(e_ns, e_ag, e_r, e_v),
+                                permission(q_ns, q_ag, q_r, q_v),
+                            )
                     })
             })
             .collect();
@@ -840,20 +838,33 @@ fn value_covers(entry: &str, query: &str) -> bool {
     entry == "*" || entry == query
 }
 
-fn permission_covers(
-    entry_ns: &str,
-    entry_ag: &str,
-    entry_resource: &str,
-    entry_verb: &str,
-    query_ns: &str,
-    query_ag: &str,
-    query_resource: &str,
-    query_verb: &str,
-) -> bool {
-    ns_covers(entry_ns, query_ns)
-        && value_covers(entry_ag, query_ag)
-        && value_covers(entry_resource, query_resource)
-        && value_covers(entry_verb, query_verb)
+#[derive(Clone, Copy)]
+struct PermissionPattern<'a> {
+    namespace: &'a str,
+    apigroup: &'a str,
+    resource: &'a str,
+    verb: &'a str,
+}
+
+fn permission<'a>(
+    namespace: &'a str,
+    apigroup: &'a str,
+    resource: &'a str,
+    verb: &'a str,
+) -> PermissionPattern<'a> {
+    PermissionPattern {
+        namespace,
+        apigroup,
+        resource,
+        verb,
+    }
+}
+
+fn permission_covers(entry: PermissionPattern<'_>, query: PermissionPattern<'_>) -> bool {
+    ns_covers(entry.namespace, query.namespace)
+        && value_covers(entry.apigroup, query.apigroup)
+        && value_covers(entry.resource, query.resource)
+        && value_covers(entry.verb, query.verb)
 }
 
 #[cfg(test)]
