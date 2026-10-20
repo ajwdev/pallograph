@@ -1,9 +1,168 @@
 # Pallograph
 
-An experiment in pairing Kubernetes controllers with Datalog (Mangle) and Z3.
-Successor to [pallograph-ddlog](https://github.com/ajwdev/pallograph-ddlog).
+An experiment in pairing Kubernetes state with Datalog
+([Mangle](https://github.com/google/mangle)) and the Z3 solver. Successor to
+[pallograph-ddlog](https://github.com/ajwdev/pallograph-ddlog).
 
-## Performance checks
+Pallograph loads RBAC objects, pods, service accounts, and nodes from a cluster
+(or a pile of JSON manifests), turns them into facts, and lets you ask
+questions about the whole graph at once. ex: "who can reach cluster-admin, even
+if it takes two hops through someone else's service account?"
+
+This is a learning project as much as a tool. Expect sharp edges.
+
+## Why
+
+RBAC review happens one diff at a time. A RoleBinding granting `pods/exec` in
+`app` looks fine in isolation; so does a service account that can mint tokens
+in `kube-system`. Approved by two teams, months apart, they compose into a path
+to cluster-admin that neither reviewer could see.
+
+Datalog is a good fit for "follow every edge until nothing new shows up"
+(reachability over the permission graph). Z3 handles the questions where the
+search space is too big to enumerate, like "does any request exist that this
+principal can make but shouldn't?" Pallograph glues the two together behind a
+REPL.
+
+## Quick start
+
+Use the Nix dev shell (`nix develop`), or bring your own Rust toolchain. Then
+run against the small fixture checked into the repo:
+
+```sh
+cp pallograph.toml.example pallograph.toml
+cargo run --bin pallograph -- --profile dev
+```
+
+Point the `prod` profile at a live cluster (it uses your current KUBECONFIG
+context) with `cargo run --bin pallograph -- --profile prod`.
+
+A short session, run against the small fixture: an inventory count, cluster-wide
+wildcard grants, who can reach cluster-admin (Z3), who can assume whose
+identity, and the derivation behind one of those answers.
+
+```
+?- k8s_object_count
+?- direct_perm(Who, "", "*", "*", "*")
+\smt cluster-admin
+?- controls_identity(P, Target)
+\why controls_identity("developer@example.com", "system:serviceaccount:kube-system:default")
+```
+
+Run `\help` in the REPL for the full command list. (The older `::cmd` form is
+still accepted as an alias for `\cmd`.)
+
+## What it can do
+
+**Query the graph.** `?- <atom>, <atom>, ...` runs a Datalog query against
+facts loaded from the cluster (EDB) and everything the rules derive from them.
+`\show` lists the documented relations along with their columns.
+
+**Explain results.** `\why <fact>` prints the derivation tree (provenance), so
+you can see the chain of bindings and rules that produced a fact rather than
+just trust it.
+
+**Play what-if.** `+fact.` and `-fact.` add or retract facts, `\define` adds a
+rule, and `\source` loads a whole `.mg` file. Take a `\snapshot` first, then
+use `\diff` or `\access-diff` to see exactly which facts or RBAC permissions
+moved.
+
+**Ask the solver.** The `\smt` commands hand the question to Z3:
+
+| Command | Question |
+|---------|----------|
+| `\smt check_access <ns> <r> <v> [p...]` | Who has this access beyond the expected set? |
+| `\smt reaches <ns> <ag> <r> <v> [p...]` | Who can reach this access, counting escalation paths? |
+| `\smt cluster-admin [p...]` | Shorthand for reaching `*` on everything |
+| `\smt node_selector` | Which pods have a nodeSelector no node satisfies? |
+| `\smt anti_affinity` | Is there any valid placement, or proof that none exists? |
+| `\smt karpenter` | Where does Karpenter NodePool coverage leave gaps? |
+
+Built-in Kubernetes and EKS principals are hidden from SMT output by default
+(`--all` shows them). The list lives in `src/builtins.txt`.
+
+**Script it.** `--format ndjson` emits one JSON object per row, which pipes
+nicely into `jq` or DuckDB. The process exits 1 if any `\smt` check fails, so
+it can gate CI.
+
+## Worked examples
+
+Each directory under [`examples/`](examples/) tells the story of a plausible
+escalation and the REPL commands that catch it:
+
+- [`exec-escalation`](examples/exec-escalation/): `pods/exec` in
+  `kube-system` turns into cluster-admin via a mounted token.
+- [`two-hop-escalation`](examples/two-hop-escalation/): two independently
+  reviewed grants compose across namespaces.
+- [`token-escalation`](examples/token-escalation/): `serviceaccounts/token
+  create` as a direct path.
+- [`hidden-clusterrole`](examples/hidden-clusterrole/): binding to a ClusterRole
+  that quietly grew `serviceaccounts/token create` months earlier.
+- [`karpenter-unschedulable`](examples/karpenter-unschedulable/): pods no
+  NodePool can ever satisfy.
+
+## Configuration
+
+Pallograph reads `./pallograph.toml`, then
+`~/.config/pallograph/config.toml`, or whatever you pass with `-C`. A config
+has two parts:
+
+- **Datasources** say where facts come from: a live cluster (`k8s`), files on
+  disk (`file`), or a shell command (`shell`). File and shell sources parse
+  either Kubernetes manifests or flat JSON tuples loaded into a named relation.
+  The latter is how you pull in non-Kubernetes data (ex: GitHub org
+  membership).
+- **Profiles** are named lists of datasources, picked with `--profile`.
+
+See [`pallograph.toml.example`](pallograph.toml.example) for every option.
+
+Other flags worth knowing:
+
+- `--rules <dir>`: rule directory (default `rules/`).
+- `--backend interpreter|dd`: evaluation engine, see below.
+- `--provenance`: enable `\why` on the DD backend.
+- `--format default|compact|table|ndjson`: output format.
+
+## How it works
+
+The rules live in [`rules/`](rules/) as plain Mangle files. `base.mg` and
+`rbac.mg` project raw objects into relations like `direct_perm/5`; `escalation.mg`
+models identity theft paths (exec into a pod, mint a token, impersonate);
+`labels.mg` implements label selectors; `summary.mg` does inventory counts.
+`build.rs` compiles every rule file at build time, so a broken rule fails
+`cargo build` instead of your demo.
+
+There are two evaluation backends, and they must produce the same facts:
+
+- **`interpreter`** (default): batch evaluation via `mangle-interpreter`.
+  Simple, and the reference for correctness. Every change re-evaluates
+  everything.
+- **`dd`**: incremental evaluation on
+  [differential-dataflow](https://github.com/TimelyDataflow/differential-dataflow).
+  Adding or retracting a fact only does the work that fact touches, which
+  matters once the cluster gets big. Provenance is lazy and opt-in; see
+  [`docs/lazy-provenance.md`](docs/lazy-provenance.md).
+
+RBAC correctness is checked against upstream Kubernetes itself: the Go program
+in [`tools/rbac-oracle/`](tools/rbac-oracle/) wraps the real RBAC authorizer
+and serves as the oracle for `tests/rbac_compat.rs`.
+
+## Development
+
+CI runs inside the Nix shell, so run checks the same way:
+
+```sh
+nix develop .#ci -c cargo fmt --check
+nix develop .#ci -c cargo clippy --all-targets --locked -- -D warnings
+nix develop .#ci -c hack/rbac-compat-gen.sh   # needed before rbac_compat tests
+nix develop .#ci -c cargo test --all-targets --locked
+```
+
+`hack/` also has scripts for spinning up kind and KWOK clusters to test
+against. [`AGENTS.md`](AGENTS.md) covers repo conventions and known upstream
+Mangle bugs we deliberately work around rather than patch.
+
+## Benchmarks
 
 The benchmark suite covers backend startup, incremental updates, provenance
 costs, and the RBAC access hot path. Fixture loading and datasource I/O are kept

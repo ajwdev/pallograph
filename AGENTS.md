@@ -8,8 +8,9 @@ this file.
 Pallograph analyzes Kubernetes state (RBAC, pods, service accounts, nodes)
 with Datalog ([Mangle](https://github.com/google/mangle), via the `mangle-*`
 crates pinned in `Cargo.toml`) and the Z3 solver. It ships as a REPL
-(`src/repl.rs`) driven by `::` commands (`::why`, `::smt`, `::diff`, `::load`,
-`::define`, ...).
+(`src/repl.rs`) driven by `\` commands (`\why`, `\smt`, `\diff`, `\load`,
+`\define`, ...). The REPL rewrites `\cmd` to `::cmd` before dispatch, so the
+code matches on `::` and the older `::cmd` spelling still works.
 
 Clarity beats cleverness.
 
@@ -32,7 +33,7 @@ Only the non-obvious parts:
   selected by `--backend` (default `interpreter`):
   - `InterpreterBackend` - batch evaluation via `mangle-interpreter`.
   - `DdBackend` (`src/dd/`) - incremental evaluation on differential-dataflow.
-    Provenance (`::why`) is lazy and opt-in (`--provenance`); see
+    Provenance (`\why`) is lazy and opt-in (`--provenance`); see
     `docs/lazy-provenance.md`.
 - `src/builtins.txt` - built-in K8s/EKS principals filtered from SMT output.
   Its header documents how to regenerate it.
@@ -68,12 +69,14 @@ rbac_compat` rewrites it.
 Running locally:
 
 ```sh
-cargo run -- -C pallograph.toml.example --profile dev
-cargo run -- --backend dd --provenance ...
+cargo run --bin pallograph -- -C pallograph.toml.example --profile dev
+cargo run --bin pallograph -- --backend dd --provenance ...
 ```
 
-Benchmarks live in `benches/` (criterion): `cargo bench --bench incremental`
-and `cargo bench --bench bulk_load`.
+Benchmarks live in `benches/` (criterion), split by fixture size
+(`small_*`, `medium_*`) plus `smt_access`; ex: `cargo bench --bench
+small_bulk_load`. Medium targets need `hack/fetch-fixtures.sh medium` first.
+The README's Benchmarks section describes each target.
 
 ## Conventions
 
