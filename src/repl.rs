@@ -1314,13 +1314,8 @@ fn print_reaches_grouped(violations: &[rbac::Violation]) {
         let (paths, principals) = &groups[sig];
         print_violation_paths(paths);
         println!("          {} principal(s):", principals.len());
-        for p in principals {
-            match p.kind {
-                rbac::SubjectKind::ServiceAccount => println!("            {}", p.name),
-                rbac::SubjectKind::User | rbac::SubjectKind::Group => {
-                    println!("            {} ({})", p.name, p.kind.as_str())
-                }
-            }
+        for principal in principals {
+            println!("            {}", principal.with_kind());
         }
     }
 }
@@ -1479,17 +1474,6 @@ fn print_eff_diffs_grouped(diffs: &[smt::diff::EffDiff], tables: Option<&rbac::P
     }
 }
 
-/// A principal as a quoted name, with "(group)" after a group, e.g.
-/// `"admins" (group)`.
-fn quoted_principal(principal: &rbac::Subject) -> String {
-    match principal.kind {
-        rbac::SubjectKind::Group => format!("{:?} (group)", principal.name),
-        rbac::SubjectKind::User | rbac::SubjectKind::ServiceAccount => {
-            format!("{:?}", principal.name)
-        }
-    }
-}
-
 /// JSON form of a violation's explaining binding paths (ndjson output).
 fn paths_json(paths: &[rbac::AccessPath]) -> Vec<serde_json::Value> {
     paths
@@ -1583,7 +1567,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                     for v in &violations {
                         println!(
                             "        UNEXPECTED can({}, {:?}, {:?}, {:?})",
-                            quoted_principal(&v.principal),
+                            v.principal.quoted(),
                             v.namespace,
                             v.resource,
                             v.verb
@@ -1752,7 +1736,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                     for v in &violations {
                         println!(
                             "        UNEXPECTED can({}, {:?}, {:?}, {:?})",
-                            quoted_principal(&v.principal),
+                            v.principal.quoted(),
                             v.namespace,
                             v.resource,
                             v.verb

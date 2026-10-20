@@ -74,8 +74,8 @@ pub struct RbacAccessModel {
     subject_bindings: HashMap<Subject, Vec<(String, String)>>,
     /// `binding_roleref`: (role kind, role name) per binding.
     binding_roles: HashMap<(String, String), Vec<(String, String)>>,
-    /// (apigroup, resource, verb) each role grants, after aggregation.
-    role_grants: HashMap<RoleKey, Vec<(String, String, String)>>,
+    /// The rules each role has and the permissions each rule grants.
+    role_rules: RoleRules,
     /// `subject_escalation_hop`: the identities (usernames) each binding
     /// subject's grants can assume in one hop.
     subject_hops: HashMap<Subject, BTreeSet<String>>,
@@ -109,7 +109,7 @@ impl RbacAccessModel {
                 .push((role_kind, role_name));
         }
 
-        let role_grants = role_grants(&scan);
+        let role_rules = RoleRules::from_scan(&scan);
 
         let mut subject_hops: HashMap<Subject, BTreeSet<String>> = HashMap::new();
         for (subject, [target]) in
@@ -147,7 +147,7 @@ impl RbacAccessModel {
             tables,
             subject_bindings,
             binding_roles,
-            role_grants,
+            role_rules,
             subject_hops,
             service_account_mechanisms,
             granted_groups,
@@ -541,35 +541,49 @@ impl RbacAccessModel {
     }
 
     /// Return true when a role's permissions include at least one rule that
-    /// matches `(q_ag, q_r, q_v)` under wildcard semantics.
+    /// matches `(query_api_group, query_resource, query_verb)` under wildcard semantics.
     /// Semantics: the entry covers the query when `entry == "*"` (grants all)
     /// or `entry == query` (exact match). A query of `"*"` is only covered by
     /// an entry of `"*"` — a specific entry like `"pods"` does not cover `"*"`.
     /// Rules limited to some resourceNames count, as they do in
     /// `direct_perm`.
-    fn role_key_matches(&self, key: &RoleKey, q_ag: &str, q_r: &str, q_v: &str) -> bool {
-        self.role_grants.get(key).is_some_and(|grants| {
-            grants.iter().any(|(ag, r, v)| {
-                value_covers(ag, q_ag) && value_covers(r, q_r) && value_covers(v, q_v)
+    fn role_key_matches(
+        &self,
+        key: &RoleKey,
+        query_api_group: &str,
+        query_resource: &str,
+        query_verb: &str,
+    ) -> bool {
+        self.role_rules
+            .permissions_of(key)
+            .any(|(api_group, resource, verb)| {
+                value_covers(api_group, query_api_group)
+                    && value_covers(resource, query_resource)
+                    && value_covers(verb, query_verb)
             })
-        })
     }
 
-    fn clusterrole_matches(&self, role_name: &str, q_ag: &str, q_r: &str, q_v: &str) -> bool {
+    fn clusterrole_matches(
+        &self,
+        role_name: &str,
+        query_api_group: &str,
+        query_resource: &str,
+        query_verb: &str,
+    ) -> bool {
         let key = ("ClusterRole", String::new(), role_name.to_string());
-        self.role_key_matches(&key, q_ag, q_r, q_v)
+        self.role_key_matches(&key, query_api_group, query_resource, query_verb)
     }
 
     fn role_matches(
         &self,
-        role_ns: &str,
+        role_namespace: &str,
         role_name: &str,
-        q_ag: &str,
-        q_r: &str,
-        q_v: &str,
+        query_api_group: &str,
+        query_resource: &str,
+        query_verb: &str,
     ) -> bool {
-        let key = ("Role", role_ns.to_string(), role_name.to_string());
-        self.role_key_matches(&key, q_ag, q_r, q_v)
+        let key = ("Role", role_namespace.to_string(), role_name.to_string());
+        self.role_key_matches(&key, query_api_group, query_resource, query_verb)
     }
 
     /// Append the bindings naming any of `subjects`, each once, sorted.
@@ -585,10 +599,12 @@ impl RbacAccessModel {
     ) {
         let mut found: BTreeSet<(&str, &str, &'static str, &str)> = BTreeSet::new();
         for subject in subjects {
-            for (binding_ns, binding) in self.subject_bindings.get(subject).into_iter().flatten() {
+            for (binding_namespace, binding) in
+                self.subject_bindings.get(subject).into_iter().flatten()
+            {
                 let roles = self
                     .binding_roles
-                    .get(&(binding_ns.clone(), binding.clone()))
+                    .get(&(binding_namespace.clone(), binding.clone()))
                     .into_iter()
                     .flatten();
                 for (role_kind, role_name) in roles {
@@ -598,29 +614,40 @@ impl RbacAccessModel {
                         // The API server rejects any other roleRef kind.
                         _ => continue,
                     };
-                    if let Some((_, q_ag, q_r, q_v)) = perm_filter {
+                    if let Some((_, query_api_group, query_resource, query_verb)) = perm_filter {
                         let matches = if role_kind == "Role" {
-                            self.role_matches(binding_ns, role_name, q_ag, q_r, q_v)
+                            self.role_matches(
+                                binding_namespace,
+                                role_name,
+                                query_api_group,
+                                query_resource,
+                                query_verb,
+                            )
                         } else {
-                            self.clusterrole_matches(role_name, q_ag, q_r, q_v)
+                            self.clusterrole_matches(
+                                role_name,
+                                query_api_group,
+                                query_resource,
+                                query_verb,
+                            )
                         };
                         if !matches {
                             continue;
                         }
                     }
-                    found.insert((binding_ns, binding, role_kind, role_name));
+                    found.insert((binding_namespace, binding, role_kind, role_name));
                 }
             }
         }
 
-        for (binding_ns, binding, role_kind, role_name) in found {
+        for (binding_namespace, binding, role_kind, role_name) in found {
             out.push(AccessPath {
-                binding_kind: if binding_ns.is_empty() {
+                binding_kind: if binding_namespace.is_empty() {
                     "ClusterRoleBinding"
                 } else {
                     "RoleBinding"
                 },
-                binding_namespace: binding_ns.to_string(),
+                binding_namespace: binding_namespace.to_string(),
                 binding_name: binding.to_string(),
                 role_kind,
                 role_name: role_name.to_string(),
@@ -630,54 +657,71 @@ impl RbacAccessModel {
     }
 }
 
-/// (apigroup, resource, verb) granted by each Role and ClusterRole: role_rule
-/// and clusterrole_rule joined with policy_rule_perm on the PolicyRule value.
-/// ResourceName is dropped.
-fn role_grants(
-    scan: &dyn Fn(&str) -> Vec<Vec<Value>>,
-) -> HashMap<RoleKey, Vec<(String, String, String)>> {
-    let mut rule_grants: HashMap<Value, Vec<(String, String, String)>> = HashMap::new();
-    for row in scan("policy_rule_perm") {
-        match row.as_slice() {
-            [
-                rule,
-                Value::String(ag),
-                Value::String(r),
-                Value::Name(_) | Value::String(_),
-                Value::String(v),
-            ] => rule_grants.entry(rule.clone()).or_default().push((
-                ag.clone(),
-                r.clone(),
-                v.clone(),
-            )),
-            _ => unexpected_row("policy_rule_perm", &row),
+/// The rules of each Role and ClusterRole (role_rule and clusterrole_rule),
+/// after aggregation, and the (apigroup, resource, verb) each rule grants
+/// (policy_rule_perm, ResourceName dropped). As in rbac_roles.mg, a rule's
+/// permissions are stored once per distinct PolicyRule value and joined with
+/// a role on demand, not copied into every role that has the rule.
+#[derive(Default)]
+struct RoleRules {
+    rules: HashMap<RoleKey, Vec<Value>>,
+    permissions: HashMap<Value, Vec<(String, String, String)>>,
+}
+
+impl RoleRules {
+    fn from_scan(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Self {
+        let mut role_rules = Self::default();
+        for row in scan("policy_rule_perm") {
+            match row.as_slice() {
+                [
+                    rule,
+                    Value::String(api_group),
+                    Value::String(resource),
+                    Value::Name(_) | Value::String(_),
+                    Value::String(verb),
+                ] => role_rules
+                    .permissions
+                    .entry(rule.clone())
+                    .or_default()
+                    .push((api_group.clone(), resource.clone(), verb.clone())),
+                _ => unexpected_row("policy_rule_perm", &row),
+            }
         }
+
+        let mut add = |key: RoleKey, rule: &Value| {
+            role_rules.rules.entry(key).or_default().push(rule.clone());
+        };
+        for row in scan("role_rule") {
+            match row.as_slice() {
+                [Value::String(namespace), Value::String(role), rule] => {
+                    add(("Role", namespace.clone(), role.clone()), rule)
+                }
+                _ => unexpected_row("role_rule", &row),
+            }
+        }
+        for row in scan("clusterrole_rule") {
+            match row.as_slice() {
+                [Value::String(role), rule] => {
+                    add(("ClusterRole", String::new(), role.clone()), rule)
+                }
+                _ => unexpected_row("clusterrole_rule", &row),
+            }
+        }
+        role_rules
     }
 
-    let mut grants: HashMap<RoleKey, Vec<(String, String, String)>> = HashMap::new();
-    let mut add = |key: RoleKey, rule: &Value| {
-        if let Some(rule_grants) = rule_grants.get(rule) {
-            grants
-                .entry(key)
-                .or_default()
-                .extend(rule_grants.iter().cloned());
-        }
-    };
-    for row in scan("role_rule") {
-        match row.as_slice() {
-            [Value::String(ns), Value::String(role), rule] => {
-                add(("Role", ns.clone(), role.clone()), rule)
-            }
-            _ => unexpected_row("role_rule", &row),
-        }
+    /// (apigroup, resource, verb) the role `key` grants.
+    fn permissions_of<'a>(
+        &'a self,
+        key: &RoleKey,
+    ) -> impl Iterator<Item = &'a (String, String, String)> + use<'a> {
+        self.rules
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter_map(|rule| self.permissions.get(rule))
+            .flatten()
     }
-    for row in scan("clusterrole_rule") {
-        match row.as_slice() {
-            [Value::String(role), rule] => add(("ClusterRole", String::new(), role.clone()), rule),
-            _ => unexpected_row("clusterrole_rule", &row),
-        }
-    }
-    grants
 }
 
 /// The hops from `principal` to `target` in an `escalation_tree`.
@@ -1202,12 +1246,17 @@ mod tests {
         assert!(!model.subject_bindings.is_empty(), "binding_subject");
         assert!(!model.binding_roles.is_empty(), "binding_roleref");
         assert!(
-            model.role_grants.keys().any(|(kind, ..)| *kind == "Role"),
+            model
+                .role_rules
+                .rules
+                .keys()
+                .any(|(kind, ..)| *kind == "Role"),
             "role_rule joined with policy_rule_perm"
         );
         assert!(
             model
-                .role_grants
+                .role_rules
+                .rules
                 .keys()
                 .any(|(kind, ..)| *kind == "ClusterRole"),
             "clusterrole_rule joined with policy_rule_perm"
