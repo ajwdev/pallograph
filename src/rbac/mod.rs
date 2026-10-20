@@ -51,6 +51,7 @@ pub struct RbacAccessModel {
     /// (principal, namespace, apigroup, resource, verb) direct RBAC entries.
     pub direct_permissions: Vec<PermissionEntry>,
     /// (principal, namespace, apigroup, resource, verb) direct + escalation-aware entries.
+    /// Order is unspecified; callers that expose results should dedupe and sort.
     pub effective_permissions: Vec<PermissionEntry>,
 }
 

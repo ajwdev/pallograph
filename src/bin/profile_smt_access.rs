@@ -75,14 +75,9 @@ fn access_model(store: &EvalStore, include_builtins: bool) -> RbacAccessModel {
     model
 }
 
-fn z3_encoder<'ctx>(
-    ctx: &'ctx z3::Context,
-    store: &EvalStore,
-    include_builtins: bool,
-) -> SmtEncoder<'ctx> {
+fn z3_encoder<'ctx>(ctx: &'ctx z3::Context, store: &EvalStore) -> SmtEncoder<'ctx> {
     let mut enc = SmtEncoder::new(ctx);
     enc.assert_rbac_axioms(store);
-    enc.include_builtins = include_builtins;
     enc
 }
 
@@ -104,7 +99,7 @@ fn main() {
             for _ in 0..args.iters {
                 let cfg = z3::Config::new();
                 let ctx = z3::Context::new(&cfg);
-                let enc = z3_encoder(&ctx, &store, args.include_builtins);
+                let enc = z3_encoder(&ctx, &store);
                 total += black_box(enc.can_entries.get("").map_or(0, Vec::len));
             }
         }
