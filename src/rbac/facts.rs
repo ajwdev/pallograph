@@ -39,10 +39,6 @@ pub fn relation_name(base: &str, suffix: &str) -> String {
     }
 }
 
-/// The group every authenticated request carries, including one made by
-/// impersonating a user.
-const AUTHENTICATED_GROUP: &str = "system:authenticated";
-
 /// Binding subject kinds, the `/user`, `/group` and `/serviceaccount` name
 /// constants in the rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -254,6 +250,12 @@ pub fn parse_direct_perm(rows: &[Vec<Value>]) -> Vec<(Subject, Permission)> {
 
 /// `principal_subject(Username, Kind, Name)` rows.
 pub fn parse_principal_subject(rows: &[Vec<Value>]) -> Vec<(String, Subject)> {
+    parse_principal_subject_rows("principal_subject", rows)
+}
+
+/// Rows of a relation shaped like `principal_subject(Username, Kind, Name)`,
+/// such as `assumed_subject`.
+pub fn parse_principal_subject_rows(relation: &str, rows: &[Vec<Value>]) -> Vec<(String, Subject)> {
     rows.iter()
         .filter_map(|row| {
             let parsed = match row.as_slice() {
@@ -264,7 +266,7 @@ pub fn parse_principal_subject(rows: &[Vec<Value>]) -> Vec<(String, Subject)> {
                 _ => None,
             };
             if parsed.is_none() {
-                unexpected_row("principal_subject", row);
+                unexpected_row(relation, row);
             }
             parsed
         })
@@ -292,6 +294,35 @@ pub fn parse_binding_subject(rows: &[Vec<Value>]) -> Vec<(Subject, (String, Stri
             };
             if parsed.is_none() {
                 unexpected_row("binding_subject", row);
+            }
+            parsed
+        })
+        .collect()
+}
+
+/// Rows of a relation keyed by a binding subject, `(Name, Kind, ...)` with
+/// `N` string columns after the kind.
+pub fn parse_subject_rows<const N: usize>(
+    relation: &str,
+    rows: &[Vec<Value>],
+) -> Vec<(Subject, [String; N])> {
+    rows.iter()
+        .filter_map(|row| {
+            let parsed = match row.as_slice() {
+                [Value::String(name), kind, rest @ ..] if rest.len() == N => (|| {
+                    let rest: Vec<String> = rest
+                        .iter()
+                        .map(|value| string(value).cloned())
+                        .collect::<Option<_>>()?;
+                    Some((
+                        Subject::new(SubjectKind::from_value(kind)?, name.clone()),
+                        rest.try_into().ok()?,
+                    ))
+                })(),
+                _ => None,
+            };
+            if parsed.is_none() {
+                unexpected_row(relation, row);
             }
             parsed
         })
@@ -342,6 +373,9 @@ pub struct PermissionTables {
     /// The subjects each known user or ServiceAccount acts as, from
     /// `principal_subject`, with the kinds named there.
     pub principal_subjects: HashMap<String, Vec<Subject>>,
+    /// The subjects each known user or ServiceAccount acts as when assumed
+    /// through escalation, from `assumed_subject`.
+    assumed_subjects: HashMap<String, Vec<Subject>>,
     /// Known members of each group, by username.
     group_members: HashMap<String, Vec<String>>,
     /// The identities (by username) and groups each principal controls
@@ -372,6 +406,13 @@ impl PermissionTables {
                 .entry(username)
                 .or_default()
                 .push(subject);
+        }
+
+        let mut assumed_subjects: HashMap<String, Vec<Subject>> = HashMap::new();
+        for (username, subject) in
+            parse_principal_subject_rows("assumed_subject", &scan("assumed_subject"))
+        {
+            assumed_subjects.entry(username).or_default().push(subject);
         }
 
         // From a user or ServiceAccount (controls_identity, controls_group)
@@ -408,6 +449,7 @@ impl PermissionTables {
         Self {
             grants,
             principal_subjects,
+            assumed_subjects,
             group_members,
             escalation_targets,
         }
@@ -434,20 +476,18 @@ impl PermissionTables {
     }
 
     /// The binding subjects whose grants an identity or group reached through
-    /// escalation brings. A user (not a ServiceAccount) is only reached by
-    /// impersonating it, and an impersonated request carries the user's own
-    /// grants and `system:authenticated`, not the groups the authenticator
-    /// would have added (`user_groups`). Kubernetes only adds those groups
-    /// when the impersonator also sends Impersonate-Group, which reaching the
-    /// group itself (`controls_group`) covers.
+    /// escalation brings: a group itself, or an identity as `assumed_subject`
+    /// lists it, itself and the groups Kubernetes adds but not its
+    /// `user_groups` groups. An impersonated request carries only those, and
+    /// a token or a pod gives a ServiceAccount nothing more.
     pub fn target_subjects(&self, target: &Subject) -> Vec<Subject> {
-        let mut subjects = self.subjects_of(target);
-        if target.kind == SubjectKind::User {
-            subjects.retain(|subject| {
-                subject.kind != SubjectKind::Group || subject.name == AUTHENTICATED_GROUP
-            });
+        if target.kind == SubjectKind::Group {
+            return vec![target.clone()];
         }
-        subjects
+        self.assumed_subjects
+            .get(&target.name)
+            .cloned()
+            .unwrap_or_else(|| vec![target.clone()])
     }
 
     /// The grants of `subjects`, each subject once.
@@ -728,9 +768,9 @@ mod tests {
         );
     }
 
-    /// `alice` is in group `devs`, which may read secrets. `imp` may
-    /// impersonate alice; `owner` controls the ServiceAccount `demo:app`, also
-    /// in devs.
+    /// `alice` logs in as a member of `devs` (from `user_groups`), which may
+    /// read secrets, as may `system:serviceaccounts:demo`. `imp` may
+    /// impersonate alice; `owner` controls the ServiceAccount `demo:app`.
     fn impersonation_tables() -> PermissionTables {
         let grant = |name: &str, kind: &str, resource: &str| {
             vec![
@@ -756,6 +796,7 @@ mod tests {
         PermissionTables::from_scan(&|relation| match relation {
             "direct_perm" => vec![
                 grant("devs", "/group", "secrets"),
+                grant("system:serviceaccounts:demo", "/group", "secrets"),
                 grant("system:authenticated", "/group", "selfsubjectreviews"),
                 grant("alice", "/user", "configmaps"),
             ],
@@ -764,7 +805,13 @@ mod tests {
                 member("alice", "/group", "devs"),
                 member("alice", "/group", "system:authenticated"),
                 member(app, "/serviceaccount", app),
-                member(app, "/group", "devs"),
+                member(app, "/group", "system:serviceaccounts:demo"),
+            ],
+            "assumed_subject" => vec![
+                member("alice", "/user", "alice"),
+                member("alice", "/group", "system:authenticated"),
+                member(app, "/serviceaccount", app),
+                member(app, "/group", "system:serviceaccounts:demo"),
             ],
             "controls_identity" => vec![pair("imp", "alice"), pair("owner", app)],
             _ => vec![],
@@ -795,7 +842,7 @@ mod tests {
             !principals.contains(&Subject::username("imp")),
             "{principals:?}"
         );
-        // A ServiceAccount's token carries its groups.
+        // A ServiceAccount assumed through a token keeps its implicit groups.
         assert!(
             principals.contains(&Subject::username("owner")),
             "{principals:?}"
@@ -812,10 +859,13 @@ mod tests {
                 Subject::username("alice"),
                 Subject::group("devs"),
                 Subject::username("system:serviceaccount:demo:app"),
+                Subject::group("system:serviceaccounts:demo"),
             ]
         );
         // One grant per binding subject, not per member.
-        assert_eq!(tables.grant_count(), 3);
-        assert_eq!(tables.direct_entries().len(), 6);
+        assert_eq!(tables.grant_count(), 4);
+        // imp and owner, missing from principal_subject, still log in as
+        // system:authenticated (subjects_of).
+        assert_eq!(tables.direct_entries().len(), 9);
     }
 }

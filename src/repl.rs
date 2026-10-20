@@ -1253,7 +1253,7 @@ fn path_sig(p: &rbac::AccessPath) -> String {
     let hops: String = p
         .hops
         .iter()
-        .map(|(a, b)| format!("{a}#{b}"))
+        .map(|(hop, mechanism)| format!("{}#{mechanism}", hop.smt_key()))
         .collect::<Vec<_>>()
         .join(",");
     format!(
@@ -1265,7 +1265,8 @@ fn path_sig(p: &rbac::AccessPath) -> String {
 fn print_violation_paths(paths: &[rbac::AccessPath]) {
     // Group paths by identical hop chain: print "via X [mech]" once, then list
     // all bindings of the target underneath it rather than repeating the header.
-    let mut by_hops: BTreeMap<&Vec<(String, String)>, Vec<&rbac::AccessPath>> = BTreeMap::new();
+    let mut by_hops: BTreeMap<&Vec<(rbac::Subject, String)>, Vec<&rbac::AccessPath>> =
+        BTreeMap::new();
     for p in paths {
         by_hops.entry(&p.hops).or_default().push(p);
     }
@@ -1275,10 +1276,10 @@ fn print_violation_paths(paths: &[rbac::AccessPath]) {
                 println!("          {}", fmt_binding(p));
             }
         } else {
-            let (id, mech) = &hops[0];
-            println!("          via {id}{}", mech_str(mech));
-            for (id, mech) in hops[1..].iter() {
-                println!("            → via {id}{}", mech_str(mech));
+            let (hop, mechanism) = &hops[0];
+            println!("          via {hop}{}", mech_str(mechanism));
+            for (hop, mechanism) in hops[1..].iter() {
+                println!("            → via {hop}{}", mech_str(mechanism));
             }
             for p in group {
                 println!("            → {}", fmt_binding(p));
@@ -1501,7 +1502,11 @@ fn paths_json(paths: &[rbac::AccessPath]) -> Vec<serde_json::Value> {
                 "role_kind": p.role_kind,
                 "role_name": p.role_name,
                 "via": p.hops.iter()
-                    .map(|(id, mech)| serde_json::json!({"identity": id, "mechanism": mech}))
+                    .map(|(hop, mechanism)| serde_json::json!({
+                        "identity": hop.name,
+                        "identity_kind": hop.kind.as_str(),
+                        "mechanism": mechanism,
+                    }))
                     .collect::<Vec<_>>(),
             })
         })

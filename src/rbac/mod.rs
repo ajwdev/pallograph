@@ -8,7 +8,7 @@
 //! directly. Z3 remains available under `smt` for analyses that need symbolic
 //! search, but normal RBAC access checks should use this model.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use mangle_common::Value;
 
@@ -17,7 +17,7 @@ use crate::engine::EvalStore;
 pub(crate) mod facts;
 mod resource_scope;
 
-use facts::{Permission, parse_binding_subject, parse_strings, unexpected_row};
+use facts::{Permission, parse_binding_subject, parse_strings, parse_subject_rows, unexpected_row};
 pub use facts::{PermissionTables, Subject, SubjectKind};
 
 /// (principal, namespace, apigroup, resource, verb).
@@ -33,7 +33,7 @@ pub struct AccessPath {
     // Escalation chain leading to this binding.
     // Each element is (identity, mechanism_used_to_reach_it).
     // Empty for direct grants (no escalation needed).
-    pub hops: Vec<(String, String)>,
+    pub hops: Vec<(Subject, String)>,
 }
 
 pub struct Violation {
@@ -44,21 +44,21 @@ pub struct Violation {
     pub paths: Vec<AccessPath>,
 }
 
+/// Shown for a hop the escalation relations cannot explain, which would mean
+/// the rules and this module disagree.
+const UNKNOWN_MECHANISM: &str = "unknown";
+
 /// A Role is keyed by (namespace, name); a ClusterRole by ("", name).
 type RoleKey = (&'static str, String, String);
 
-/// Relations naming the ServiceAccounts reached by one mechanism, each
-/// `(Principal, Namespace, ServiceAccount)`: from a user or ServiceAccount,
-/// then from a group, then the mechanism label.
-const SERVICE_ACCOUNT_MECHANISMS: [(&str, &str, &str); 4] = [
-    ("exec_reachable_sa", "group_exec_reachable_sa", "pod-exec"),
-    ("token_accessible_sa", "group_token_accessible_sa", "token"),
-    ("pod_creatable_sa", "group_pod_creatable_sa", "pod-create"),
-    (
-        "impersonatable_sa",
-        "group_impersonatable_sa",
-        "impersonate",
-    ),
+/// Relations naming the ServiceAccounts one binding subject's grants reach
+/// by one mechanism, each `(Name, Kind, Namespace, ServiceAccount)`, with the
+/// mechanism label.
+const SERVICE_ACCOUNT_MECHANISMS: [(&str, &str); 4] = [
+    ("subject_exec_reachable_sa", "pod-exec"),
+    ("subject_token_accessible_sa", "token"),
+    ("subject_pod_creatable_sa", "pod-create"),
+    ("subject_impersonatable_sa", "impersonate"),
 ];
 
 /// Closed-world RBAC access model derived from Mangle facts.
@@ -76,11 +76,14 @@ pub struct RbacAccessModel {
     binding_roles: HashMap<(String, String), Vec<(String, String)>>,
     /// (apigroup, resource, verb) each role grants, after aggregation.
     role_grants: HashMap<RoleKey, Vec<(String, String, String)>>,
-    /// `escalation_hop` and `group_escalation_hop`, by principal.
-    escalation_hops: HashMap<Subject, Vec<String>>,
-    /// Per mechanism label, the (principal, namespace, ServiceAccount) triples
-    /// it reaches.
-    service_account_mechanisms: Vec<(&'static str, HashSet<(Subject, String, String)>)>,
+    /// `subject_escalation_hop`: the identities (usernames) each binding
+    /// subject's grants can assume in one hop.
+    subject_hops: HashMap<Subject, BTreeSet<String>>,
+    /// Per mechanism label, the (namespace, ServiceAccount) pairs each binding
+    /// subject's grants reach.
+    service_account_mechanisms: Vec<(&'static str, HashMap<Subject, HashSet<(String, String)>>)>,
+    /// Groups holding a grant, which impersonating groups reaches. Sorted.
+    granted_groups: Vec<Subject>,
 }
 
 impl RbacAccessModel {
@@ -97,43 +100,47 @@ impl RbacAccessModel {
         }
 
         let mut binding_roles: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
-        for [binding_ns, binding, role_kind, role_name] in
+        for [binding_namespace, binding, role_kind, role_name] in
             parse_strings::<4>("binding_roleref", &scan("binding_roleref"))
         {
             binding_roles
-                .entry((binding_ns, binding))
+                .entry((binding_namespace, binding))
                 .or_default()
                 .push((role_kind, role_name));
         }
 
         let role_grants = role_grants(&scan);
 
-        // A user and ServiceAccount relation and its group counterpart, keyed
-        // by principal.
-        let by_principal = |relation: &str, group_relation: &str| {
-            let mut map: HashMap<Subject, Vec<String>> = HashMap::new();
-            for [from, to] in parse_strings::<2>(relation, &scan(relation)) {
-                map.entry(Subject::username(from)).or_default().push(to);
-            }
-            for [from, to] in parse_strings::<2>(group_relation, &scan(group_relation)) {
-                map.entry(Subject::group(from)).or_default().push(to);
-            }
-            map
-        };
+        let mut subject_hops: HashMap<Subject, BTreeSet<String>> = HashMap::new();
+        for (subject, [target]) in
+            parse_subject_rows::<1>("subject_escalation_hop", &scan("subject_escalation_hop"))
+        {
+            subject_hops.entry(subject).or_default().insert(target);
+        }
 
         let service_account_mechanisms = SERVICE_ACCOUNT_MECHANISMS
             .iter()
-            .map(|(relation, group_relation, label)| {
-                let mut reached = HashSet::new();
-                for [principal, ns, name] in parse_strings::<3>(relation, &scan(relation)) {
-                    reached.insert((Subject::username(principal), ns, name));
-                }
-                for [group, ns, name] in parse_strings::<3>(group_relation, &scan(group_relation)) {
-                    reached.insert((Subject::group(group), ns, name));
+            .map(|(relation, label)| {
+                let mut reached: HashMap<Subject, HashSet<(String, String)>> = HashMap::new();
+                for (subject, [namespace, service_account]) in
+                    parse_subject_rows::<2>(relation, &scan(relation))
+                {
+                    reached
+                        .entry(subject)
+                        .or_default()
+                        .insert((namespace, service_account));
                 }
                 (*label, reached)
             })
             .collect();
+
+        let mut granted_groups: Vec<Subject> = tables
+            .grants
+            .keys()
+            .filter(|subject| subject.kind == SubjectKind::Group)
+            .cloned()
+            .collect();
+        granted_groups.sort();
 
         Self {
             include_builtins: false,
@@ -141,8 +148,9 @@ impl RbacAccessModel {
             subject_bindings,
             binding_roles,
             role_grants,
-            escalation_hops: by_principal("escalation_hop", "group_escalation_hop"),
+            subject_hops,
             service_account_mechanisms,
+            granted_groups,
         }
     }
 
@@ -159,26 +167,8 @@ impl RbacAccessModel {
             && (self.include_builtins || !crate::builtins::is_builtin(&principal.name))
     }
 
-    /// The identities `principal` controls (`controls_identity`, or
-    /// `group_controls_identity` for a group).
-    fn controlled_identities<'a>(
-        &'a self,
-        principal: &Subject,
-    ) -> impl Iterator<Item = &'a Subject> + use<'a> {
-        self.escalation_targets(principal)
-            .filter(|target| target.kind != SubjectKind::Group)
-    }
-
-    /// The groups `principal` controls (`controls_group`, or
-    /// `group_controls_group` for a group).
-    fn controlled_groups<'a>(
-        &'a self,
-        principal: &Subject,
-    ) -> impl Iterator<Item = &'a Subject> + use<'a> {
-        self.escalation_targets(principal)
-            .filter(|target| target.kind == SubjectKind::Group)
-    }
-
+    /// The identities and groups `principal` controls: `controls_identity`
+    /// and `controls_group`, or their `group_` counterparts for a group.
     fn escalation_targets<'a>(
         &'a self,
         principal: &Subject,
@@ -411,42 +401,28 @@ impl RbacAccessModel {
             return paths;
         }
 
-        // Principal only reaches the permission via escalation chains.
-        //
-        // Identity targets are filtered by whether their own grants (not what
-        // they reach through escalation) match the query. This breaks
-        // mutual-impersonation cycles: a target that only has escalation
-        // access won't appear here, so cluster-admin principals don't
-        // endlessly list each other as via-paths.
-        let mut target_chains: Vec<(Vec<Subject>, Vec<(String, String)>)> = Vec::new();
-        for target in self.controlled_identities(principal) {
-            if self.target_has_permission(target, query) {
-                target_chains.push((
+        // Principal only reaches the permission via escalation chains, to
+        // identities and groups whose own grants (not what they reach through
+        // escalation) match the query. This breaks mutual-impersonation
+        // cycles: a target that only has escalation access won't appear
+        // here, so cluster-admin principals don't endlessly list each other
+        // as via-paths.
+        let tree = self.escalation_tree(principal);
+        let target_chains: Vec<(Vec<Subject>, Vec<(Subject, String)>)> = self
+            .escalation_targets(principal)
+            .filter(|target| self.target_has_permission(target, query))
+            .map(|target| {
+                (
                     self.tables.target_subjects(target),
-                    self.build_hop_chain(principal, &target.name),
-                ));
-            }
-        }
-
-        // Group targets: reached by impersonating the group, from the
-        // principal itself or the nearest identity it controls that may.
-        let group_targets: Vec<&Subject> = self
-            .controlled_groups(principal)
-            .filter(|group| self.target_has_permission(group, query))
+                    hop_chain(&tree, principal, target),
+                )
+            })
             .collect();
-        if !group_targets.is_empty() {
-            let impersonator_chain = self.group_impersonator_chain(principal);
-            for group in group_targets {
-                let mut hops = impersonator_chain.clone();
-                hops.push((group.name.clone(), "impersonate".to_string()));
-                target_chains.push((vec![group.clone()], hops));
-            }
-        }
 
-        // The set of identities that appear as the final hop of some chain.
-        let final_hop_ids: HashSet<&str> = target_chains
+        // The identities and groups that appear as the final hop of some chain.
+        let final_hops: HashSet<&Subject> = target_chains
             .iter()
-            .filter_map(|(_, hops)| hops.last().map(|(id, _)| id.as_str()))
+            .filter_map(|(_, hops)| hops.last().map(|(hop, _)| hop))
             .collect();
 
         // Suppress redundant longer paths: if a chain's intermediate hops include
@@ -455,7 +431,7 @@ impl RbacAccessModel {
         for (target_subjects, hops) in &target_chains {
             let intermediates_are_endpoints = hops[..hops.len().saturating_sub(1)]
                 .iter()
-                .any(|(hop_id, _)| final_hop_ids.contains(hop_id.as_str()));
+                .any(|(hop, _)| final_hops.contains(hop));
             if intermediates_are_endpoints {
                 continue;
             }
@@ -465,102 +441,102 @@ impl RbacAccessModel {
         paths
     }
 
-    /// Hops from `principal` to the nearest identity that may impersonate
-    /// groups: empty when `principal` may itself.
-    fn group_impersonator_chain(&self, principal: &Subject) -> Vec<(String, String)> {
-        if self
-            .tables
-            .direct_grants(principal)
-            .any(Self::impersonates_groups)
-        {
-            return vec![];
-        }
-        self.controlled_identities(principal)
-            .filter(|target| {
-                self.tables
-                    .target_grants(target)
-                    .any(Self::impersonates_groups)
-            })
-            .map(|target| self.build_hop_chain(principal, &target.name))
-            .min_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
-            .unwrap_or_default()
-    }
+    /// The shortest escalation chains from `principal`, as a tree: for each
+    /// identity or group reached, the node it was reached from and the
+    /// mechanism of that hop.
+    ///
+    /// Breadth-first, so each chain has the fewest hops and cycles in
+    /// mutual-escalation graphs are harmless. It follows the rules'
+    /// closure: `principal` acts with all its subjects (`subjects_of`), an
+    /// identity reached on the way only with its `assumed_subject`
+    /// subjects, and a group with its own grants. From each, a hop is a
+    /// `subject_escalation_hop` of one of those subjects, or impersonating
+    /// any group that holds a grant.
+    fn escalation_tree(&self, principal: &Subject) -> HashMap<Subject, (Subject, String)> {
+        let mut tree: HashMap<Subject, (Subject, String)> = HashMap::new();
+        let mut queue = VecDeque::from([principal.clone()]);
+        let mut groups_reached = false;
 
-    /// Reconstruct the escalation hop chain from `principal` to `target`, a
-    /// username. Returns `Vec<(identity, mechanism)>` describing each step;
-    /// the last element is always `target`. Breadth-first over
-    /// `escalation_hop` facts (`group_escalation_hop` for the first hop from a
-    /// group), so the chain has the fewest hops and cycles in
-    /// mutual-escalation graphs are harmless.
-    fn build_hop_chain(&self, principal: &Subject, target: &str) -> Vec<(String, String)> {
-        use std::collections::VecDeque;
+        while let Some(node) = queue.pop_front() {
+            let subjects = if node == *principal {
+                self.tables.subjects_of(&node)
+            } else {
+                self.tables.target_subjects(&node)
+            };
 
-        // Each queue entry is (node, hops taken from `principal` to reach it).
-        let mut queue: VecDeque<(Subject, Vec<(String, String)>)> = VecDeque::new();
-        let mut seen: HashSet<Subject> = HashSet::new();
-        seen.insert(principal.clone());
-        queue.push_back((principal.clone(), vec![]));
-
-        while let Some((current, path)) = queue.pop_front() {
             // Sorted so ties between equally short chains resolve the same way
             // on every run.
-            let mut neighbours: Vec<&String> = self
-                .escalation_hops
-                .get(&current)
-                .into_iter()
+            let identities: BTreeSet<&String> = subjects
+                .iter()
+                .filter_map(|subject| self.subject_hops.get(subject))
                 .flatten()
                 .collect();
-            neighbours.sort();
+            let mut next: Vec<(Subject, String)> = identities
+                .into_iter()
+                .map(|identity| {
+                    let identity = Subject::username(identity.as_str());
+                    let mechanism = self.mechanism(&subjects, &identity);
+                    (identity, mechanism)
+                })
+                .collect();
+            // Every group is one impersonation away from the first node that
+            // may impersonate groups, so later nodes add nothing.
+            if !groups_reached
+                && self
+                    .tables
+                    .grants_of(subjects.clone())
+                    .any(Self::impersonates_groups)
+            {
+                groups_reached = true;
+                next.extend(
+                    self.granted_groups
+                        .iter()
+                        .map(|group| (group.clone(), "impersonate".to_string())),
+                );
+            }
 
-            for next in neighbours {
-                let next_principal = Subject::username(next.as_str());
-                if !seen.insert(next_principal.clone()) {
+            for (target, mechanism) in next {
+                if target == *principal || tree.contains_key(&target) {
                     continue;
                 }
-                let mech = self.mechanism_for(&current, next).unwrap_or_default();
-                let mut next_path = path.clone();
-                next_path.push((next.clone(), mech));
-                if next == target {
-                    return next_path;
-                }
-                queue.push_back((next_principal, next_path));
+                tree.insert(target.clone(), (node.clone(), mechanism));
+                queue.push_back(target);
             }
         }
-
-        // Fallback: transitive closure says it's reachable but we can't reconstruct the path.
-        vec![(target.to_string(), String::new())]
+        tree
     }
 
-    /// Return the direct escalation mechanism(s) from `principal` to `target` in one hop.
-    /// Returns a comma-separated string, e.g. "pod-exec, token". Empty string if unknown.
-    fn mechanism_for(&self, principal: &Subject, target: &str) -> Option<String> {
-        let mut mechanisms = Vec::new();
-
-        let service_account = target
+    /// The mechanisms by which `subjects` assume `identity` in one hop,
+    /// comma-separated, e.g. "pod-exec, token". A ServiceAccount is reached
+    /// by the mechanisms whose `subject_*_sa` relation lists it; otherwise
+    /// the hop is user impersonation.
+    fn mechanism(&self, subjects: &[Subject], identity: &Subject) -> String {
+        let service_account = identity
+            .name
             .strip_prefix("system:serviceaccount:")
-            .and_then(|rest| rest.split_once(':'));
+            .and_then(|rest| rest.split_once(':'))
+            .map(|(namespace, name)| (namespace.to_string(), name.to_string()));
 
-        if let Some((sa_ns, sa_name)) = service_account {
-            let triple = (principal.clone(), sa_ns.to_string(), sa_name.to_string());
-            for (label, reached) in &self.service_account_mechanisms {
-                if reached.contains(&triple) {
-                    mechanisms.push(*label);
-                }
-            }
-        } else if self
-            .escalation_hops
-            .get(principal)
-            .is_some_and(|targets| targets.iter().any(|t| t == target))
-        {
-            // Non-SA target (a user): mechanism must be impersonation.
-            mechanisms.push("impersonate");
-        }
+        let mechanisms: Vec<&str> = service_account
+            .map(|service_account| {
+                self.service_account_mechanisms
+                    .iter()
+                    .filter(|(_, reached)| {
+                        subjects.iter().any(|subject| {
+                            reached
+                                .get(subject)
+                                .is_some_and(|pairs| pairs.contains(&service_account))
+                        })
+                    })
+                    .map(|(label, _)| *label)
+                    .collect()
+            })
+            .unwrap_or_default();
 
         if mechanisms.is_empty() {
-            None
+            "impersonate".to_string()
         } else {
-            mechanisms.dedup();
-            Some(mechanisms.join(", "))
+            mechanisms.join(", ")
         }
     }
 
@@ -600,7 +576,7 @@ impl RbacAccessModel {
     fn collect_binding_paths(
         &self,
         subjects: &[Subject],
-        hops: Vec<(String, String)>,
+        hops: Vec<(Subject, String)>,
         // When Some, only bindings whose referenced role grants the queried
         // permission are included. Eliminates irrelevant bindings (e.g.
         // leader-election Roles) from escalation path display.
@@ -702,6 +678,32 @@ fn role_grants(
         }
     }
     grants
+}
+
+/// The hops from `principal` to `target` in an `escalation_tree`.
+fn hop_chain(
+    tree: &HashMap<Subject, (Subject, String)>,
+    principal: &Subject,
+    target: &Subject,
+) -> Vec<(Subject, String)> {
+    let mut hops = Vec::new();
+    let mut node = target;
+    while node != principal {
+        let Some((previous, mechanism)) = tree.get(node) else {
+            // controls_identity or controls_group says the target is
+            // reachable, so the tree, which follows the same rules, reaches it,
+            // unless a REPL user added such a row by hand.
+            if cfg!(test) {
+                panic!("no escalation chain from {principal} to {target}");
+            }
+            eprintln!("warning: no escalation chain from {principal} to {target}");
+            return vec![(target.clone(), UNKNOWN_MECHANISM.to_string())];
+        };
+        hops.push((node.clone(), mechanism.clone()));
+        node = previous;
+    }
+    hops.reverse();
+    hops
 }
 
 /// A permission entry's namespace covers a queried one when it is cluster-wide
@@ -919,7 +921,7 @@ mod tests {
                 .paths_for_principal(&Subject::username(user), Some(("", "*", "*", "*")))
                 .into_iter()
                 .flat_map(|p| p.hops)
-                .filter(|(id, _)| id == "system:serviceaccount:demo:target")
+                .filter(|(hop, _)| hop.name == "system:serviceaccount:demo:target")
                 .map(|(_, mech)| mech)
                 .collect()
         };
@@ -974,7 +976,15 @@ mod tests {
                     found.iter().map(|v| &v.principal).collect::<Vec<_>>()
                 )
             });
-        v.paths.iter().map(|p| p.hops.clone()).collect()
+        v.paths
+            .iter()
+            .map(|p| {
+                p.hops
+                    .iter()
+                    .map(|(hop, mechanism)| (hop.name.clone(), mechanism.clone()))
+                    .collect()
+            })
+            .collect()
     }
 
     fn sa_id(n: &str) -> String {
@@ -1211,7 +1221,7 @@ mod tests {
                 .any(|target| target.kind != SubjectKind::Group),
             "controls_identity"
         );
-        assert!(!model.escalation_hops.is_empty(), "escalation_hop");
+        assert!(!model.subject_hops.is_empty(), "subject_escalation_hop");
         for (label, reached) in &model.service_account_mechanisms {
             assert!(!reached.is_empty(), "{label} relation");
         }
@@ -1295,7 +1305,7 @@ mod tests {
                     via.iter().map(|v| &v.principal).collect::<Vec<_>>()
                 )
             });
-        let shown: Vec<(&str, Vec<(String, String)>)> = imp
+        let shown: Vec<(&str, Vec<(Subject, String)>)> = imp
             .paths
             .iter()
             .map(|p| (p.binding_name.as_str(), p.hops.clone()))
@@ -1304,9 +1314,126 @@ mod tests {
             shown,
             [(
                 "admins",
-                vec![("admins".to_string(), "impersonate".to_string())]
+                vec![(Subject::group("admins"), "impersonate".to_string())]
             )]
         );
+    }
+
+    /// A ClusterRole `name` with one rule, bound by a ClusterRoleBinding of the
+    /// same name to one subject.
+    fn bound_clusterrole(name: &str, resource: &str, verb: &str, subject: &str) -> String {
+        format!(
+            concat!(
+                r#"{{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{{"name":"{name}"}},"rules":[{{"apiGroups":[""],"resources":["{resource}"],"verbs":["{verb}"]}}]}}"#,
+                "\n",
+                r#"{{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{{"name":"{name}"}},"roleRef":{{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"{name}"}},"subjects":[{subject}]}}"#,
+                "\n",
+            ),
+            name = name,
+            resource = resource,
+            verb = verb,
+            subject = subject,
+        )
+    }
+
+    #[test]
+    fn hop_chains_continue_through_an_impersonated_group() {
+        // imp may only impersonate groups. Group execs may exec into any pod,
+        // including one in demo running as demo:target, which holds
+        // cluster-admin, as does kube-system:default in the fixture.
+        let extra = [
+            r#"{"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"target","namespace":"demo"}}"#.to_string(),
+            r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","namespace":"demo"},"spec":{"serviceAccountName":"target","containers":[{"name":"c","image":"busybox"}]}}"#.to_string(),
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"target-admin"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"ServiceAccount","name":"target","namespace":"demo"}]}"#.to_string(),
+            bound_clusterrole("exec", "pods/exec", "create", r#"{"kind":"Group","name":"execs"}"#),
+            bound_clusterrole("imp", "groups", "impersonate", r#"{"kind":"User","name":"imp"}"#),
+        ]
+        .join("\n");
+        let eval = load_engine_with(&extra).evaluate().expect("evaluate");
+        let model = RbacAccessModel::from_store(&eval);
+
+        let paths = model.paths_for_principal(&Subject::username("imp"), Some(("", "*", "*", "*")));
+        let shown: Vec<(&str, Vec<(Subject, String)>)> = paths
+            .iter()
+            .map(|p| (p.binding_name.as_str(), p.hops.clone()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    "target-admin",
+                    vec![
+                        (Subject::group("execs"), "impersonate".to_string()),
+                        (
+                            Subject::username("system:serviceaccount:demo:target"),
+                            "pod-exec".to_string()
+                        ),
+                    ]
+                ),
+                (
+                    "cluster-admin",
+                    vec![
+                        (Subject::group("execs"), "impersonate".to_string()),
+                        (
+                            Subject::username("system:serviceaccount:kube-system:default"),
+                            "pod-exec".to_string()
+                        ),
+                    ]
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn hops_to_a_user_and_a_group_with_the_same_name_stay_apart() {
+        // imp may impersonate users and groups; the user twin and the group
+        // twin may each read secrets.
+        let extra = [
+            bound_clusterrole(
+                "twin-user",
+                "secrets",
+                "get",
+                r#"{"kind":"User","name":"twin"}"#,
+            ),
+            bound_clusterrole(
+                "twin-group",
+                "secrets",
+                "get",
+                r#"{"kind":"Group","name":"twin"}"#,
+            ),
+            bound_clusterrole(
+                "imp-users",
+                "users",
+                "impersonate",
+                r#"{"kind":"User","name":"imp"}"#,
+            ),
+            bound_clusterrole(
+                "imp-groups",
+                "groups",
+                "impersonate",
+                r#"{"kind":"User","name":"imp"}"#,
+            ),
+        ]
+        .join("\n");
+        let eval = load_engine_with(&extra).evaluate().expect("evaluate");
+        let model = RbacAccessModel::from_store(&eval);
+
+        let paths =
+            model.paths_for_principal(&Subject::username("imp"), Some(("", "", "secrets", "get")));
+        let mut twin_hops: Vec<(Subject, &str)> = paths
+            .iter()
+            .filter(|p| p.binding_name.starts_with("twin-"))
+            .map(|p| (p.hops[0].0.clone(), p.binding_name.as_str()))
+            .collect();
+        twin_hops.sort();
+        assert_eq!(
+            twin_hops,
+            [
+                (Subject::username("twin"), "twin-user"),
+                (Subject::group("twin"), "twin-group"),
+            ]
+        );
+        assert_eq!(Subject::group("twin").to_string(), "twin (group)");
     }
 
     #[test]
@@ -1342,7 +1469,7 @@ mod tests {
                         .collect::<Vec<_>>()
                 )
             });
-        let shown: Vec<(&str, Vec<(String, String)>)> = execs
+        let shown: Vec<(&str, Vec<(Subject, String)>)> = execs
             .paths
             .iter()
             .map(|p| (p.binding_name.as_str(), p.hops.clone()))
@@ -1352,7 +1479,7 @@ mod tests {
             [(
                 "target-admin",
                 vec![(
-                    "system:serviceaccount:demo:target".to_string(),
+                    Subject::username("system:serviceaccount:demo:target"),
                     "pod-exec".to_string()
                 )]
             )]
