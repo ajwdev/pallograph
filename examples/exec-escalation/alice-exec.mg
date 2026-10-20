@@ -23,6 +23,6 @@
 #   \access-diff baseline
 #   \smt cluster-admin
 
-rolebinding_subject_user("kube-system", "rb-alice-exec", "alice").
-rolebinding_roleref("kube-system", "rb-alice-exec", "Role", "alice-exec").
-role_perm("kube-system", "alice-exec", "", "pods/exec", "create").
+binding_subject("kube-system", "rb-alice-exec", /user, "alice").
+binding_roleref("kube-system", "rb-alice-exec", "Role", "alice-exec").
+role_rule("kube-system", "alice-exec", {/apiGroups: [""], /resources: ["pods/exec"], /verbs: ["create"]}).

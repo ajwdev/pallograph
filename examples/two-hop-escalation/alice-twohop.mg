@@ -26,9 +26,9 @@
 #   \smt cluster-admin
 
 # Grant 1: alice gets pods/exec in the app namespace (today's PR)
-rolebinding_subject_user("app", "rb-alice-app-exec", "alice").
-rolebinding_roleref("app", "rb-alice-app-exec", "Role", "app-exec").
-role_perm("app", "app-exec", "", "pods/exec", "create").
+binding_subject("app", "rb-alice-app-exec", /user, "alice").
+binding_roleref("app", "rb-alice-app-exec", "Role", "app-exec").
+role_rule("app", "app-exec", {/apiGroups: [""], /resources: ["pods/exec"], /verbs: ["create"]}).
 
 # The app:worker SA runs a pod alice can exec into
 serviceaccount("app", "worker", "").
@@ -36,6 +36,6 @@ pod_sa("app", "app-worker-pod", "worker").
 
 # Grant 2: app:worker was previously given token creation in kube-system
 # (platform team approved this separately for credential rotation)
-rolebinding_subject_sa("kube-system", "rb-worker-token", "app", "worker").
-rolebinding_roleref("kube-system", "rb-worker-token", "Role", "worker-token-creator").
-role_perm("kube-system", "worker-token-creator", "", "serviceaccounts/token", "create").
+binding_subject("kube-system", "rb-worker-token", /serviceaccount, "system:serviceaccount:app:worker").
+binding_roleref("kube-system", "rb-worker-token", "Role", "worker-token-creator").
+role_rule("kube-system", "worker-token-creator", {/apiGroups: [""], /resources: ["serviceaccounts/token"], /verbs: ["create"]}).

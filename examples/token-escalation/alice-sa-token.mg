@@ -21,6 +21,6 @@
 #   \access-diff baseline
 #   \smt cluster-admin
 
-rolebinding_subject_user("kube-system", "rb-alice-token", "alice").
-rolebinding_roleref("kube-system", "rb-alice-token", "Role", "alice-token-creator").
-role_perm("kube-system", "alice-token-creator", "", "serviceaccounts/token", "create").
+binding_subject("kube-system", "rb-alice-token", /user, "alice").
+binding_roleref("kube-system", "rb-alice-token", "Role", "alice-token-creator").
+role_rule("kube-system", "alice-token-creator", {/apiGroups: [""], /resources: ["serviceaccounts/token"], /verbs: ["create"]}).

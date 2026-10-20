@@ -43,7 +43,7 @@ identity, and the derivation behind one of those answers.
 
 ```
 ?- k8s_object_count
-?- direct_perm(Who, "", "*", "*", "*")
+?- direct_perm(Who, Kind, "", "*", "*", /any, "*")
 \smt cluster-admin
 ?- controls_identity(P, Target)
 \why controls_identity("developer@example.com", "system:serviceaccount:kube-system:default")
@@ -125,12 +125,12 @@ Other flags worth knowing:
 
 ## How it works
 
-The rules live in [`rules/`](rules/) as plain Mangle files. `base.mg` and
-`rbac.mg` project raw objects into relations like `direct_perm/5`; `escalation.mg`
-models identity theft paths (exec into a pod, mint a token, impersonate);
-`labels.mg` implements label selectors; `summary.mg` does inventory counts.
-`build.rs` compiles every rule file at build time, so a broken rule fails
-`cargo build` instead of your demo.
+The rules live in [`rules/`](rules/) as plain Mangle files. `base.mg` projects
+raw objects into typed relations; the three `rbac*.mg` files model RBAC (see
+below); `escalation.mg` models identity theft paths (exec into a pod, mint a
+token, impersonate); `labels.mg` implements label selectors; `summary.mg` does
+inventory counts. `build.rs` compiles every rule file at build time, so a
+broken rule fails `cargo build` instead of your demo.
 
 There are two evaluation backends, and they must produce the same facts:
 
@@ -143,9 +143,64 @@ There are two evaluation backends, and they must produce the same facts:
   matters once the cluster gets big. Provenance is lazy and opt-in; see
   [`docs/lazy-provenance.md`](docs/lazy-provenance.md).
 
-RBAC correctness is checked against upstream Kubernetes itself: the Go program
-in [`tools/rbac-oracle/`](tools/rbac-oracle/) wraps the real RBAC authorizer
-and serves as the oracle for `tests/rbac_compat.rs`.
+### RBAC relations
+
+The RBAC rules are split by question, and each file's header lists its
+relations:
+
+- `rbac_roles.mg`: what a role grants. `role_rule` and `clusterrole_rule`
+  hold each role's PolicyRules (ClusterRole aggregation applied), and
+  `policy_rule_perm` / `policy_rule_url_perm` flatten one PolicyRule into
+  (apiGroup, resource, resourceName, verb) or (URL, verb) rows.
+- `rbac_subjects.mg`: who a binding applies to. `binding_subject` and
+  `binding_roleref` cover RoleBindings and ClusterRoleBindings alike, and
+  `principal_subject(Username, Kind, Name)` lists the subjects a user or
+  service account acts as: itself plus each of its groups.
+- `rbac.mg`: the joins. `direct_perm/7` and `direct_url_perm/4` hold each
+  binding subject's own grants, and `rbac_allowed` decides `access_request`
+  facts the way the kube-apiserver RBAC authorizer does.
+
+Subjects are kind-tagged (`/user`, `/group`, `/serviceaccount`), so a User
+and a Group with the same name stay distinct. Grants are stored once per
+binding subject rather than copied to every group member; to ask what a
+principal can do, join through its groups:
+
+```
+?- principal_subject("alice", Kind, Name), direct_perm(Name, Kind, Ns, G, R, N, V)
+```
+
+Wildcards (`*`) stay literal strings in these relations, and a resourceName
+of `/any` means any name (the rule lists no resourceNames). Escalation works the same way:
+`controls_identity` and `controls_group` say who reaches whom, and the
+permissions gained are joined on demand rather than stored.
+
+### RBAC compatibility harness
+
+`tests/rbac_compat.rs` checks `rbac_allowed` against upstream Kubernetes
+itself. The Go program in [`tools/rbac-oracle/`](tools/rbac-oracle/) loads a
+world of RBAC objects with the API server's defaulting, validation and
+ClusterRole aggregation, generates probe requests for it, and decides them
+with the real RBAC authorizer (the oracle). Pallograph decides the same
+requests on both backends, which must agree with each other exactly; every
+disagreement with the oracle is an over-grant or under-grant, bucketed by
+feature tag.
+
+- Curated worlds under `tests/rbac_compat/worlds/` each target a corner of
+  RBAC (resourceNames, nonResourceURLs, subresources, aggregation shapes,
+  subject kinds, the v1.37 bootstrap policy). `hack/rbac-compat-gen.sh`
+  generates their requests and decisions into `target/rbac-compat/`.
+- `tests/rbac_compat/baseline.json` is a ratchet of known mismatch counts
+  per world. Every entry is currently `{}`: each curated world matches the
+  authorizer exactly.
+- `hack/rbac-compat.sh -s SEED -n COUNT` is the fuzz tier: it generates
+  random worlds from a seed, decides them with the oracle, and reports
+  worlds whose mismatches the curated worlds do not cover.
+
+Aggregation cycles whose roles also have rules of their own are left out of
+the curated worlds. There, a role's own rules can leak around the cycle
+before the controller replaces them, and which ones leak depends on the order
+it visits the roles. Pallograph assumes they are always replaced, so it can
+under-grant in that case, and the fuzz tier reports it.
 
 ## Development
 
@@ -158,8 +213,10 @@ nix develop .#ci -c hack/rbac-compat-gen.sh   # needed before rbac_compat tests
 nix develop .#ci -c cargo test --all-targets --locked
 ```
 
-`hack/` also has scripts for spinning up kind and KWOK clusters to test
-against. [`AGENTS.md`](AGENTS.md) covers repo conventions and known upstream
+`hack/relation-sizes.sh` counts the rows each RBAC and escalation relation
+derives for a rules directory and a set of manifests; use it to compare rule
+revisions, since row counts drive evaluation time and memory. `hack/` also
+has scripts for spinning up kind and KWOK clusters to test against. [`AGENTS.md`](AGENTS.md) covers repo conventions and known upstream
 Mangle bugs we deliberately work around rather than patch.
 
 ## Benchmarks

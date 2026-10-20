@@ -27,11 +27,9 @@
 
 # ops-monitor ClusterRole: pre-existing in the cluster, not part of today's PR.
 # Originally read-only; "serviceaccounts/token create" was added months ago.
-clusterrole_perm("ops-monitor", "", "pods", "get").
-clusterrole_perm("ops-monitor", "", "pods", "list").
-clusterrole_perm("ops-monitor", "", "pods", "watch").
-clusterrole_perm("ops-monitor", "", "serviceaccounts/token", "create").
+clusterrole_own_rule("ops-monitor", {/apiGroups: [""], /resources: ["pods"], /verbs: ["get", "list", "watch"]}).
+clusterrole_own_rule("ops-monitor", {/apiGroups: [""], /resources: ["serviceaccounts/token"], /verbs: ["create"]}).
 
 # Today's PR — the only change in the diff:
-rolebinding_subject_user("kube-system", "rb-alice-ops", "alice").
-rolebinding_roleref("kube-system", "rb-alice-ops", "ClusterRole", "ops-monitor").
+binding_subject("kube-system", "rb-alice-ops", /user, "alice").
+binding_roleref("kube-system", "rb-alice-ops", "ClusterRole", "ops-monitor").

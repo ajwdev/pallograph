@@ -14,10 +14,11 @@
 //! counted once in the direction's "total" bucket and once per oracle feature
 //! tag, e.g. "under-grant: rule-wildcard-subresource".
 //!
-//! Known gaps are expected, so the counts are compared against
-//! `tests/rbac_compat/baseline.json` as a ratchet: the test fails when a
-//! bucket grows or a new one appears, and suggests tightening the baseline
-//! when one shrinks. `UPDATE_BASELINE=1 cargo test --test rbac_compat`
+//! The counts are compared against `tests/rbac_compat/baseline.json` as a
+//! ratchet: the test fails when a bucket grows or a new one appears, and
+//! suggests tightening the baseline when one shrinks. Every world's entry is
+//! currently empty, so any mismatch fails the test; a known gap can still be
+//! recorded there while it is being worked on. `UPDATE_BASELINE=1 cargo test --test rbac_compat`
 //! rewrites it. Every mismatch is written to
 //! `target/tmp/rbac-compat/<world>.ndjson` for inspection.
 //!

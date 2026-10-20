@@ -29,6 +29,12 @@ Only the non-obvious parts:
 - `rules/*.mg` - Mangle rules. `00_edb_prelude.mg` declares the input
   relations and is `include_str!`'d into the binary; `build.rs` compiles every
   rule file at build time, so a broken rule fails `cargo build`.
+- RBAC rules are split three ways: `rules/rbac_roles.mg` (what a role grants,
+  aggregation included), `rules/rbac_subjects.mg` (who a binding applies to,
+  and the subjects a principal acts as) and `rules/rbac.mg` (`direct_perm`,
+  `direct_url_perm` and `rbac_allowed`). File headers list the relations.
+- `hack/relation-sizes.sh` counts rows per RBAC and escalation relation;
+  use it to compare rule revisions.
 - `src/engine.rs` - `Engine` and the `Backend` trait, with two backends
   selected by `--backend` (default `interpreter`):
   - `InterpreterBackend` - batch evaluation via `mangle-interpreter`.
