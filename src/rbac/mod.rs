@@ -591,9 +591,10 @@ impl RbacAccessModel {
         &self,
         subjects: &[Subject],
         hops: Vec<(Subject, String)>,
-        // When Some, only bindings whose referenced role grants the queried
-        // permission are included. Eliminates irrelevant bindings (e.g.
-        // leader-election Roles) from escalation path display.
+        // When Some, only bindings that apply in the queried namespace and
+        // whose referenced role grants the queried permission are included.
+        // Eliminates irrelevant bindings (e.g. leader-election Roles) from
+        // escalation path display.
         perm_filter: Option<(&str, &str, &str, &str)>,
         out: &mut Vec<AccessPath>,
     ) {
@@ -602,6 +603,13 @@ impl RbacAccessModel {
             for (binding_namespace, binding) in
                 self.subject_bindings.get(subject).into_iter().flatten()
             {
+                // A RoleBinding grants only in its own namespace, so it
+                // explains neither a query elsewhere nor a cluster-wide one.
+                if perm_filter.is_some_and(|(query_namespace, ..)| {
+                    !ns_covers(binding_namespace, query_namespace)
+                }) {
+                    continue;
+                }
                 let roles = self
                     .binding_roles
                     .get(&(binding_namespace.clone(), binding.clone()))
@@ -1571,5 +1579,73 @@ mod tests {
             binding("twin-group", "Group"),
         ]
         .join("\n")
+    }
+
+    /// A RoleBinding in `namespace` naming alice, to ClusterRole `role`.
+    fn alice_role_binding(namespace: &str, role: &str) -> String {
+        format!(
+            r#"{{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{{"name":"alice-{role}","namespace":"{namespace}"}},"roleRef":{{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"{role}"}},"subjects":[{{"kind":"User","name":"alice"}}]}}"#
+        )
+    }
+
+    /// The (binding namespace, binding name) of each path shown for alice.
+    fn alice_bindings(violations: &[super::Violation]) -> Vec<(String, String)> {
+        let alice = violations
+            .iter()
+            .find(|v| v.principal == Subject::username("alice"))
+            .expect("alice reported");
+        alice
+            .paths
+            .iter()
+            .map(|p| (p.binding_namespace.clone(), p.binding_name.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn paths_show_only_role_bindings_in_the_queried_namespace() {
+        // alice may read secrets in dev and in payments, each through its
+        // own RoleBinding.
+        let extra = [
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"secret-reader"},"rules":[{"apiGroups":[""],"resources":["secrets"],"verbs":["get"]}]}"#.to_string(),
+            alice_role_binding("dev", "secret-reader"),
+            alice_role_binding("payments", "secret-reader"),
+        ]
+        .join("\n");
+        let eval = load_engine_with(&extra).evaluate().expect("evaluate");
+        let model = RbacAccessModel::from_store(&eval);
+
+        let reaches = model.check_reaches("payments", "", "secrets", "get", &[], true);
+        assert_eq!(
+            alice_bindings(&reaches),
+            [("payments".to_string(), "alice-secret-reader".to_string())]
+        );
+        let direct = model.direct_violations("dev", "", "secrets", "get");
+        assert_eq!(
+            alice_bindings(&direct),
+            [("dev".to_string(), "alice-secret-reader".to_string())]
+        );
+    }
+
+    #[test]
+    fn cluster_wide_paths_show_only_cluster_role_bindings() {
+        // alice holds cluster-admin through a ClusterRoleBinding, and in dev
+        // also through a RoleBinding, which grants nothing cluster-wide.
+        let extra = [
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"alice-admin"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"User","name":"alice"}]}"#.to_string(),
+            alice_role_binding("dev", "cluster-admin"),
+        ]
+        .join("\n");
+        let eval = load_engine_with(&extra).evaluate().expect("evaluate");
+        let model = RbacAccessModel::from_store(&eval);
+
+        let cluster_admin = [(String::new(), "alice-admin".to_string())];
+        assert_eq!(
+            alice_bindings(&model.direct_violations("", "*", "*", "*")),
+            cluster_admin
+        );
+        assert_eq!(
+            alice_bindings(&model.check_reaches("", "*", "*", "*", &[], true)),
+            cluster_admin
+        );
     }
 }
