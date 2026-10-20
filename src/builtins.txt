@@ -8,6 +8,12 @@
 #   pattern*   - prefix match (everything starting with "pattern")
 #   pattern    - exact match
 #
+# A pattern matches a principal by name, whatever its kind (user, group or
+# ServiceAccount). The names below sit under the system: and eks: prefixes,
+# which Kubernetes and EKS reserve for themselves, so a user and a group
+# sharing one of them would both be platform principals. The sections
+# record which kind each entry is.
+#
 # Use ::smt cluster-admin --all to include builtins.
 #
 # Controller list generated from upstream k8s via:

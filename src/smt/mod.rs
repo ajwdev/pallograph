@@ -9,13 +9,13 @@ use z3::ast::{Ast, Dynamic, Int};
 use z3::{FuncDecl, RecFuncDecl, Solver, Sort};
 
 use crate::engine::EvalStore;
-use crate::rbac::PermissionEntry;
+use crate::rbac::{PermissionEntry, Subject};
 pub mod diff;
 pub mod rbac_model;
 pub mod scheduling;
 
 /// Escalation targets per effective permission entry.
-pub type EscalationVia = HashMap<PermissionEntry, BTreeSet<String>>;
+pub type EscalationVia = HashMap<PermissionEntry, BTreeSet<Subject>>;
 
 /// Encodes Mangle ground facts as Z3 assertions and exposes the solver for
 /// constraint checking.
@@ -29,9 +29,9 @@ pub struct SmtEncoder<'ctx> {
     pub facts: HashMap<String, Vec<Vec<Value>>>,
     /// (principal, namespace, apigroup, resource, verb) entries per named suffix.
     /// Key is the suffix passed to assert_rbac_axioms_as (empty string = bare "can").
-    pub can_entries: HashMap<String, Vec<(String, String, String, String, String)>>,
+    pub can_entries: HashMap<String, Vec<PermissionEntry>>,
     /// (principal, namespace, apigroup, resource, verb) entries for effective_can, same keying.
-    pub eff_entries: HashMap<String, Vec<(String, String, String, String, String)>>,
+    pub eff_entries: HashMap<String, Vec<PermissionEntry>>,
     /// For effective_can entries reached through escalation, the identities they
     /// were reached through, same keying.
     pub escalation_via: HashMap<String, EscalationVia>,

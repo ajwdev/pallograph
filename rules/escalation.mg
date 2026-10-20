@@ -8,12 +8,17 @@
 #   controls_group(P, Group) - P, or an identity it controls, can impersonate
 #       Group, which holds grants.
 #
+#   group_controls_identity(Group, Target), group_controls_group(Group, Other)
+#       - the same, starting from a group's own grants. Any member of Group
+#       gains what they reach.
+#
 # Principals (P, Target) are users and ServiceAccounts, by username. A group
-# is never a principal: nobody authenticates as one, so a group neither hops
-# nor is hopped to. Impersonating a group is recorded in controls_group
-# instead, and the group's grants are not followed further: Kubernetes only
-# accepts Impersonate-Group alongside Impersonate-User, and impersonating a
-# user is modelled as its own hop.
+# is never a principal: nobody authenticates as one, so a group is never
+# hopped to. Impersonating a group is recorded in controls_group instead, and
+# the group's grants are not followed further: Kubernetes only accepts
+# Impersonate-Group alongside Impersonate-User, and impersonating a user is
+# modelled as its own hop. A group can be where a path starts, though; see
+# "Escalation from groups" at the end of this file.
 #
 # Escalation paths modeled:
 #   1. Impersonation  - impersonate verb on users/serviceaccounts/groups
@@ -26,6 +31,7 @@
 #   controls_identity(P, Target), principal_subject(Target, Kind, Name),
 #       direct_perm(Name, Kind, Ns, ApiGroup, Resource, ResourceName, Verb)
 #   controls_group(P, Group), direct_perm(Group, /group, Ns, ...)
+#   group_controls_identity(G, Target), then as for controls_identity
 
 # ---- Permission guards ----
 #
@@ -265,3 +271,118 @@ controls_group(P, Group) :-
     controls_identity(P, Mid),
     perm_group_impersonate(Mid, _),
     group_has_grant(Group).
+
+# ---- Escalation from groups ----
+#
+# A group is never a principal, but a binding can grant a group the
+# permissions above. Group members are mostly unknown (membership comes from
+# the authenticator, and user_groups only lists what the caller supplied), so
+# the escalation_hop rules, which start from known users and ServiceAccounts,
+# would lose such a grant. These relations start from the group instead,
+# using only its own grants, direct_perm(Group, /group, ...): whatever they
+# reach, any member reaches too.
+#
+# Each helper looks up its grant_X guard with Kind bound to /group. The guard
+# is already filtered on resource and verb, so this is a scan of a small
+# relation, not of direct_perm.
+
+group_token_accessible_sa(Group, SANs, SAName) :-
+    grant_sa_token_create(Group, /group, SANs),
+    serviceaccount(SANs, SAName, _).
+
+group_token_accessible_sa(Group, SANs, SAName) :-
+    grant_sa_token_create(Group, /group, ""),
+    serviceaccount(SANs, SAName, _).
+
+group_exec_reachable_sa(Group, PodNs, SAName) :-
+    grant_pods_exec_create(Group, /group, PodNs),
+    pod_sa(PodNs, _, SAName).
+
+group_exec_reachable_sa(Group, PodNs, SAName) :-
+    grant_pods_exec_create(Group, /group, ""),
+    pod_sa(PodNs, _, SAName).
+
+group_exec_reachable_sa(Group, PodNs, SAName) :-
+    grant_pods_attach_create(Group, /group, PodNs),
+    pod_sa(PodNs, _, SAName).
+
+group_exec_reachable_sa(Group, PodNs, SAName) :-
+    grant_pods_attach_create(Group, /group, ""),
+    pod_sa(PodNs, _, SAName).
+
+group_pod_creatable_sa(Group, SANs, SAName) :-
+    grant_pods_create(Group, /group, SANs),
+    serviceaccount(SANs, SAName, _).
+
+group_pod_creatable_sa(Group, SANs, SAName) :-
+    grant_pods_create(Group, /group, ""),
+    serviceaccount(SANs, SAName, _).
+
+group_impersonatable_sa(Group, SANs, SAName) :-
+    grant_sa_impersonate(Group, /group, SANs),
+    serviceaccount(SANs, SAName, _).
+
+group_impersonatable_sa(Group, SANs, SAName) :-
+    grant_sa_impersonate(Group, /group, ""),
+    serviceaccount(SANs, SAName, _).
+
+Decl group_escalation_hop(Group, Target)
+  descr [
+    doc("Single-step escalation from a group: any member of Group can assume Target's identity via one mechanism, using the group's own grants."),
+    arg(Group, "group whose direct_perm grants allow the escalation"),
+    arg(Target, "the user or ServiceAccount whose identity members of Group can directly assume")
+  ].
+
+group_escalation_hop(Group, Target) :-
+    group_impersonatable_sa(Group, SANs, SAName)
+    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+group_escalation_hop(Group, Target) :-
+    group_token_accessible_sa(Group, SANs, SAName)
+    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+group_escalation_hop(Group, Target) :-
+    group_exec_reachable_sa(Group, PodNs, SAName)
+    |> let Target = fn:string:concat("system:serviceaccount:", PodNs, ":", SAName).
+
+group_escalation_hop(Group, Target) :-
+    group_pod_creatable_sa(Group, SANs, SAName)
+    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+group_escalation_hop(Group, Target) :-
+    grant_user_impersonate(Group, /group, _),
+    known_principal(/user, Target),
+    principal_has_grant(Target).
+
+# One group hop, then the user and ServiceAccount closure. Not recursive:
+# after the first hop the path continues from an identity, never a group.
+Decl group_controls_identity(Group, Target)
+  descr [
+    doc("Any member of Group can assume Target's identity via one or more escalation hops, starting from the group's own grants."),
+    arg(Group, "group whose direct_perm grants start the escalation"),
+    arg(Target, "the user or ServiceAccount members of Group ultimately control")
+  ].
+
+group_controls_identity(Group, Target) :- group_escalation_hop(Group, Target).
+
+group_controls_identity(Group, Target) :-
+    group_escalation_hop(Group, Mid),
+    controls_identity(Mid, Target).
+
+Decl group_controls_group(Group, Other)
+  descr [
+    doc("Any member of Group, or an identity the group controls, can impersonate Other, which holds grants."),
+    arg(Group, "group whose direct_perm grants start the escalation"),
+    arg(Other, "another group whose direct_perm grants members of Group can use")
+  ].
+
+group_controls_group(Group, Other) :-
+    grant_group_impersonate(Group, /group, _),
+    group_has_grant(Other),
+    Group != Other.
+
+group_controls_group(Group, Other) :-
+    group_controls_identity(Group, Mid),
+    perm_group_impersonate(Mid, _),
+    group_has_grant(Other),
+    Group != Other.

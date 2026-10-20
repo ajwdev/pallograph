@@ -73,9 +73,9 @@ fn failing_check_emits_ndjson_and_exits_1() {
         assert!(l["paths"].is_array(), "missing paths: {l}");
     }
     assert!(
-        lines
-            .iter()
-            .any(|l| l["principal"] == "admin@example.com" && l["kind"] == "direct"),
+        lines.iter().any(|l| l["principal"] == "admin@example.com"
+            && l["principal_kind"] == "user"
+            && l["kind"] == "direct"),
         "admin@example.com not reported as a direct cluster-admin: {lines:?}"
     );
     assert_eq!(

@@ -12,12 +12,15 @@
 //   can(principal, namespace, apigroup, resource, verb) → Bool
 //     True when some binding grants the permission to the principal, itself
 //     or through one of its groups. Groups named by a binding are principals
-//     too (see `PermissionTables`).
+//     too (see `PermissionTables`). A principal is a string tagged with its
+//     kind (`Subject::smt_key`), e.g. "/user:alice" or "/group:admins", so a
+//     user and a group with the same name are different principals.
 //     Wildcard matching ("*" in any position) is modeled in Z3 via `matches`.
 //
 //   effective_can(principal, namespace, apigroup, resource, verb) → Bool
 //     Like can/5 but folds in what escalation reaches through
-//     controls_identity and controls_group.
+//     controls_identity and controls_group, and from a group through
+//     group_controls_identity and group_controls_group.
 //
 // Both functions are defined as Z3 RecFuncDecls: finite case analyses with no
 // quantifiers. This avoids the quantifier-instantiation overhead of the
@@ -34,6 +37,7 @@ use z3::{RecFuncDecl, Sort};
 
 use super::SmtEncoder;
 use crate::engine::EvalStore;
+use crate::rbac::PermissionEntry;
 use crate::rbac::facts::{PermissionTables, relation_name};
 
 impl<'ctx> SmtEncoder<'ctx> {
@@ -97,7 +101,7 @@ impl<'ctx> SmtEncoder<'ctx> {
 fn build_can_rec_func<'ctx>(
     ctx: &'ctx z3::Context,
     name: &str,
-    entries: &[(String, String, String, String, String)],
+    entries: &[PermissionEntry],
 ) -> RecFuncDecl<'ctx> {
     let str_sort = Sort::string(ctx);
     let domain = [&str_sort, &str_sort, &str_sort, &str_sort, &str_sort];
@@ -130,7 +134,7 @@ fn build_can_rec_func<'ctx>(
     let clauses: Vec<Bool<'ctx>> = entries
         .iter()
         .map(|(pe, nse, age, re, ve)| {
-            let pe_z3 = Z3String::from_str(ctx, pe).unwrap();
+            let pe_z3 = Z3String::from_str(ctx, &pe.smt_key()).unwrap();
             let nse_z3 = Z3String::from_str(ctx, nse).unwrap();
             Bool::and(
                 ctx,
@@ -171,7 +175,7 @@ fn build_can_rec_func<'ctx>(
 fn build_effective_can_rec_func<'ctx>(
     ctx: &'ctx z3::Context,
     name: &str,
-    entries: &[(String, String, String, String, String)],
+    entries: &[PermissionEntry],
 ) -> RecFuncDecl<'ctx> {
     let str_sort = Sort::string(ctx);
     let domain = [&str_sort, &str_sort, &str_sort, &str_sort, &str_sort];
@@ -200,7 +204,7 @@ fn build_effective_can_rec_func<'ctx>(
     let clauses: Vec<Bool<'ctx>> = entries
         .iter()
         .map(|(pe, nse, age, re, ve)| {
-            let pe_z3 = Z3String::from_str(ctx, pe).unwrap();
+            let pe_z3 = Z3String::from_str(ctx, &pe.smt_key()).unwrap();
             let nse_z3 = Z3String::from_str(ctx, nse).unwrap();
             Bool::and(
                 ctx,

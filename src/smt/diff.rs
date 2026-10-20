@@ -8,10 +8,11 @@ use z3::ast::Ast;
 use z3::ast::String as Z3String;
 
 use super::SmtEncoder;
+use crate::rbac::Subject;
 use crate::rbac::facts::relation_name;
 
 pub struct CanDiff {
-    pub principal: String,
+    pub principal: Subject,
     pub namespace: String,
     pub apigroup: String,
     pub resource: String,
@@ -19,7 +20,7 @@ pub struct CanDiff {
 }
 
 pub struct EffDiff {
-    pub principal: String,
+    pub principal: Subject,
     pub namespace: String,
     pub apigroup: String,
     pub resource: String,
@@ -74,7 +75,7 @@ impl<'ctx> SmtEncoder<'ctx> {
 
         let mut results = Vec::new();
         for (principal, namespace, apigroup, resource, verb) in have_set.difference(&not_have_set) {
-            let p = Z3String::from_str(self.ctx, principal).unwrap();
+            let p = Z3String::from_str(self.ctx, &principal.smt_key()).unwrap();
             let ns = Z3String::from_str(self.ctx, namespace).unwrap();
             let ag = Z3String::from_str(self.ctx, apigroup).unwrap();
             let r = Z3String::from_str(self.ctx, resource).unwrap();
@@ -117,7 +118,7 @@ impl<'ctx> SmtEncoder<'ctx> {
 
         let mut results = Vec::new();
         for (principal, namespace, apigroup, resource, verb) in have_set.difference(&not_have_set) {
-            let p = Z3String::from_str(self.ctx, principal).unwrap();
+            let p = Z3String::from_str(self.ctx, &principal.smt_key()).unwrap();
             let ns = Z3String::from_str(self.ctx, namespace).unwrap();
             let ag = Z3String::from_str(self.ctx, apigroup).unwrap();
             let r = Z3String::from_str(self.ctx, resource).unwrap();
@@ -154,7 +155,11 @@ mod tests {
     use super::super::SmtEncoder;
     use crate::edb;
     use crate::engine::{Engine, InterpreterBackend};
+    use crate::rbac::Subject;
     use crate::snapshot::{Scope, Snapshot};
+    use z3::SatResult;
+    use z3::ast::Ast;
+    use z3::ast::String as Z3String;
 
     /// A `direct_perm` row granting a User subject, for any object name.
     fn user_grant(user: &str, ns: &str, apigroup: &str, resource: &str, verb: &str) -> Vec<Value> {
@@ -223,7 +228,7 @@ mod tests {
 
         let gained = enc.check_permission_expansion("before", "after");
         assert_eq!(gained.len(), 1, "alice should be the only new principal");
-        assert_eq!(gained[0].principal, "alice");
+        assert_eq!(gained[0].principal, Subject::username("alice"));
         assert_eq!(gained[0].namespace, "default");
         assert_eq!(gained[0].resource, "pods");
         assert_eq!(gained[0].verb, "get");
@@ -313,5 +318,67 @@ mod tests {
         for rel in ["direct_perm", "principal_subject", "controls_identity"] {
             assert!(enc.facts.contains_key(rel), "{rel} not loaded");
         }
+    }
+
+    #[test]
+    fn user_and_group_with_the_same_name_stay_apart() {
+        // User twin may read secrets; group twin may delete pods.
+        let grant = |kind: &str, resource: &str, verb: &str| {
+            vec![
+                Value::String("twin".into()),
+                Value::Name(kind.into()),
+                Value::String("".into()),
+                Value::String("".into()),
+                Value::String(resource.into()),
+                Value::Name("/any".into()),
+                Value::String(verb.into()),
+            ]
+        };
+        let empty_snap = Snapshot::from_store(&MemStore::new(), Scope::All);
+        let twins_snap = {
+            let mut store = MemStore::new();
+            store.add_fact("direct_perm", grant("/user", "secrets", "get"));
+            store.add_fact("direct_perm", grant("/group", "pods", "delete"));
+            Snapshot::from_store(&store, Scope::All)
+        };
+
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let mut enc = SmtEncoder::new(&ctx);
+        enc.assert_rbac_axioms_from_snapshot_as(&empty_snap, "before");
+        enc.assert_rbac_axioms_from_snapshot_as(&twins_snap, "after");
+
+        // can_after(principal, "default", "", resource, verb) holds.
+        let can = |principal: &Subject, resource: &str, verb: &str| -> bool {
+            let decl = enc.get_decl("can_after").expect("can_after");
+            let p = Z3String::from_str(&ctx, &principal.smt_key()).unwrap();
+            let ns = Z3String::from_str(&ctx, "default").unwrap();
+            let ag = Z3String::from_str(&ctx, "").unwrap();
+            let r = Z3String::from_str(&ctx, resource).unwrap();
+            let v = Z3String::from_str(&ctx, verb).unwrap();
+            let args: [&dyn Ast; 5] = [&p, &ns, &ag, &r, &v];
+            enc.solver.push();
+            enc.solver.assert(&decl.apply(&args).as_bool().unwrap());
+            let holds = enc.solver.check() == SatResult::Sat;
+            enc.solver.pop(1);
+            holds
+        };
+        let user = Subject::username("twin");
+        let group = Subject::group("twin");
+        assert!(can(&user, "secrets", "get"));
+        assert!(!can(&user, "pods", "delete"));
+        assert!(can(&group, "pods", "delete"));
+        assert!(!can(&group, "secrets", "get"));
+
+        let mut gained: Vec<(Subject, String)> = enc
+            .check_permission_expansion("before", "after")
+            .into_iter()
+            .map(|d| (d.principal, d.resource))
+            .collect();
+        gained.sort();
+        assert_eq!(
+            gained,
+            [(user, "secrets".to_string()), (group, "pods".to_string())]
+        );
     }
 }

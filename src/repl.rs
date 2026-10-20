@@ -1290,12 +1290,11 @@ fn print_violation_paths(paths: &[rbac::AccessPath]) {
 /// Print reaches/cluster-admin violations path-first: show each distinct
 /// escalation path once and list the principals that can use it underneath.
 /// This avoids repeating the same path for every one of N principals.
-/// `kind_of` annotates non-serviceaccount principals with their subject kind.
-/// Pass `|_| ""` to suppress annotation.
-fn print_reaches_grouped(violations: &[rbac::Violation], kind_of: &dyn Fn(&str) -> &'static str) {
+/// Users and groups are annotated with their kind, e.g. "(group)".
+fn print_reaches_grouped(violations: &[rbac::Violation]) {
     // Preserve first-seen order for paths; use a Vec<key> + BTreeMap for lookup.
     let mut order: Vec<String> = Vec::new();
-    let mut groups: BTreeMap<String, (Vec<rbac::AccessPath>, Vec<String>)> = BTreeMap::new();
+    let mut groups: BTreeMap<String, (Vec<rbac::AccessPath>, Vec<rbac::Subject>)> = BTreeMap::new();
     for v in violations {
         let sig: String = {
             let mut parts: Vec<String> = v.paths.iter().map(path_sig).collect();
@@ -1315,11 +1314,11 @@ fn print_reaches_grouped(violations: &[rbac::Violation], kind_of: &dyn Fn(&str) 
         print_violation_paths(paths);
         println!("          {} principal(s):", principals.len());
         for p in principals {
-            let kind = kind_of(p);
-            if kind.is_empty() || kind == "serviceaccount" {
-                println!("            {p}");
-            } else {
-                println!("            {p} ({kind})");
+            match p.kind {
+                rbac::SubjectKind::ServiceAccount => println!("            {}", p.name),
+                rbac::SubjectKind::User | rbac::SubjectKind::Group => {
+                    println!("            {} ({})", p.name, p.kind.as_str())
+                }
             }
         }
     }
@@ -1354,12 +1353,13 @@ fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label:
         println!("  Per-principal:");
         let col_w = verdicts
             .iter()
-            .map(|(p, _, _)| p.len())
+            .map(|(p, _, _)| p.to_string().len())
             .max()
             .unwrap_or(8)
             .min(32);
         for (principal, gained, lost) in &verdicts {
             let label = if *gained > 0 { "FAIL" } else { "PASS" };
+            let principal = principal.to_string();
             println!("    {label}  {principal:<col_w$}  +{gained} gained / -{lost} lost");
         }
         println!();
@@ -1405,8 +1405,8 @@ fn per_principal_verdicts(
     can_lost: &[smt::diff::CanDiff],
     eff_gained: &[smt::diff::EffDiff],
     eff_lost: &[smt::diff::EffDiff],
-) -> Vec<(String, usize, usize)> {
-    let mut map: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+) -> Vec<(rbac::Subject, usize, usize)> {
+    let mut map: BTreeMap<rbac::Subject, (usize, usize)> = BTreeMap::new();
     for d in can_gained {
         map.entry(d.principal.clone()).or_default().0 += 1;
     }
@@ -1420,7 +1420,7 @@ fn per_principal_verdicts(
         map.entry(d.principal.clone()).or_default().1 += 1;
     }
 
-    let mut result: Vec<(String, usize, usize)> = map
+    let mut result: Vec<(rbac::Subject, usize, usize)> = map
         .into_iter()
         .map(|(p, (gained, lost))| (p, gained, lost))
         .collect();
@@ -1439,8 +1439,8 @@ fn print_eff_diffs_grouped(
     diffs: &[smt::diff::EffDiff],
     escalation_via: Option<&smt::EscalationVia>,
 ) {
-    // (principal, target) → indices into diffs. Empty target = direct grant.
-    let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    // (principal, target) → indices into diffs. No target = direct grant.
+    let mut groups: BTreeMap<(rbac::Subject, Option<rbac::Subject>), Vec<usize>> = BTreeMap::new();
 
     for (i, d) in diffs.iter().enumerate() {
         let key = (
@@ -1455,23 +1455,22 @@ fn print_eff_diffs_grouped(
             Some(targets) if !targets.is_empty() => {
                 for target in targets {
                     groups
-                        .entry((d.principal.clone(), target.clone()))
+                        .entry((d.principal.clone(), Some(target.clone())))
                         .or_default()
                         .push(i);
                 }
             }
             _ => groups
-                .entry((d.principal.clone(), String::new()))
+                .entry((d.principal.clone(), None))
                 .or_default()
                 .push(i),
         }
     }
 
     for ((principal, target), indices) in &groups {
-        if target.is_empty() {
-            println!("    {}  [direct]:", principal);
-        } else {
-            println!("    {}  via {}:", principal, target);
+        match target {
+            None => println!("    {principal}  [direct]:"),
+            Some(target) => println!("    {principal}  via {target}:"),
         }
         for &i in indices {
             let d = &diffs[i];
@@ -1479,6 +1478,17 @@ fn print_eff_diffs_grouped(
                 "      ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
                 d.namespace, d.apigroup, d.resource, d.verb
             );
+        }
+    }
+}
+
+/// A principal as a quoted name, with "(group)" after a group, e.g.
+/// `"admins" (group)`.
+fn quoted_principal(principal: &rbac::Subject) -> String {
+    match principal.kind {
+        rbac::SubjectKind::Group => format!("{:?} (group)", principal.name),
+        rbac::SubjectKind::User | rbac::SubjectKind::ServiceAccount => {
+            format!("{:?}", principal.name)
         }
     }
 }
@@ -1555,7 +1565,8 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                             serde_json::json!({
                                 "result": "fail",
                                 "check": "check_access",
-                                "principal": v.principal,
+                                "principal": v.principal.name,
+                                "principal_kind": v.principal.kind.as_str(),
                                 "namespace": namespace,
                                 "resource": resource,
                                 "verb": verb,
@@ -1570,8 +1581,11 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                     );
                     for v in &violations {
                         println!(
-                            "        UNEXPECTED can({:?}, {:?}, {:?}, {:?})",
-                            v.principal, v.namespace, v.resource, v.verb
+                            "        UNEXPECTED can({}, {:?}, {:?}, {:?})",
+                            quoted_principal(&v.principal),
+                            v.namespace,
+                            v.resource,
+                            v.verb
                         );
                         print_violation_paths(&v.paths);
                     }
@@ -1659,7 +1673,8 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                                     "result": "fail",
                                     "check": subcommand,
                                     "kind": kind,
-                                    "principal": v.principal,
+                                    "principal": v.principal.name,
+                                    "principal_kind": v.principal.kind.as_str(),
                                     "namespace": namespace,
                                     "apigroup": apigroup,
                                     "resource": resource,
@@ -1676,15 +1691,14 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                     println!(
                         "FAIL  {total} principal(s) can reach ({namespace:?}, {apigroup:?}, {resource:?}, {verb:?}):"
                     );
-                    let kind_of = |p: &str| model.principal_kind(p);
                     if !direct.is_empty() {
                         println!("  direct ({}):", direct.len());
-                        print_reaches_grouped(&direct, &kind_of);
+                        print_reaches_grouped(&direct);
                     }
                     if !via.is_empty() {
                         println!();
                         println!("  via escalation ({}):", via.len());
-                        print_reaches_grouped(&via, &kind_of);
+                        print_reaches_grouped(&via);
                     }
                 }
                 false
@@ -1726,7 +1740,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                     for v in &violations {
                         println!(
                             "{}",
-                            serde_json::json!({"result":"fail","check":"check_isolation","principal":v.principal,"namespace":v.namespace,"resource":v.resource,"verb":v.verb})
+                            serde_json::json!({"result":"fail","check":"check_isolation","principal":v.principal.name,"principal_kind":v.principal.kind.as_str(),"namespace":v.namespace,"resource":v.resource,"verb":v.verb})
                         );
                     }
                 } else {
@@ -1736,8 +1750,11 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                     );
                     for v in &violations {
                         println!(
-                            "        UNEXPECTED can({:?}, {:?}, {:?}, {:?})",
-                            v.principal, v.namespace, v.resource, v.verb
+                            "        UNEXPECTED can({}, {:?}, {:?}, {:?})",
+                            quoted_principal(&v.principal),
+                            v.namespace,
+                            v.resource,
+                            v.verb
                         );
                     }
                 }

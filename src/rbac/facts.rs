@@ -12,7 +12,8 @@
 //!   principal_subject(P, Kind, Name), direct_perm(Name, Kind, Ns, G, R, _, V)
 //!
 //! and adds what escalation reaches through `controls_identity` and
-//! `controls_group`. ResourceName is projected away: these consumers have no
+//! `controls_group`, and from a group's own grants through
+//! `group_controls_identity` and `group_controls_group`. ResourceName is projected away: these consumers have no
 //! object-name dimension, so a grant limited to some names still counts.
 //!
 //! Rows are matched against fixed shapes. A row that does not fit means the
@@ -65,10 +66,74 @@ impl SubjectKind {
             Self::User
         }
     }
+
+    /// "user", "group" or "serviceaccount", as in report output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Group => "group",
+            Self::ServiceAccount => "serviceaccount",
+        }
+    }
 }
 
-/// A binding subject: its kind and its name (a ServiceAccount by username).
-pub type Subject = (SubjectKind, String);
+/// A user, group or ServiceAccount, by name (a ServiceAccount by username).
+///
+/// As a binding subject, the kind is the one the binding names. As a
+/// principal in reports, it is `Group` for a group and otherwise follows
+/// from the username (`Subject::username`): Kubernetes matches a User
+/// subject named `system:serviceaccount:<ns>:<name>` against that
+/// ServiceAccount, so the two are one principal. A user and a group with the
+/// same name are two.
+///
+/// Name comes first so that sorting orders by name.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Subject {
+    pub name: String,
+    pub kind: SubjectKind,
+}
+
+impl Subject {
+    pub fn new(kind: SubjectKind, name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+        }
+    }
+
+    pub fn group(name: impl Into<String>) -> Self {
+        Self::new(SubjectKind::Group, name)
+    }
+
+    /// The principal a user or ServiceAccount username names.
+    pub fn username(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self::new(SubjectKind::of_username(&name), name)
+    }
+
+    /// The principal as one Z3 string: the kind's name constant from the
+    /// rules, a colon, then the name, e.g. "/group:admins". The kind tags
+    /// contain no colon, so two different subjects never share a key.
+    pub fn smt_key(&self) -> String {
+        let tag = match self.kind {
+            SubjectKind::User => "/user",
+            SubjectKind::Group => "/group",
+            SubjectKind::ServiceAccount => "/serviceaccount",
+        };
+        format!("{tag}:{}", self.name)
+    }
+}
+
+/// The name, with " (group)" after a group so that it reads apart from a user
+/// of the same name.
+impl std::fmt::Display for Subject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            SubjectKind::Group => write!(f, "{} (group)", self.name),
+            SubjectKind::User | SubjectKind::ServiceAccount => f.write_str(&self.name),
+        }
+    }
+}
 
 /// (namespace, apigroup, resource, verb) of one grant, ResourceName dropped.
 pub type Permission = (String, String, String, String);
@@ -97,7 +162,7 @@ pub(crate) fn parse_direct_perm(rows: &[Vec<Value>]) -> Vec<(Subject, Permission
             let parsed = match row.as_slice() {
                 [name, kind, ns, ag, r, Value::Name(_) | Value::String(_), v] => (|| {
                     Some((
-                        (SubjectKind::from_value(kind)?, string(name)?.clone()),
+                        Subject::new(SubjectKind::from_value(kind)?, string(name)?.clone()),
                         (
                             string(ns)?.clone(),
                             string(ag)?.clone(),
@@ -124,7 +189,7 @@ pub(crate) fn parse_principal_subject(rows: &[Vec<Value>]) -> Vec<(String, Subje
             let parsed = match row.as_slice() {
                 [Value::String(username), kind, Value::String(name)] => {
                     SubjectKind::from_value(kind)
-                        .map(|kind| (username.clone(), (kind, name.clone())))
+                        .map(|kind| (username.clone(), Subject::new(kind, name.clone())))
                 }
                 _ => None,
             };
@@ -147,8 +212,12 @@ pub(crate) fn parse_binding_subject(rows: &[Vec<Value>]) -> Vec<(Subject, (Strin
                     Value::String(binding),
                     kind,
                     Value::String(name),
-                ] => SubjectKind::from_value(kind)
-                    .map(|kind| ((kind, name.clone()), (binding_ns.clone(), binding.clone()))),
+                ] => SubjectKind::from_value(kind).map(|kind| {
+                    (
+                        Subject::new(kind, name.clone()),
+                        (binding_ns.clone(), binding.clone()),
+                    )
+                }),
                 _ => None,
             };
             if parsed.is_none() {
@@ -186,16 +255,13 @@ pub(crate) fn parse_strings<const N: usize>(
 /// escalation adds.
 ///
 /// A principal here is a user or ServiceAccount username, or a group named by
-/// some binding. Groups are kept as principals of their own because their
+/// some binding, keyed by `Subject` so that a user and a group with the same
+/// name stay apart. Groups are kept as principals of their own because their
 /// members are mostly unknown: membership comes from the authenticator, and
 /// `user_groups` only lists what the caller supplied. A known member also
 /// gets the group's grants under its own name, so a grant to
 /// `system:authenticated` appears once for the group and once per known user
 /// and ServiceAccount.
-///
-/// Users and groups share one string namespace here, so a user and a group
-/// with the same name are merged. The rules keep them apart (see
-/// rbac_subjects.mg); these reports do not.
 #[derive(Default)]
 pub struct PermissionTables {
     /// (principal, namespace, apigroup, resource, verb), without escalation.
@@ -203,8 +269,8 @@ pub struct PermissionTables {
     /// `direct` plus what escalation reaches. Order is unspecified.
     pub effective: Vec<PermissionEntry>,
     /// For entries of `effective` reached through escalation, the identities
-    /// (or "<group> (group)") they were reached through.
-    pub escalation_via: HashMap<PermissionEntry, BTreeSet<String>>,
+    /// and groups they were reached through.
+    pub escalation_via: HashMap<PermissionEntry, BTreeSet<Subject>>,
     /// The subjects each known user or ServiceAccount acts as, from
     /// `principal_subject`.
     pub principal_subjects: HashMap<String, Vec<Subject>>,
@@ -219,9 +285,9 @@ impl PermissionTables {
         let mut principal_subjects: HashMap<String, Vec<Subject>> = HashMap::new();
         let mut group_members: HashMap<String, Vec<String>> = HashMap::new();
         for (username, subject) in parse_principal_subject(&scan("principal_subject")) {
-            if subject.0 == SubjectKind::Group {
+            if subject.kind == SubjectKind::Group {
                 group_members
-                    .entry(subject.1.clone())
+                    .entry(subject.name.clone())
                     .or_default()
                     .push(username.clone());
             }
@@ -234,26 +300,32 @@ impl PermissionTables {
         // Grants under a user or ServiceAccount name: its own and its groups'.
         let mut principal_grants: HashMap<String, HashSet<Permission>> = HashMap::new();
         let mut group_grants: HashMap<String, HashSet<Permission>> = HashMap::new();
-        for ((kind, name), permission) in grants {
-            match kind {
+        for (subject, permission) in grants {
+            match subject.kind {
                 SubjectKind::Group => {
-                    for member in group_members.get(&name).into_iter().flatten() {
+                    for member in group_members.get(&subject.name).into_iter().flatten() {
                         principal_grants
                             .entry(member.clone())
                             .or_default()
                             .insert(permission.clone());
                     }
-                    group_grants.entry(name).or_default().insert(permission);
+                    group_grants
+                        .entry(subject.name)
+                        .or_default()
+                        .insert(permission);
                 }
                 SubjectKind::User | SubjectKind::ServiceAccount => {
-                    principal_grants.entry(name).or_default().insert(permission);
+                    principal_grants
+                        .entry(subject.name)
+                        .or_default()
+                        .insert(permission);
                 }
             }
         }
 
-        let entry = |principal: &str, (ns, ag, r, v): &Permission| -> PermissionEntry {
+        let entry = |principal: &Subject, (ns, ag, r, v): &Permission| -> PermissionEntry {
             (
-                principal.to_string(),
+                principal.clone(),
                 ns.clone(),
                 ag.clone(),
                 r.clone(),
@@ -262,31 +334,52 @@ impl PermissionTables {
         };
 
         let mut direct: HashSet<PermissionEntry> = HashSet::new();
-        for (principal, permissions) in principal_grants.iter().chain(group_grants.iter()) {
-            direct.extend(permissions.iter().map(|p| entry(principal, p)));
+        for (username, permissions) in &principal_grants {
+            let principal = Subject::username(username.as_str());
+            direct.extend(permissions.iter().map(|p| entry(&principal, p)));
+        }
+        for (group, permissions) in &group_grants {
+            let principal = Subject::group(group.as_str());
+            direct.extend(permissions.iter().map(|p| entry(&principal, p)));
         }
 
-        let mut escalation_via: HashMap<PermissionEntry, BTreeSet<String>> = HashMap::new();
-        for [principal, target] in
-            parse_strings::<2>("controls_identity", &scan("controls_identity"))
-        {
-            if principal == target {
-                continue;
-            }
-            for permission in principal_grants.get(&target).into_iter().flatten() {
+        // Escalation from a user or ServiceAccount (controls_identity,
+        // controls_group) and from a group (group_controls_identity,
+        // group_controls_group). Identity targets are usernames.
+        let mut escalation_via: HashMap<PermissionEntry, BTreeSet<Subject>> = HashMap::new();
+        let mut add_via = |principal: Subject, target: Subject| {
+            let permissions = match target.kind {
+                SubjectKind::Group => group_grants.get(&target.name),
+                SubjectKind::User | SubjectKind::ServiceAccount => {
+                    principal_grants.get(&target.name)
+                }
+            };
+            for permission in permissions.into_iter().flatten() {
                 escalation_via
                     .entry(entry(&principal, permission))
                     .or_default()
                     .insert(target.clone());
             }
+        };
+        for [principal, target] in
+            parse_strings::<2>("controls_identity", &scan("controls_identity"))
+        {
+            if principal != target {
+                add_via(Subject::username(principal), Subject::username(target));
+            }
         }
         for [principal, group] in parse_strings::<2>("controls_group", &scan("controls_group")) {
-            for permission in group_grants.get(&group).into_iter().flatten() {
-                escalation_via
-                    .entry(entry(&principal, permission))
-                    .or_default()
-                    .insert(format!("{group} (group)"));
-            }
+            add_via(Subject::username(principal), Subject::group(group));
+        }
+        for [group, target] in
+            parse_strings::<2>("group_controls_identity", &scan("group_controls_identity"))
+        {
+            add_via(Subject::group(group), Subject::username(target));
+        }
+        for [group, other] in
+            parse_strings::<2>("group_controls_group", &scan("group_controls_group"))
+        {
+            add_via(Subject::group(group), Subject::group(other));
         }
 
         let mut effective = direct.clone();
@@ -306,7 +399,7 @@ impl PermissionTables {
 mod tests {
     use mangle_common::Value;
 
-    use super::{SubjectKind, parse_direct_perm};
+    use super::{Subject, SubjectKind, parse_direct_perm};
 
     #[test]
     fn direct_perm_rows_parse_with_kind_and_any_name() {
@@ -329,9 +422,9 @@ mod tests {
         for (subject, permission) in parsed {
             assert_eq!(
                 subject,
-                (
+                Subject::new(
                     SubjectKind::ServiceAccount,
-                    "system:serviceaccount:demo:app".to_string()
+                    "system:serviceaccount:demo:app"
                 )
             );
             assert_eq!(
