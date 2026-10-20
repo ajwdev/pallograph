@@ -16,6 +16,7 @@ pub mod edb;
 pub mod engine;
 pub mod load;
 pub(crate) mod query;
+pub mod rbac;
 pub mod repl;
 pub(crate) mod selector;
 pub mod smt;
