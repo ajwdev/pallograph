@@ -10,6 +10,10 @@
 //! fixed list of the upstream Kubernetes cluster-scoped resources. Anything
 //! not on it, custom resources included, is treated as namespaced, which can
 //! over-report but never hides access.
+//!
+//! TODO(ajw): load API discovery (`/apis`, the `namespaced` field of each
+//! APIResource) and decide scope from it, including cluster-scoped CRDs,
+//! then drop this hardcoded list.
 
 /// (apigroup, resource) of every built-in cluster-scoped resource, except
 /// `namespaces`: a request for namespace N (`/api/v1/namespaces/N`) carries

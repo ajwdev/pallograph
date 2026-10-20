@@ -225,25 +225,6 @@ subject_escalation_hop(Name, Kind, Target) :-
 
 # ---- Escalation from a principal ----
 #
-# The ServiceAccounts a principal reaches by each mechanism when it logs in,
-# for explaining a hop. Paths themselves are built from escalation_hop.
-
-token_accessible_sa(P, SANs, SAName) :-
-    principal_subject(P, Kind, Name),
-    subject_token_accessible_sa(Name, Kind, SANs, SAName).
-
-exec_reachable_sa(P, PodNs, SAName) :-
-    principal_subject(P, Kind, Name),
-    subject_exec_reachable_sa(Name, Kind, PodNs, SAName).
-
-pod_creatable_sa(P, SANs, SAName) :-
-    principal_subject(P, Kind, Name),
-    subject_pod_creatable_sa(Name, Kind, SANs, SAName).
-
-impersonatable_sa(P, SANs, SAName) :-
-    principal_subject(P, Kind, Name),
-    subject_impersonatable_sa(Name, Kind, SANs, SAName).
-
 # Single-step escalation: P can directly assume Target's identity via exactly
 # one mechanism. Keeping this as a separate predicate (rather than inlining into
 # controls_identity) is what makes the transitive closure below BFS-ordered:
@@ -340,18 +321,6 @@ controls_group(P, Group) :-
 # grant. These relations start from the group instead, using only its own
 # grants, direct_perm(Group, /group, ...): whatever they reach, any member
 # reaches too.
-
-group_token_accessible_sa(Group, SANs, SAName) :-
-    subject_token_accessible_sa(Group, /group, SANs, SAName).
-
-group_exec_reachable_sa(Group, PodNs, SAName) :-
-    subject_exec_reachable_sa(Group, /group, PodNs, SAName).
-
-group_pod_creatable_sa(Group, SANs, SAName) :-
-    subject_pod_creatable_sa(Group, /group, SANs, SAName).
-
-group_impersonatable_sa(Group, SANs, SAName) :-
-    subject_impersonatable_sa(Group, /group, SANs, SAName).
 
 Decl group_escalation_hop(Group, Target)
   descr [
