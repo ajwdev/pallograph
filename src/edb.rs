@@ -308,10 +308,12 @@ fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str
 /// "rbac.authorization.k8s.io/v1" / "ClusterRole" / "" to extract the source
 /// ClusterRole from the matches.
 ///
-/// Every entry also gets a `clusterrole_aggregation_selector(Name, Index)` fact,
-/// even one with no requirements. An empty selector (`{}` or `{matchLabels: {}}`)
-/// matches every ClusterRole in Kubernetes, and selector_matches cannot see a
-/// selector without requirements, so rbac_roles.mg uses this fact to handle it.
+/// An empty selector (`{}` or `{matchLabels: {}}`) matches every ClusterRole in
+/// Kubernetes, and selector_matches cannot see a selector without requirements,
+/// so such an entry gets a `clusterrole_aggregation_empty_selector(Name, Index)`
+/// fact instead. Only a selector with no matchLabels entries and no
+/// matchExpressions gets it: one whose requirements could not be encoded emits
+/// nothing and matches no ClusterRole (see `emit_selector_requirements`).
 fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Json) {
     let selectors = data
         .get("aggregationRule")
@@ -326,14 +328,17 @@ fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Js
             Value::String(i.to_string()),
             Value::String(name.to_string()),
         ];
-        store.add_fact(
-            "clusterrole_aggregation_selector",
-            vec![
-                Value::String(name.to_string()),
-                Value::String(i.to_string()),
-            ],
-        );
-        emit_selector_requirements(store, owner, selector);
+        let description = format!("ClusterRole {name} clusterRoleSelectors[{i}]");
+        if emit_selector_requirements(store, owner, selector, &description) == SelectorFacts::Empty
+        {
+            store.add_fact(
+                "clusterrole_aggregation_empty_selector",
+                vec![
+                    Value::String(name.to_string()),
+                    Value::String(i.to_string()),
+                ],
+            );
+        }
     }
 }
 
@@ -373,6 +378,17 @@ pub fn expression_facts(owner: &[Value], expr: &Expression) -> Vec<(&'static str
 
 // ---- label and selector extraction ----
 
+/// What `emit_selector_requirements` made of one selector.
+#[derive(Debug, PartialEq, Eq)]
+enum SelectorFacts {
+    /// No requirements at all: in Kubernetes the selector matches everything.
+    Empty,
+    /// Every requirement was emitted.
+    Requirements,
+    /// Some requirement could not be encoded, so nothing was emitted.
+    Unencodable,
+}
+
 /// Emit selector requirements (matchLabels and matchExpressions) as EDB facts.
 ///
 /// The `owner` slice must be exactly four Values:
@@ -386,79 +402,125 @@ pub fn expression_facts(owner: &[Value], expr: &Expression) -> Vec<(&'static str
 /// These feed the selector_matches/8 engine in labels.mg, which implements
 /// AND semantics (all requirements within one selector must hold) via the
 /// *_unsatisfied negation pattern.
-fn emit_selector_requirements(store: &mut MemStore, owner: Vec<Value>, selector: &Json) {
-    let match_labels = selector.get("matchLabels").and_then(|v| v.as_object());
-    let match_exprs = selector.get("matchExpressions").and_then(|v| v.as_array());
-
-    if let Some(ml) = match_labels {
-        for (k, v) in ml {
-            if let Json::String(vs) = v {
-                let mut args = owner.clone();
-                args.push(Value::String(k.clone()));
-                args.push(Value::String(vs.clone()));
-                store.add_fact("selector_match_label", args);
+///
+/// Dropping one requirement would make the selector match more objects than
+/// it does in Kubernetes, and dropping all of them could make it look empty,
+/// which for an aggregation selector means every ClusterRole. So when any
+/// requirement cannot be encoded (an unknown operator, a non-string value, a
+/// missing key, In or NotIn without values), nothing is emitted, a warning
+/// naming `description` is printed, and the selector matches nothing.
+fn emit_selector_requirements(
+    store: &mut MemStore,
+    owner: Vec<Value>,
+    selector: &Json,
+    description: &str,
+) -> SelectorFacts {
+    match selector_requirement_facts(&owner, selector) {
+        Ok(facts) if facts.is_empty() => SelectorFacts::Empty,
+        Ok(facts) => {
+            for (relation, args) in facts {
+                store.add_fact(relation, args);
             }
+            SelectorFacts::Requirements
+        }
+        Err(reason) => {
+            eprintln!("warning: {description}: {reason}; the selector will match nothing");
+            SelectorFacts::Unencodable
         }
     }
+}
 
-    if let Some(exprs) = match_exprs {
-        for expr in exprs {
-            let key = match expr.get("key").and_then(|v| v.as_str()) {
-                Some(k) => k,
-                None => continue,
-            };
-            let op = expr.get("operator").and_then(|v| v.as_str()).unwrap_or("");
-            let values = expr.get("values").and_then(|v| v.as_array());
-            match op {
-                "In" => {
-                    for v in values.into_iter().flatten() {
-                        if let Json::String(vs) = v {
-                            let mut args = owner.clone();
-                            args.push(Value::String(key.into()));
-                            args.push(Value::String(vs.clone()));
-                            store.add_fact("selector_expr_in", args);
-                        }
-                    }
-                }
-                "NotIn" => {
-                    for v in values.into_iter().flatten() {
-                        if let Json::String(vs) = v {
-                            let mut args = owner.clone();
-                            args.push(Value::String(key.into()));
-                            args.push(Value::String(vs.clone()));
-                            store.add_fact("selector_expr_notin", args);
-                        }
-                    }
-                }
-                "Exists" => {
-                    let mut args = owner.clone();
-                    args.push(Value::String(key.into()));
-                    store.add_fact("selector_expr_exists", args);
-                }
-                "DoesNotExist" => {
-                    let mut args = owner.clone();
-                    args.push(Value::String(key.into()));
-                    store.add_fact("selector_expr_notexists", args);
-                }
-                _ => {}
-            }
-        }
-    }
+/// The facts for every requirement of `selector`, or why one of them cannot
+/// be encoded.
+fn selector_requirement_facts(
+    owner: &[Value],
+    selector: &Json,
+) -> Result<Vec<(&'static str, Vec<Value>)>, String> {
+    let fact = |relation: &'static str, extra: &[&str]| {
+        let mut args = owner.to_vec();
+        args.extend(extra.iter().map(|e| Value::String((*e).to_string())));
+        (relation, args)
+    };
+    let string = |value: &Json, what: &str| -> Result<String, String> {
+        value
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| format!("{what} {value} is not a string"))
+    };
+
+    let selector = match selector {
+        Json::Null => return Ok(vec![]),
+        Json::Object(map) => map,
+        other => return Err(format!("selector {other} is not an object")),
+    };
+    let mut facts = Vec::new();
 
     // Flat selector (Service-style: no matchLabels/matchExpressions) → matchLabels
-    if match_labels.is_none()
-        && match_exprs.is_none()
-        && let Some(flat) = selector.as_object()
-    {
-        for (k, v) in flat {
-            if let Json::String(vs) = v {
-                let mut args = owner.clone();
-                args.push(Value::String(k.clone()));
-                args.push(Value::String(vs.clone()));
-                store.add_fact("selector_match_label", args);
+    if !selector.contains_key("matchLabels") && !selector.contains_key("matchExpressions") {
+        for (key, value) in selector {
+            let value = string(value, &format!("label {key} value"))?;
+            facts.push(fact("selector_match_label", &[key, &value]));
+        }
+        return Ok(facts);
+    }
+
+    match selector.get("matchLabels") {
+        None | Some(Json::Null) => {}
+        Some(Json::Object(labels)) => {
+            for (key, value) in labels {
+                let value = string(value, &format!("matchLabels {key} value"))?;
+                facts.push(fact("selector_match_label", &[key, &value]));
             }
         }
+        Some(other) => return Err(format!("matchLabels {other} is not an object")),
     }
+
+    let expressions: &[Json] = match selector.get("matchExpressions") {
+        None | Some(Json::Null) => &[],
+        Some(Json::Array(expressions)) => expressions,
+        Some(other) => return Err(format!("matchExpressions {other} is not a list")),
+    };
+    for expression in expressions {
+        let key = match expression.get("key") {
+            Some(key) => string(key, "matchExpressions key")?,
+            None => return Err(format!("matchExpressions entry {expression} has no key")),
+        };
+        let operator = match expression.get("operator") {
+            Some(operator) => string(operator, "matchExpressions operator")?,
+            None => {
+                return Err(format!(
+                    "matchExpressions entry {expression} has no operator"
+                ));
+            }
+        };
+        let values = || -> Result<Vec<String>, String> {
+            let values = expression
+                .get("values")
+                .and_then(Json::as_array)
+                .filter(|values| !values.is_empty())
+                .ok_or_else(|| format!("{operator} on {key} has no values"))?;
+            values
+                .iter()
+                .map(|value| string(value, &format!("{operator} on {key} value")))
+                .collect()
+        };
+        match operator.as_str() {
+            "In" => {
+                for value in values()? {
+                    facts.push(fact("selector_expr_in", &[&key, &value]));
+                }
+            }
+            "NotIn" => {
+                for value in values()? {
+                    facts.push(fact("selector_expr_notin", &[&key, &value]));
+                }
+            }
+            "Exists" => facts.push(fact("selector_expr_exists", &[&key])),
+            "DoesNotExist" => facts.push(fact("selector_expr_notexists", &[&key])),
+            _ => return Err(format!("unknown matchExpressions operator {operator:?}")),
+        }
+    }
+    Ok(facts)
 }
 
 fn extract_labels_and_selectors(
@@ -491,7 +553,12 @@ fn extract_labels_and_selectors(
     let Some(selector) = data.get("spec").and_then(|s| s.get("selector")) else {
         return;
     };
-    emit_selector_requirements(store, owner, selector);
+    let description = if namespace.is_empty() {
+        format!("{kind} {name} spec.selector")
+    } else {
+        format!("{kind} {namespace}/{name} spec.selector")
+    };
+    emit_selector_requirements(store, owner, selector, &description);
 }
 
 fn extract_pod_scheduling(store: &mut MemStore, namespace: &str, name: &str, data: &Json) {
@@ -1113,7 +1180,11 @@ mod tests {
     // except the aggregating role itself.
     #[test]
     fn aggregation_empty_selector_matches_every_clusterrole() {
-        for selector in [json!({}), json!({"matchLabels": {}})] {
+        for selector in [
+            json!({}),
+            json!({"matchLabels": {}}),
+            json!({"matchLabels": {}, "matchExpressions": []}),
+        ] {
             let mut store = MemStore::new();
 
             add_aggregating_clusterrole(&mut store, "everything", json!([selector]));
@@ -1150,6 +1221,93 @@ mod tests {
             });
             assert!(!aggregates_itself, "{selector} must not match its own role");
         }
+    }
+
+    // A selector with a requirement edb.rs cannot encode matches no
+    // ClusterRole, even next to requirements it can encode. Emitting only
+    // the encodable ones would widen it, and emitting none would make it look
+    // empty, which matches every ClusterRole.
+    #[test]
+    fn aggregation_unencodable_selector_matches_nothing() {
+        for selector in [
+            json!({"matchExpressions": [{"key": "k", "operator": "Gt", "values": ["1"]}]}),
+            json!({"matchExpressions": [{"operator": "Exists"}]}),
+            json!({"matchExpressions": [{"key": "k", "operator": "In", "values": [1]}]}),
+            json!({"matchExpressions": [{"key": "k", "operator": "In"}]}),
+            json!({"matchLabels": {"k": true}}),
+            json!({
+                "matchLabels": {"any": "label"},
+                "matchExpressions": [{"key": "k", "operator": "Gt", "values": ["1"]}]
+            }),
+        ] {
+            let mut store = MemStore::new();
+            add_aggregating_clusterrole(&mut store, "aggregator", json!([selector]));
+            add_clusterrole(
+                &mut store,
+                "labelled",
+                json!({"any": "label", "k": "v"}),
+                json!([
+                    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+                ]),
+            );
+            add_clusterrole(
+                &mut store,
+                "cluster-admin",
+                json!({}),
+                json!([
+                    {"apiGroups": ["*"], "resources": ["*"], "verbs": ["*"]}
+                ]),
+            );
+
+            assert!(
+                store
+                    .get_facts("clusterrole_aggregation_empty_selector")
+                    .is_empty(),
+                "{selector} must not be marked empty"
+            );
+            let result = engine_from_store(store).evaluate().unwrap();
+            assert!(
+                result.scan("clusterrole_aggregates").is_empty(),
+                "{selector} must match no ClusterRole, got {:?}",
+                result.scan("clusterrole_aggregates")
+            );
+            assert!(
+                clusterrole_perms(&result, "aggregator").is_empty(),
+                "{selector} must grant nothing"
+            );
+        }
+    }
+
+    // Only a selector with no matchLabels entries and no matchExpressions
+    // is marked empty.
+    #[test]
+    fn selector_encoding_outcomes() {
+        let owner = vec![Value::String("o".into()); 4];
+        let outcome = |selector: serde_json::Value| {
+            emit_selector_requirements(&mut MemStore::new(), owner.clone(), &selector, "test")
+        };
+        assert_eq!(outcome(json!({})), SelectorFacts::Empty);
+        assert_eq!(outcome(json!({"matchLabels": {}})), SelectorFacts::Empty);
+        assert_eq!(
+            outcome(json!({"matchLabels": {}, "matchExpressions": []})),
+            SelectorFacts::Empty
+        );
+        assert_eq!(
+            outcome(json!({"matchLabels": {"k": "v"}})),
+            SelectorFacts::Requirements
+        );
+        assert_eq!(
+            outcome(json!({"matchExpressions": [{"key": "k", "operator": "Exists"}]})),
+            SelectorFacts::Requirements
+        );
+        assert_eq!(
+            outcome(json!({"matchExpressions": [{"key": "k", "operator": "Gt"}]})),
+            SelectorFacts::Unencodable
+        );
+        assert_eq!(
+            outcome(json!({"matchLabels": {"k": 1}})),
+            SelectorFacts::Unencodable
+        );
     }
 
     fn kinds(objects: &[(DynamicObject, Option<(String, String)>)]) -> Vec<&str> {

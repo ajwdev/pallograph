@@ -18,8 +18,8 @@
 //! ratchet: the test fails when a bucket grows or a new one appears, and
 //! suggests tightening the baseline when one shrinks. Every world's entry is
 //! currently empty, so any mismatch fails the test; a known gap can still be
-//! recorded there while it is being worked on. `UPDATE_BASELINE=1 cargo test --test rbac_compat`
-//! rewrites it. Every mismatch is written to
+//! recorded there while it is being worked on. `UPDATE_BASELINE=1 cargo test
+//! --test rbac_compat` rewrites it. Every mismatch is written to
 //! `target/tmp/rbac-compat/<world>.ndjson` for inspection.
 //!
 //! The ignored `fuzz_worlds` test runs the same checks over randomly

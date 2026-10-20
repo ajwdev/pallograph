@@ -149,9 +149,9 @@ Decl selector_expr_notexists(ApiVersion, Kind, Namespace, Name, LabelKey)
   ]
   bound [/string, /string, /string, /string, /string].
 
-Decl clusterrole_aggregation_selector(ClusterRole, Index)
+Decl clusterrole_aggregation_empty_selector(ClusterRole, Index)
   descr [
-    doc("ClusterRole aggregationRule.clusterRoleSelectors entries, one row per entry, including empty ones."),
+    doc("ClusterRole aggregationRule.clusterRoleSelectors entries with no requirements at all ({} or {matchLabels: {}}), which match every ClusterRole. An entry whose requirements could not be encoded gets no row and matches nothing."),
     arg(ClusterRole, "aggregating ClusterRole name"),
     arg(Index, "entry index as a string; the Namespace of its synthetic pallograph.dev/agg selector owner")
   ]

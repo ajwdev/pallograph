@@ -4,9 +4,8 @@
 # (see aggregation-without-sources). TestAggregationShapesDecisions in
 # tools/rbac-oracle pins the decisions.
 #
-# Every aggregated role in a cycle here has no rules of its own. With own
-# rules in a cycle, the result depends on the order the controller visits
-# the roles, so no single answer is right.
+# Roles on an aggregation cycle are not recomputed: their rules are taken
+# as stored (see aggregation-cycle-own-rules).
 
 # Chain: chain-top aggregates chain-middle, which aggregates chain-bottom.
 # Both upper roles lose their own rules, so alice and bob get services
@@ -78,7 +77,8 @@ roleRef:
   name: chain-middle
 ---
 # Cycle: cycle-a and cycle-b each select the other (and cycle-source) by a
-# shared label. The cycle adds nothing, so both get cycle-source's rules.
+# shared label. Their rules are written as the controller leaves them,
+# cycle-source's endpoints rule, and taken as stored.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -89,6 +89,10 @@ aggregationRule:
   clusterRoleSelectors:
   - matchLabels:
       aggregation-shapes.pallograph.dev/cycle: "true"
+rules:
+- apiGroups: [""]
+  resources: ["endpoints"]
+  verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -100,6 +104,10 @@ aggregationRule:
   clusterRoleSelectors:
   - matchLabels:
       aggregation-shapes.pallograph.dev/cycle: "true"
+rules:
+- apiGroups: [""]
+  resources: ["endpoints"]
+  verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

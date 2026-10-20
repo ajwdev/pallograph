@@ -4,6 +4,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 const smokeWorld = "../../tests/rbac_compat/worlds/smoke"
@@ -76,43 +81,47 @@ func TestSmokeDecisions(t *testing.T) {
 }
 
 // TestCounterfactualTags checks that denials are attributed to the
-// Kubernetes behavior that causes them, and only to it.
+// Kubernetes behavior that causes them, and only to it, using the
+// counterfactuals evalWorld uses.
 func TestCounterfactualTags(t *testing.T) {
-	world, err := LoadWorld(smokeWorld)
-	if err != nil {
-		t.Fatal(err)
-	}
-	oracle := NewOracle(world)
-	for _, counterfactual := range []struct {
-		tag     string
-		variant worldVariant
-	}{
-		{"denied-by-resource-names", withoutResourceNames},
-		{"denied-by-aggregation-replacing-rules", aggregationKeepsOwnRules},
-	} {
-		variantWorld, err := loadWorld(smokeWorld, counterfactual.variant)
+	const cycleWorld = "../../tests/rbac_compat/worlds/aggregation-cycle-own-rules"
+	oracles := map[string]*Oracle{}
+	for _, dir := range []string{smokeWorld, cycleWorld} {
+		world, err := LoadWorld(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		oracle.AddCounterfactual(counterfactual.tag, variantWorld, false)
+		oracles[dir] = NewOracle(world)
+		if err := addCounterfactuals(oracles[dir], dir); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	resource := func(username, resource, name, verb string) Request {
-		return Request{User: username, Groups: authenticatedGroups(username), Namespace: "team-a",
+	resource := func(username, namespace, resource, name, verb string) Request {
+		return Request{User: username, Groups: authenticatedGroups(username), Namespace: namespace,
 			Resource: resource, Name: name, Verb: verb}
 	}
 	tests := []struct {
 		name    string
+		world   string
 		request Request
-		tag     string
+		tags    []string
 	}{
-		{"resourceNames", resource("frank", "configmaps", "other", "get"), "denied-by-resource-names"},
-		{"aggregation replaces own rules", resource("erin", "secrets", "", "get"), "denied-by-aggregation-replacing-rules"},
-		{"plain denial", resource("alice", "secrets", "", "get"), ""},
+		{"resourceNames", smokeWorld, resource("frank", "team-a", "configmaps", "other", "get"),
+			[]string{"denied-by-resource-names"}},
+		{"aggregation replaces own rules", smokeWorld, resource("erin", "team-a", "secrets", "", "get"),
+			[]string{"denied-by-aggregation-replacing-rules"}},
+		{"plain denial", smokeWorld, resource("alice", "team-a", "secrets", "", "get"), nil},
+		{"own rule lost below a cycle", cycleWorld, resource("dave", "", "services", "", "list"),
+			[]string{"denied-by-aggregation-replacing-rules"}},
+		{"own rule lost above a cycle", cycleWorld, resource("erin", "", "nodes", "", "list"),
+			[]string{"denied-by-aggregation-replacing-rules"}},
+		// A role on a cycle is not recomputed under any variant.
+		{"cycle role is not recomputed", cycleWorld, resource("alice", "", "configmaps", "", "get"), nil},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			decision, err := oracle.Decide(&test.request)
+			decision, err := oracles[test.world].Decide(&test.request)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -122,12 +131,8 @@ func TestCounterfactualTags(t *testing.T) {
 					explanations = append(explanations, tag)
 				}
 			}
-			var want []string
-			if test.tag != "" {
-				want = []string{test.tag}
-			}
-			if decision.Allowed || !slices.Equal(explanations, want) {
-				t.Errorf("allowed = %v, explanations = %v, want denied with %v", decision.Allowed, explanations, want)
+			if decision.Allowed || !slices.Equal(explanations, test.tags) {
+				t.Errorf("allowed = %v, explanations = %v, want denied with %v", decision.Allowed, explanations, test.tags)
 			}
 		})
 	}
@@ -253,8 +258,8 @@ func TestAggregationShapesDecisions(t *testing.T) {
 		{"chain replaces the middle's own rules", resourceRequest("alice", "team-a", "", "secrets", "", "", "get"), false},
 		{"chain middle via a RoleBinding", resourceRequest("bob", "team-a", "", "services", "", "", "get"), true},
 		{"chain middle loses its own rules", resourceRequest("bob", "team-a", "", "secrets", "", "", "get"), false},
-		{"cycle member a gets the source", resourceRequest("carol", "", "", "endpoints", "", "", "get"), true},
-		{"cycle member b gets the source", resourceRequest("dave", "", "", "endpoints", "", "", "get"), true},
+		{"cycle member a keeps its stored rules", resourceRequest("carol", "", "", "endpoints", "", "", "get"), true},
+		{"cycle member b keeps its stored rules", resourceRequest("dave", "", "", "endpoints", "", "", "get"), true},
 		{"cycle adds nothing else", resourceRequest("dave", "", "", "endpoints", "", "", "list"), false},
 		{"ruleless source keeps own rules", resourceRequest("erin", "team-a", "", "pods", "", "", "list"), true},
 		{"aggregating a role that kept its own rules", resourceRequest("frank", "team-a", "", "pods", "", "", "get"), true},
@@ -269,6 +274,11 @@ func TestAggregationMatchAllDecisions(t *testing.T) {
 		{"empty selector gets a labelled source", resourceRequest("alice", "", "apps", "deployments", "", "", "list"), true},
 		{"empty selector gets URL rules", nonResourceRequest("alice", "/healthz"), true},
 		{"empty selector grants nothing else", resourceRequest("alice", "team-a", "", "secrets", "", "", "get"), false},
+	})
+}
+
+func TestAggregationMatchAllLabelsDecisions(t *testing.T) {
+	checkDecisions(t, "aggregation-match-all-labels", []decisionCase{
 		{"empty matchLabels gets an unlabelled source", resourceRequest("bob", "team-a", "", "pods", "", "", "get"), true},
 		{"empty matchLabels gets a labelled source", resourceRequest("bob", "team-a", "apps", "deployments", "", "", "list"), true},
 		{"empty matchLabels via a RoleBinding is namespaced", resourceRequest("bob", "team-b", "", "pods", "", "", "get"), false},
@@ -298,4 +308,82 @@ func TestSubjectsAndGroupsDecisions(t *testing.T) {
 		{"service account from another namespace, not its own", serviceAccount("team-b", "builder", "team-b", "pods", "get"), false},
 		{"same service account name in the binding namespace", serviceAccount("team-a", "builder", "team-a", "pods", "get"), false},
 	})
+}
+
+func TestAggregationCycleOwnRulesDecisions(t *testing.T) {
+	checkDecisions(t, "aggregation-cycle-own-rules", []decisionCase{
+		{"cycle role keeps its stored rule", resourceRequest("alice", "", "", "secrets", "", "", "get"), true},
+		{"cycle role gets nothing from its partner", resourceRequest("alice", "", "", "configmaps", "", "", "get"), false},
+		{"other cycle role keeps its stored rule", resourceRequest("bob", "", "", "configmaps", "", "", "get"), true},
+		{"other cycle role gets nothing from its partner", resourceRequest("bob", "", "", "secrets", "", "", "get"), false},
+		{"aggregator of a cycle role gets its stored rule", resourceRequest("erin", "", "", "secrets", "", "", "get"), true},
+		{"aggregator of a cycle role loses its own rule", resourceRequest("erin", "", "", "nodes", "", "", "list"), false},
+		{"aggregator of a cycle role does not reach around it", resourceRequest("erin", "", "", "configmaps", "", "", "get"), false},
+		{"cycle role above a chain keeps its stored rule", resourceRequest("grace", "", "", "pods", "", "", "get"), true},
+		{"cycle role above a chain is not recomputed", resourceRequest("grace", "", "", "services", "", "", "list"), false},
+		{"cycle role with empty stored rules grants nothing", resourceRequest("carol", "", "", "pods", "", "", "get"), false},
+		{"role below the cycle loses its own rule", resourceRequest("dave", "", "", "services", "", "", "list"), false},
+		{"role below the cycle gets its source", resourceRequest("dave", "", "", "pods", "", "", "get"), true},
+		{"aggregating an empty cycle role keeps own rules", resourceRequest("frank", "", "", "nodes", "", "", "list"), true},
+		{"aggregating an empty cycle role gets nothing else", resourceRequest("frank", "", "", "pods", "", "", "get"), false},
+	})
+}
+
+// TestAggregationCycleVisitOrder shows why roles on an aggregation cycle
+// keep their stored rules rather than being recomputed. Two ClusterRoles
+// select each other, one with a secrets rule and one with a configmaps
+// rule. Running the controller's sync over them, the rule that survives
+// depends on which role it visits first, so there is no single answer to
+// recompute. NewWorld leaves both roles as written.
+func TestAggregationCycleVisitOrder(t *testing.T) {
+	secrets := rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get"}}
+	configmaps := rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get"}}
+	role := func(name, selects string, rule rbacv1.PolicyRule) *rbacv1.ClusterRole {
+		return &rbacv1.ClusterRole{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"cycle": name}},
+			AggregationRule: &rbacv1.AggregationRule{ClusterRoleSelectors: []metav1.LabelSelector{
+				{MatchLabels: map[string]string{"cycle": selects}},
+			}},
+			Rules: []rbacv1.PolicyRule{rule},
+		}
+	}
+	roles := func() []*rbacv1.ClusterRole {
+		return []*rbacv1.ClusterRole{role("a", "b", secrets), role("b", "a", configmaps)}
+	}
+
+	world, err := NewWorld([]runtime.Object{roles()[0], roles()[1]}, kubernetesSemantics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range world.ClusterRoles {
+		if !world.AggregationCycleRoles[role.Name] || len(role.Rules) != 1 {
+			t.Errorf("NewWorld: %s on cycle = %v with rules %v, want kept as written",
+				role.Name, world.AggregationCycleRoles[role.Name], role.Rules)
+		}
+	}
+
+	// Whichever role is visited first copies the other's rule, then the
+	// other copies it back: the second role's rule survives on both.
+	for _, test := range []struct {
+		order    []string
+		survivor rbacv1.PolicyRule
+	}{
+		{[]string{"a", "b"}, configmaps},
+		{[]string{"b", "a"}, secrets},
+	} {
+		byName := map[string]*rbacv1.ClusterRole{}
+		for _, role := range roles() {
+			byName[role.Name] = role
+		}
+		simulated := &World{AggregatedRoles: map[string]bool{}}
+		for _, name := range test.order {
+			simulated.ClusterRoles = append(simulated.ClusterRoles, byName[name])
+		}
+		simulated.syncAggregatedRoles(nil, nil)
+		for _, role := range simulated.ClusterRoles {
+			if !equality.Semantic.DeepEqual(role.Rules, []rbacv1.PolicyRule{test.survivor}) {
+				t.Errorf("visiting %v: %s has %v, want only %v", test.order, role.Name, role.Rules, test.survivor)
+			}
+		}
+	}
 }

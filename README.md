@@ -190,17 +190,22 @@ feature tag.
   subject kinds, the v1.37 bootstrap policy). `hack/rbac-compat-gen.sh`
   generates their requests and decisions into `target/rbac-compat/`.
 - `tests/rbac_compat/baseline.json` is a ratchet of known mismatch counts
-  per world. Every entry is currently `{}`: each curated world matches the
-  authorizer exactly.
+  per world. Every entry is `{}`: each curated world matches the authorizer
+  exactly.
 - `hack/rbac-compat.sh -s SEED -n COUNT` is the fuzz tier: it generates
   random worlds from a seed, decides them with the oracle, and reports
   worlds whose mismatches the curated worlds do not cover.
 
-Aggregation cycles whose roles also have rules of their own are left out of
-the curated worlds. There, a role's own rules can leak around the cycle
-before the controller replaces them, and which ones leak depends on the order
-it visits the roles. Pallograph assumes they are always replaced, so it can
-under-grant in that case, and the fuzz tier reports it.
+The authorizer never runs ClusterRole aggregation: it reads each role's
+stored rules, which the aggregation controller writes. Pallograph and the
+oracle recompute aggregated roles from their selectors, so a what-if change
+(`\load` a role labelled `aggregate-to-admin`) reaches `admin`. The
+exception is a role on an aggregation cycle. There, what the controller
+leaves depends on the order it visits the roles and on what they held
+before, so both take the role's stored rules as they are, which is exact
+for a cluster the controller has settled. Roles that aggregate a cycle role
+are still recomputed and get its stored rules. The
+`aggregation-cycle-own-rules` world pins these shapes.
 
 ## Development
 

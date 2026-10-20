@@ -1,5 +1,7 @@
 {
+  "aggregation-cycle-own-rules": {},
   "aggregation-match-all": {},
+  "aggregation-match-all-labels": {},
   "aggregation-shapes": {},
   "aggregation-without-sources": {},
   "bootstrap-v1.37": {},

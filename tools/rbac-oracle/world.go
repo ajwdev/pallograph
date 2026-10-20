@@ -34,8 +34,11 @@ type World struct {
 	ClusterRoleBindings []*rbacv1.ClusterRoleBinding
 
 	// AggregatedRoles names the ClusterRoles whose rules were filled in
-	// by aggregation. Used only for tagging.
-	AggregatedRoles map[string]bool
+	// by aggregation, and AggregationCycleRoles those on an aggregation
+	// cycle, whose rules are kept as written (see aggregate). Used for
+	// tagging, and by kind-verify to know which roles to compare.
+	AggregatedRoles       map[string]bool
+	AggregationCycleRoles map[string]bool
 
 	// WrittenRules is every rule as written in the world file, before
 	// aggregation replaced any, and WrittenClusterRoleRules the same per
@@ -134,7 +137,7 @@ func readObjects(path string) ([]runtime.Object, error) {
 // API server defaulting, validation and ClusterRole aggregation as variant
 // says.
 func NewWorld(objects []runtime.Object, variant worldVariant) (*World, error) {
-	world := &World{AggregatedRoles: map[string]bool{}}
+	world := &World{AggregatedRoles: map[string]bool{}, AggregationCycleRoles: map[string]bool{}}
 	for _, object := range objects {
 		if err := world.add(object.DeepCopyObject()); err != nil {
 			return nil, err
@@ -161,7 +164,7 @@ func NewWorld(objects []runtime.Object, variant worldVariant) (*World, error) {
 			}
 		}
 	}
-	world.aggregate(variant&aggregationKeepsOwnRules != 0)
+	world.aggregate(variant)
 	return world, nil
 }
 
@@ -220,7 +223,14 @@ func (w *World) add(object runtime.Object) error {
 // ClusterRole matching any of its selectors, visited in name order, unless
 // that leaves none. The controller is level-triggered and resyncs whenever
 // any ClusterRole changes, so chained aggregation settles the same way.
-func (w *World) aggregate(keepOwnRules bool) {
+//
+// ClusterRoles on an aggregation cycle are not synced: their rules are
+// kept as written, as the stored rules of a settled cluster, and roles
+// that aggregate them read those. On a cycle the controller's result
+// depends on the order it visits roles and on what the roles held before
+// (see TestAggregationCycleVisitOrder), so no recomputation is right.
+// rules/rbac_roles.mg makes the same choice.
+func (w *World) aggregate(variant worldVariant) {
 	ownRules := map[string][]rbacv1.PolicyRule{}
 	for _, role := range w.ClusterRoles {
 		ownRules[role.Name] = slices.Clone(role.Rules)
@@ -228,32 +238,33 @@ func (w *World) aggregate(keepOwnRules bool) {
 	sort.Slice(w.ClusterRoles, func(i, j int) bool {
 		return w.ClusterRoles[i].Name < w.ClusterRoles[j].Name
 	})
+	w.AggregationCycleRoles = w.aggregationCycleRoles()
 
+	// Rules an aggregated role keeps on top of its sources' rules; none
+	// under Kubernetes semantics.
+	keptRules := map[string][]rbacv1.PolicyRule{}
+	if variant&aggregationKeepsOwnRules != 0 {
+		keptRules = ownRules
+	}
+	w.syncAggregatedRoles(w.AggregationCycleRoles, keptRules)
+}
+
+// syncAggregatedRoles runs the controller's sync over every aggregated
+// ClusterRole not in skip, in w.ClusterRoles order, until nothing changes.
+// Each role also keeps keptRules[name] on top of its sources' rules.
+func (w *World) syncAggregatedRoles(skip map[string]bool, keptRules map[string][]rbacv1.PolicyRule) {
 	for changed := true; changed; {
 		changed = false
 		for _, aggregated := range w.ClusterRoles {
-			if aggregated.AggregationRule == nil {
+			if aggregated.AggregationRule == nil || skip[aggregated.Name] {
 				continue
 			}
 
-			newRules := []rbacv1.PolicyRule{}
-			if keepOwnRules {
-				newRules = slices.Clone(ownRules[aggregated.Name])
-			}
-			for i := range aggregated.AggregationRule.ClusterRoleSelectors {
-				selector, err := metav1.LabelSelectorAsSelector(&aggregated.AggregationRule.ClusterRoleSelectors[i])
-				if err != nil {
-					// Validation already rejected malformed selectors.
-					panic(err)
-				}
-				for _, source := range w.ClusterRoles {
-					if source.Name == aggregated.Name || !selector.Matches(labels.Set(source.Labels)) {
-						continue
-					}
-					for _, rule := range source.Rules {
-						if !ruleExists(newRules, rule) {
-							newRules = append(newRules, rule)
-						}
+			newRules := append([]rbacv1.PolicyRule{}, keptRules[aggregated.Name]...)
+			for _, source := range w.aggregationSources(aggregated) {
+				for _, rule := range source.Rules {
+					if !ruleExists(newRules, rule) {
+						newRules = append(newRules, rule)
 					}
 				}
 			}
@@ -274,6 +285,59 @@ func (w *World) aggregate(keepOwnRules bool) {
 			}
 		}
 	}
+}
+
+// aggregationSources returns the ClusterRoles other than aggregated that
+// match any of its selectors, in w.ClusterRoles order. A role matching more
+// than one selector appears once per selector; callers deduplicate rules.
+func (w *World) aggregationSources(aggregated *rbacv1.ClusterRole) []*rbacv1.ClusterRole {
+	var sources []*rbacv1.ClusterRole
+	for i := range aggregated.AggregationRule.ClusterRoleSelectors {
+		selector, err := metav1.LabelSelectorAsSelector(&aggregated.AggregationRule.ClusterRoleSelectors[i])
+		if err != nil {
+			// Validation already rejected malformed selectors.
+			panic(err)
+		}
+		for _, source := range w.ClusterRoles {
+			if source.Name != aggregated.Name && selector.Matches(labels.Set(source.Labels)) {
+				sources = append(sources, source)
+			}
+		}
+	}
+	return sources
+}
+
+// aggregationCycleRoles names the ClusterRoles on an aggregation cycle:
+// those that reach themselves by following aggregation sources.
+func (w *World) aggregationCycleRoles() map[string]bool {
+	sources := map[string][]string{}
+	for _, role := range w.ClusterRoles {
+		if role.AggregationRule == nil {
+			continue
+		}
+		for _, source := range w.aggregationSources(role) {
+			sources[role.Name] = append(sources[role.Name], source.Name)
+		}
+	}
+
+	onCycle := map[string]bool{}
+	for _, role := range w.ClusterRoles {
+		// Roles reachable from role in one or more steps.
+		reached := map[string]bool{}
+		pending := slices.Clone(sources[role.Name])
+		for len(pending) > 0 {
+			name := pending[len(pending)-1]
+			pending = pending[:len(pending)-1]
+			if !reached[name] {
+				reached[name] = true
+				pending = append(pending, sources[name]...)
+			}
+		}
+		if reached[role.Name] {
+			onCycle[role.Name] = true
+		}
+	}
+	return onCycle
 }
 
 func ruleExists(haystack []rbacv1.PolicyRule, needle rbacv1.PolicyRule) bool {
