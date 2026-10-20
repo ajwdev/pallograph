@@ -183,7 +183,8 @@ impl RbacAccessModel {
             .flatten()
     }
 
-    /// Check that every principal with can(_, namespace, resource, verb) is in `expected`.
+    /// Check that every principal with a direct grant covering (namespace, resource, verb),
+    /// in any apigroup, is in `expected`.
     /// Pass namespace="" to check cluster-wide grants (ClusterRoleBindings apply to any namespace).
     /// `expected` (here and in the other checks) lists names, which match a
     /// principal of any kind.
@@ -192,7 +193,7 @@ impl RbacAccessModel {
     /// `resource_scope`) does not count: no request for it carries a namespace.
     ///
     /// `direct_perm` is already the closed-world finite RBAC relation derived by Mangle, so this
-    /// scans those entries directly instead of asking Z3 to synthesize string witnesses.
+    /// scans those entries directly.
     pub fn check_access_invariant(
         &self,
         namespace: &str,
@@ -233,9 +234,6 @@ impl RbacAccessModel {
     /// (`resource_scope`). A cluster-wide grant such as `nodes get`, or
     /// `selfsubjectaccessreviews create` for every authenticated user, is not
     /// access to the namespace. Wildcard and unknown resources count.
-    ///
-    /// This is the same closed-world RBAC model used by the Z3 encoding, but it avoids the
-    /// expensive free-string witness search by enumerating the finite direct-permission relation.
     pub fn check_namespace_isolation(&self, namespace: &str, allowed: &[&str]) -> Vec<Violation> {
         let allowed: HashSet<&str> = allowed.iter().copied().collect();
         // The smallest (resource, verb) per principal, so the reported example
@@ -280,7 +278,7 @@ impl RbacAccessModel {
             .collect()
     }
 
-    /// Like `check_access_invariant` but queries `effective_can` (escalation-aware).
+    /// Like `check_access_invariant` but escalation-aware.
     /// Enumerates all principals that can reach `(namespace, apigroup, resource, verb)`
     /// via direct RBAC grants *or* via `controls_identity` and `controls_group`
     /// escalation.
@@ -371,8 +369,7 @@ impl RbacAccessModel {
     ///
     /// Direct bindings are always included. Escalation via-paths are included only
     /// when `perm_filter` is `Some((namespace, apigroup, resource, verb))`, and only for targets that
-    /// actually satisfy that query (using the same wildcard semantics as the Z3
-    /// RecFuncDecl). Targets are identities from `controls_identity` and groups
+    /// actually satisfy that query (`permission_covers`). Targets are identities from `controls_identity` and groups
     /// from `controls_group`, or their `group_` counterparts when `principal`
     /// is a group. Self-referential via entries are always excluded.
     ///

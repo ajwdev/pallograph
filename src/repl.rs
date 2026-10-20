@@ -202,18 +202,18 @@ fn print_help() {
     );
     println!("  \\diff <name1> <name2>                  — diff two named snapshots");
     println!(
-        "  \\access-diff <name>                    — diff RBAC can/5 permission closure vs named snapshot"
+        "  \\access-diff <name>                    — diff RBAC permissions, direct and through escalation, vs named snapshot"
     );
     println!(
-        "  \\access-diff <name1> <name2>           — diff RBAC can/5 between two named snapshots"
+        "  \\access-diff <name1> <name2>           — diff RBAC permissions between two named snapshots"
     );
     println!();
     println!("RBAC access / SMT / Z3");
     println!(
-        "  \\smt check_access <ns> <r> <v> [p...] — find RBAC principals in can(_,ns,r,v) outside expected set (ns=\"\" for cluster-wide)"
+        "  \\smt check_access <ns> <r> <v> [p...] — find RBAC principals granted (ns,r,v) outside expected set (ns=\"\" for cluster-wide)"
     );
     println!(
-        "  \\smt reaches <ns> <ag> <r> <v> [p...] — find RBAC principals that effective_can reach (ag,r,v), escalation-aware"
+        "  \\smt reaches <ns> <ag> <r> <v> [p...] — find RBAC principals that can reach (ns,ag,r,v), counting escalation"
     );
     println!(
         "  \\smt cluster-admin [p...]              — shorthand for reaches \"\" \"*\" \"*\" \"*\""
@@ -839,8 +839,8 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             let cfg = z3::Config::new();
                             let ctx = z3::Context::new(&cfg);
                             let mut enc = smt::SmtEncoder::new(&ctx);
-                            enc.assert_rbac_axioms_from_snapshot_as(before_snap, name);
-                            enc.assert_rbac_axioms_as(&current_store, "current");
+                            enc.load_rbac_tables_from_snapshot_as(before_snap, name);
+                            enc.load_rbac_tables_as(&current_store, "current");
                             print_access_diff(&enc, name, "current");
                         }
                         [name1, name2] => {
@@ -855,8 +855,8 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             let cfg = z3::Config::new();
                             let ctx = z3::Context::new(&cfg);
                             let mut enc = smt::SmtEncoder::new(&ctx);
-                            enc.assert_rbac_axioms_from_snapshot_as(s1, name1);
-                            enc.assert_rbac_axioms_from_snapshot_as(s2, name2);
+                            enc.load_rbac_tables_from_snapshot_as(s1, name1);
+                            enc.load_rbac_tables_from_snapshot_as(s2, name2);
                             print_access_diff(&enc, name1, name2);
                         }
                         _ => eprintln!(

@@ -30,8 +30,8 @@ impl<'ctx> SmtEncoder<'ctx> {
     /// Every (principal, permission) entry `after` grants directly that no
     /// direct grant in `before` covers.
     ///
-    /// Both suffixes must have been loaded via `assert_rbac_axioms_as` or
-    /// `assert_rbac_axioms_from_snapshot_as` before calling this.
+    /// Both suffixes must have been loaded via `load_rbac_tables_as` or
+    /// `load_rbac_tables_from_snapshot_as` before calling this.
     pub fn check_permission_expansion(&self, before: &str, after: &str) -> Vec<CanDiff> {
         self.can_diff_witnesses(after, before)
     }
@@ -145,9 +145,6 @@ mod tests {
     use crate::engine::{Engine, InterpreterBackend};
     use crate::rbac::Subject;
     use crate::snapshot::{Scope, Snapshot};
-    use z3::SatResult;
-    use z3::ast::Ast;
-    use z3::ast::String as Z3String;
 
     /// A `direct_perm` row granting a User subject, for any object name.
     fn user_grant(user: &str, ns: &str, apigroup: &str, resource: &str, verb: &str) -> Vec<Value> {
@@ -177,8 +174,8 @@ mod tests {
         let cfg = z3::Config::new();
         let ctx = z3::Context::new(&cfg);
         let mut enc = SmtEncoder::new(&ctx);
-        enc.assert_rbac_axioms_as(&eval, "before");
-        enc.assert_rbac_axioms_as(&eval, "after");
+        enc.load_rbac_tables_as(&eval, "before");
+        enc.load_rbac_tables_as(&eval, "after");
 
         let gained = enc.check_permission_expansion("before", "after");
         let lost = enc.check_permission_contraction("before", "after");
@@ -211,8 +208,8 @@ mod tests {
         let cfg = z3::Config::new();
         let ctx = z3::Context::new(&cfg);
         let mut enc = SmtEncoder::new(&ctx);
-        enc.assert_rbac_axioms_from_snapshot_as(&empty_snap, "before");
-        enc.assert_rbac_axioms_from_snapshot_as(&after_snap, "after");
+        enc.load_rbac_tables_from_snapshot_as(&empty_snap, "before");
+        enc.load_rbac_tables_from_snapshot_as(&after_snap, "after");
 
         let gained = enc.check_permission_expansion("before", "after");
         assert_eq!(gained.len(), 1, "alice should be the only new principal");
@@ -231,7 +228,7 @@ mod tests {
         // "before" grants alice wildcard verb access on pods.
         // "after" keeps the wildcard AND adds an explicit narrow grant.
         // Tuple-level diff would falsely report GAINED pods/get.
-        // The Z3 semantic check must return empty (the narrow grant is subsumed).
+        // The coverage check must return empty (the narrow grant is subsumed).
         let before_snap = {
             let mut store = MemStore::new();
             store.add_fact(
@@ -259,12 +256,12 @@ mod tests {
         let cfg = z3::Config::new();
         let ctx = z3::Context::new(&cfg);
         let mut enc = SmtEncoder::new(&ctx);
-        enc.assert_rbac_axioms_from_snapshot_as(&before_snap, "before");
-        enc.assert_rbac_axioms_from_snapshot_as(&after_snap, "after");
+        enc.load_rbac_tables_from_snapshot_as(&before_snap, "before");
+        enc.load_rbac_tables_from_snapshot_as(&after_snap, "after");
 
         // The narrow get grant is subsumed by the existing wildcard verb.
-        // Z3 must find no expansion because can_before(alice,default,"",pods,get) is already true
-        // due to the verb=* wildcard matching "get".
+        // No expansion: alice already holds pods get in default in "before",
+        // through the verb=* wildcard.
         let gained = enc.check_permission_expansion("before", "after");
         assert!(
             gained.is_empty(),
@@ -280,9 +277,9 @@ mod tests {
     }
 
     #[test]
-    fn rbac_axioms_read_the_small_fixture() {
-        // can, effective_can and the access-diff escalation labels are built
-        // from relations scanned by name; an empty result means a rename or
+    fn rbac_tables_read_the_small_fixture() {
+        // The permission tables behind \access-diff are built from relations
+        // scanned by name; an empty result means a rename or
         // reshape went unnoticed.
         let engine = load_engine();
         let eval = engine.evaluate().expect("evaluate");
@@ -290,26 +287,23 @@ mod tests {
         let cfg = z3::Config::new();
         let ctx = z3::Context::new(&cfg);
         let mut enc = SmtEncoder::new(&ctx);
-        enc.assert_rbac_axioms(&eval);
+        enc.load_rbac_tables(&eval);
 
         let tables = &enc.permission_tables[""];
-        let can = tables.direct_entries();
+        let direct = tables.direct_entries();
         let effective = tables.effective_entries();
-        assert!(!can.is_empty(), "can has no entries");
+        assert!(!direct.is_empty(), "no direct entries");
         assert!(
-            effective.len() > can.len(),
-            "escalation added nothing to effective_can"
+            effective.len() > direct.len(),
+            "escalation added nothing to the effective entries"
         );
         assert!(
             !tables.escalation_targets.is_empty(),
             "no escalation targets recorded"
         );
-        for name in ["subject_grants", "can", "effective_can"] {
-            assert!(enc.rec_decls.contains_key(name), "{name} not defined");
-        }
-        for rel in ["direct_perm", "principal_subject", "controls_identity"] {
-            assert!(enc.facts.contains_key(rel), "{rel} not loaded");
-        }
+        // Only the tables are built; nothing goes into the solver.
+        assert!(enc.facts.is_empty(), "{:?}", enc.facts.keys());
+        assert!(enc.solver.get_assertions().is_empty());
     }
 
     #[test]
@@ -337,23 +331,18 @@ mod tests {
         let cfg = z3::Config::new();
         let ctx = z3::Context::new(&cfg);
         let mut enc = SmtEncoder::new(&ctx);
-        enc.assert_rbac_axioms_from_snapshot_as(&empty_snap, "before");
-        enc.assert_rbac_axioms_from_snapshot_as(&twins_snap, "after");
+        enc.load_rbac_tables_from_snapshot_as(&empty_snap, "before");
+        enc.load_rbac_tables_from_snapshot_as(&twins_snap, "after");
 
-        // can_after(principal, "default", "", resource, verb) holds.
+        // The principal may do verb on resource in namespace "default".
         let can = |principal: &Subject, resource: &str, verb: &str| -> bool {
-            let decl = enc.get_decl("can_after").expect("can_after");
-            let p = Z3String::from_str(&ctx, &principal.smt_key()).unwrap();
-            let ns = Z3String::from_str(&ctx, "default").unwrap();
-            let ag = Z3String::from_str(&ctx, "").unwrap();
-            let r = Z3String::from_str(&ctx, resource).unwrap();
-            let v = Z3String::from_str(&ctx, verb).unwrap();
-            let args: [&dyn Ast; 5] = [&p, &ns, &ag, &r, &v];
-            enc.solver.push();
-            enc.solver.assert(&decl.apply(&args).as_bool().unwrap());
-            let holds = enc.solver.check() == SatResult::Sat;
-            enc.solver.pop(1);
-            holds
+            let query = (
+                "default".to_string(),
+                String::new(),
+                resource.to_string(),
+                verb.to_string(),
+            );
+            enc.permission_tables["after"].covers(principal, &query, false)
         };
         let user = Subject::username("twin");
         let group = Subject::group("twin");
@@ -413,8 +402,8 @@ mod tests {
         let cfg = z3::Config::new();
         let ctx = z3::Context::new(&cfg);
         let mut enc = SmtEncoder::new(&ctx);
-        enc.assert_rbac_axioms_as(&without_bob, "without");
-        enc.assert_rbac_axioms_as(&with_bob, "with");
+        enc.load_rbac_tables_as(&without_bob, "without");
+        enc.load_rbac_tables_as(&with_bob, "with");
 
         let bob_reads_pods = || {
             (

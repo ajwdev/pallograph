@@ -20,9 +20,8 @@ to cluster-admin that neither reviewer could see.
 
 Datalog is a good fit for "follow every edge until nothing new shows up"
 (reachability over the permission graph). Z3 handles the questions where the
-search space is too big to enumerate, like "does any request exist that this
-principal can make but shouldn't?" Pallograph glues the two together behind a
-REPL.
+search space is too big to enumerate, like "is there any node this pod could
+ever be scheduled on?" Pallograph glues the two together behind a REPL.
 
 ## Quick start
 
@@ -38,7 +37,7 @@ Point the `prod` profile at a live cluster (it uses your current KUBECONFIG
 context) with `cargo run --bin pallograph -- --profile prod`.
 
 A short session, run against the small fixture: an inventory count, cluster-wide
-wildcard grants, who can reach cluster-admin (Z3), who can assume whose
+wildcard grants, who can reach cluster-admin, who can assume whose
 identity, and the derivation behind one of those answers.
 
 ```
@@ -67,7 +66,9 @@ rule, and `\source` loads a whole `.mg` file. Take a `\snapshot` first, then
 use `\diff` or `\access-diff` to see exactly which facts or RBAC permissions
 moved.
 
-**Ask the solver.** The `\smt` commands hand the question to Z3:
+**Check access and scheduling.** The RBAC `\smt` commands (`check_access`,
+`reaches`, `cluster-admin`) scan the grants the rules derive; the scheduling ones
+hand the question to Z3:
 
 | Command | Question |
 |---------|----------|
@@ -278,8 +279,9 @@ Important groups in that target:
 
 - `small_smt_access/load_access_model`: build the finite RBAC access model from
   a pre-evaluated store.
-- `small_smt_access/assert_rbac_axioms_z3`: build the optional Z3 RBAC model,
-  retained as a comparison/control path.
+- `small_smt_access/load_permission_tables`: build the permission tables
+  `\access-diff` compares, for one snapshot. Named `assert_rbac_axioms_z3`
+  before it stopped loading anything into Z3.
 - `small_smt_access/load_access_model_and_cluster_admin` and
   `small_smt_access/load_access_model_and_namespace_isolation`: include access
   model construction plus the query while excluding initial datasource/backend
@@ -308,7 +310,7 @@ samply record target/release/profile_smt_access --scenario cluster-admin --iters
 samply record target/release/profile_smt_access --scenario namespace-isolation --iters 1000
 ```
 
-Other scenarios include `load-access-model`, `encode-z3`, and
+Other scenarios include `load-access-model`, `load-permission-tables`, and
 `direct-cluster-admin`.
 
 ## License

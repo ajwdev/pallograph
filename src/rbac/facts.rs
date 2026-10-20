@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! RBAC fact extraction helpers shared by the finite access model and the
-//! optional Z3 encoding.
+//! access diff.
 //!
 //! The rules keep grants per binding subject (`direct_perm`, with a Kind
 //! column) and list separately which subjects each user or ServiceAccount
@@ -30,15 +30,6 @@ use std::sync::OnceLock;
 use mangle_common::Value;
 
 use super::PermissionEntry;
-
-/// Returns `base` when suffix is empty, `base_suffix` otherwise.
-pub fn relation_name(base: &str, suffix: &str) -> String {
-    if suffix.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base}_{suffix}")
-    }
-}
 
 /// Binding subject kinds, the `/user`, `/group` and `/serviceaccount` name
 /// constants in the rules.
@@ -129,7 +120,7 @@ impl Subject {
         }
     }
 
-    /// The principal as one Z3 string: the kind's name constant from the
+    /// The principal as one string: the kind's name constant from the
     /// rules, a colon, then the name, e.g. "/group:admins". The kind tags
     /// contain no colon, so two different subjects never share a key.
     pub fn smt_key(&self) -> String {
@@ -211,7 +202,7 @@ pub fn value_covers(entry: &str, query: &str) -> bool {
     entry == "*" || entry == query
 }
 
-/// `granted` covers `query` in every field, the semantics of the Z3 `can`.
+/// `granted` covers `query` in every field.
 pub fn grant_covers(granted: &Permission, query: &Permission) -> bool {
     ns_covers(&granted.0, &query.0)
         && value_covers(&granted.1, &query.1)

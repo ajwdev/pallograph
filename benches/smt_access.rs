@@ -67,12 +67,12 @@ fn access_model(store: &pallograph::engine::EvalStore) -> RbacAccessModel {
     RbacAccessModel::from_store(store)
 }
 
-fn z3_encoder<'ctx>(
+fn permission_tables<'ctx>(
     ctx: &'ctx z3::Context,
     store: &pallograph::engine::EvalStore,
 ) -> SmtEncoder<'ctx> {
     let mut enc = SmtEncoder::new(ctx);
-    enc.assert_rbac_axioms(store);
+    enc.load_rbac_tables(store);
     enc
 }
 
@@ -86,12 +86,12 @@ fn bench_store(c: &mut Criterion, name: &str, store: pallograph::engine::EvalSto
         b.iter(|| black_box(access_model(&store)))
     });
 
-    group.bench_function("assert_rbac_axioms_z3", |b| {
+    group.bench_function("load_permission_tables", |b| {
         b.iter_batched(
             z3::Config::new,
             |cfg| {
                 let ctx = z3::Context::new(&cfg);
-                black_box(z3_encoder(&ctx, &store));
+                black_box(permission_tables(&ctx, &store));
             },
             BatchSize::SmallInput,
         )
