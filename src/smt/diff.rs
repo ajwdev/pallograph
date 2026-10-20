@@ -1,15 +1,14 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::collections::HashSet;
+//! Access diff between two snapshots of RBAC grants (`\access-diff`),
+//! computed in Rust on the `PermissionTables` of each.
 
-use z3::SatResult;
-use z3::ast::Ast;
-use z3::ast::String as Z3String;
+use std::collections::HashMap;
 
 use super::SmtEncoder;
-use crate::rbac::facts::relation_name;
-use crate::rbac::{PermissionEntry, PermissionTables, Subject};
+use crate::rbac::facts::{ns_covers, value_covers};
+use crate::rbac::{PermissionEntry, Subject};
 
 pub struct CanDiff {
     pub principal: Subject,
@@ -28,8 +27,8 @@ pub struct EffDiff {
 }
 
 impl<'ctx> SmtEncoder<'ctx> {
-    /// Returns one representative witness per principal that gained access:
-    /// `can_<after>(p,ns,ag,r,v) ∧ ¬can_<before>(p,ns,ag,r,v)`.
+    /// Every (principal, permission) entry `after` grants directly that no
+    /// direct grant in `before` covers.
     ///
     /// Both suffixes must have been loaded via `assert_rbac_axioms_as` or
     /// `assert_rbac_axioms_from_snapshot_as` before calling this.
@@ -37,114 +36,100 @@ impl<'ctx> SmtEncoder<'ctx> {
         self.can_diff_witnesses(after, before)
     }
 
-    /// Returns one representative witness per principal that lost access:
-    /// `can_<before>(p,ns,ag,r,v) ∧ ¬can_<after>(p,ns,ag,r,v)`.
+    /// Every entry `before` grants directly that no direct grant in `after`
+    /// covers.
     pub fn check_permission_contraction(&self, before: &str, after: &str) -> Vec<CanDiff> {
         self.can_diff_witnesses(before, after)
     }
 
-    /// Returns one representative witness per principal that gained effective access
-    /// (escalation-aware): `effective_can_<after> ∧ ¬effective_can_<before>`.
+    /// Like `check_permission_expansion`, counting what escalation reaches
+    /// on both sides.
     pub fn check_effective_can_expansion(&self, before: &str, after: &str) -> Vec<EffDiff> {
         self.eff_diff_witnesses(after, before)
     }
 
-    /// Returns one representative witness per principal that lost effective access:
-    /// `effective_can_<before> ∧ ¬effective_can_<after>`.
+    /// Like `check_permission_contraction`, counting what escalation reaches
+    /// on both sides.
     pub fn check_effective_can_contraction(&self, before: &str, after: &str) -> Vec<EffDiff> {
         self.eff_diff_witnesses(before, after)
     }
 
-    /// The (principal, permission) entries of the tables loaded under `suffix`,
-    /// expanded by `expand`; empty when nothing was loaded under it.
-    fn entries(
-        &self,
-        suffix: &str,
-        expand: fn(&PermissionTables) -> HashSet<PermissionEntry>,
-    ) -> HashSet<PermissionEntry> {
-        self.permission_tables
-            .get(suffix)
-            .map(expand)
-            .unwrap_or_default()
+    /// Every (principal, permission) entry `have` holds literally and
+    /// `not_have` does not, unless a wildcard or cluster-wide grant in
+    /// `not_have` already covers it. `effective` counts what escalation
+    /// reaches rather than direct grants alone.
+    ///
+    /// Each snapshot's entries are expanded once and kept on its tables, so
+    /// the four checks of one `\access-diff` share them, and each principal's
+    /// grants in `not_have` are gathered once for all of its entries.
+    fn diff_witnesses(&self, have: &str, not_have: &str, effective: bool) -> Vec<PermissionEntry> {
+        let (Some(have_tables), Some(not_have_tables)) = (
+            self.permission_tables.get(have),
+            self.permission_tables.get(not_have),
+        ) else {
+            return vec![];
+        };
+        let (have_entries, not_have_entries) = if effective {
+            (
+                have_tables.effective_entries(),
+                not_have_tables.effective_entries(),
+            )
+        } else {
+            (
+                have_tables.direct_entries(),
+                not_have_tables.direct_entries(),
+            )
+        };
+
+        let mut by_principal: HashMap<&Subject, Vec<&PermissionEntry>> = HashMap::new();
+        for entry in have_entries.difference(not_have_entries) {
+            by_principal.entry(&entry.0).or_default().push(entry);
+        }
+
+        let mut witnesses = Vec::new();
+        for (principal, entries) in by_principal {
+            let held = not_have_tables.held_grants(principal, effective);
+            witnesses.extend(
+                entries
+                    .into_iter()
+                    .filter(|(_, namespace, api_group, resource, verb)| {
+                        !held.iter().any(|granted| {
+                            ns_covers(&granted.0, namespace)
+                                && value_covers(&granted.1, api_group)
+                                && value_covers(&granted.2, resource)
+                                && value_covers(&granted.3, verb)
+                        })
+                    })
+                    .cloned(),
+            );
+        }
+        witnesses
     }
 
-    // Iterate over tuples literally in `have_entries` but not `not_have_entries`, then
-    // use Z3 to filter out any that are semantically subsumed by a wildcard in not_have.
-    // This avoids the infinite-loop that results from asking Z3 to search the full string
-    // space when a wildcard entry like ("alice","","","*","*") is present.
     fn can_diff_witnesses(&self, have: &str, not_have: &str) -> Vec<CanDiff> {
-        let not_have_decl = match self.get_decl(&relation_name("can", not_have)) {
-            Some(d) => d,
-            None => return vec![],
-        };
-
-        let have_set = self.entries(have, PermissionTables::direct_entries);
-        let not_have_set = self.entries(not_have, PermissionTables::direct_entries);
-
-        let mut results = Vec::new();
-        for (principal, namespace, apigroup, resource, verb) in have_set.difference(&not_have_set) {
-            let p = Z3String::from_str(self.ctx, &principal.smt_key()).unwrap();
-            let ns = Z3String::from_str(self.ctx, namespace).unwrap();
-            let ag = Z3String::from_str(self.ctx, apigroup).unwrap();
-            let r = Z3String::from_str(self.ctx, resource).unwrap();
-            let v = Z3String::from_str(self.ctx, verb).unwrap();
-            let args: [&dyn Ast; 5] = [&p, &ns, &ag, &r, &v];
-            let already_covered = not_have_decl.apply(&args).as_bool().unwrap();
-
-            self.solver.push();
-            self.solver.assert(&already_covered);
-            let subsumed = self.solver.check() == SatResult::Sat;
-            self.solver.pop(1);
-
-            if !subsumed {
-                results.push(CanDiff {
-                    principal: principal.clone(),
-                    namespace: namespace.clone(),
-                    apigroup: apigroup.clone(),
-                    resource: resource.clone(),
-                    verb: verb.clone(),
-                });
-            }
-        }
-        results
+        self.diff_witnesses(have, not_have, false)
+            .into_iter()
+            .map(|(principal, namespace, apigroup, resource, verb)| CanDiff {
+                principal,
+                namespace,
+                apigroup,
+                resource,
+                verb,
+            })
+            .collect()
     }
 
-    // Same approach for effective_can: finite literal diff, Z3 only for subsumption checks.
     fn eff_diff_witnesses(&self, have: &str, not_have: &str) -> Vec<EffDiff> {
-        let not_have_decl = match self.get_decl(&relation_name("effective_can", not_have)) {
-            Some(d) => d,
-            None => return vec![],
-        };
-
-        let have_set = self.entries(have, PermissionTables::effective_entries);
-        let not_have_set = self.entries(not_have, PermissionTables::effective_entries);
-
-        let mut results = Vec::new();
-        for (principal, namespace, apigroup, resource, verb) in have_set.difference(&not_have_set) {
-            let p = Z3String::from_str(self.ctx, &principal.smt_key()).unwrap();
-            let ns = Z3String::from_str(self.ctx, namespace).unwrap();
-            let ag = Z3String::from_str(self.ctx, apigroup).unwrap();
-            let r = Z3String::from_str(self.ctx, resource).unwrap();
-            let v = Z3String::from_str(self.ctx, verb).unwrap();
-            let args: [&dyn Ast; 5] = [&p, &ns, &ag, &r, &v];
-            let already_covered = not_have_decl.apply(&args).as_bool().unwrap();
-
-            self.solver.push();
-            self.solver.assert(&already_covered);
-            let subsumed = self.solver.check() == SatResult::Sat;
-            self.solver.pop(1);
-
-            if !subsumed {
-                results.push(EffDiff {
-                    principal: principal.clone(),
-                    namespace: namespace.clone(),
-                    apigroup: apigroup.clone(),
-                    resource: resource.clone(),
-                    verb: verb.clone(),
-                });
-            }
-        }
-        results
+        self.diff_witnesses(have, not_have, true)
+            .into_iter()
+            .map(|(principal, namespace, apigroup, resource, verb)| EffDiff {
+                principal,
+                namespace,
+                apigroup,
+                resource,
+                verb,
+            })
+            .collect()
     }
 }
 

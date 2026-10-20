@@ -17,7 +17,10 @@ use crate::engine::EvalStore;
 pub(crate) mod facts;
 mod resource_scope;
 
-use facts::{Permission, parse_binding_subject, parse_strings, parse_subject_rows, unexpected_row};
+use facts::{
+    Permission, ns_covers, parse_binding_subject, parse_strings, parse_subject_rows,
+    unexpected_row, value_covers,
+};
 pub use facts::{PermissionTables, Subject, SubjectKind};
 
 /// (principal, namespace, apigroup, resource, verb).
@@ -748,19 +751,6 @@ fn hop_chain(
     }
     hops.reverse();
     hops
-}
-
-/// A permission entry's namespace covers a queried one when it is cluster-wide
-/// ("") or equal.
-fn ns_covers(entry_ns: &str, query_ns: &str) -> bool {
-    entry_ns.is_empty() || entry_ns == query_ns
-}
-
-/// A permission field covers a queried value when it is `*` (grants all) or an
-/// exact match. A query of `*` is only covered by an entry of `*`; a specific
-/// entry like `pods` does not cover the query `*`.
-fn value_covers(entry: &str, query: &str) -> bool {
-    entry == "*" || entry == query
 }
 
 #[derive(Clone, Copy)]

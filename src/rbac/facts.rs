@@ -25,6 +25,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::sync::OnceLock;
 
 use mangle_common::Value;
 
@@ -196,6 +197,27 @@ impl fmt::Display for SubjectDisplay<'_> {
 
 /// (namespace, apigroup, resource, verb) of one grant, ResourceName dropped.
 pub type Permission = (String, String, String, String);
+
+/// A permission entry's namespace covers a queried one when it is cluster-wide
+/// ("") or equal.
+pub fn ns_covers(entry_namespace: &str, query_namespace: &str) -> bool {
+    entry_namespace.is_empty() || entry_namespace == query_namespace
+}
+
+/// A permission field covers a queried value when it is `*` (grants all) or an
+/// exact match. A query of `*` is only covered by an entry of `*`; a specific
+/// entry like `pods` does not cover the query `*`.
+pub fn value_covers(entry: &str, query: &str) -> bool {
+    entry == "*" || entry == query
+}
+
+/// `granted` covers `query` in every field, the semantics of the Z3 `can`.
+pub fn grant_covers(granted: &Permission, query: &Permission) -> bool {
+    ns_covers(&granted.0, &query.0)
+        && value_covers(&granted.1, &query.1)
+        && value_covers(&granted.2, &query.2)
+        && value_covers(&granted.3, &query.3)
+}
 
 /// Report a row whose shape does not match what the rules declare.
 pub fn unexpected_row(relation: &str, row: &[Value]) {
@@ -381,6 +403,9 @@ pub struct PermissionTables {
     /// The identities (by username) and groups each principal controls
     /// through escalation. Never contains the principal itself.
     pub escalation_targets: HashMap<Subject, BTreeSet<Subject>>,
+    /// `direct_entries` and `effective_entries`, built on first use.
+    direct_entries: OnceLock<HashSet<PermissionEntry>>,
+    effective_entries: OnceLock<HashSet<PermissionEntry>>,
 }
 
 impl PermissionTables {
@@ -452,6 +477,7 @@ impl PermissionTables {
             assumed_subjects,
             group_members,
             escalation_targets,
+            ..Self::default()
         }
     }
 
@@ -584,29 +610,52 @@ impl PermissionTables {
     }
 
     /// (principal, permission) for every direct grant, expanded through
-    /// group membership. Built on demand for the access diff, which compares
-    /// two snapshots entry by entry.
-    pub fn direct_entries(&self) -> HashSet<PermissionEntry> {
-        let mut entries = HashSet::new();
-        for principal in self.principals() {
-            for permission in self.direct_grants(&principal) {
-                entries.insert(entry(&principal, permission));
-            }
-        }
-        entries
-    }
-
-    /// `direct_entries` plus what escalation reaches.
-    pub fn effective_entries(&self) -> HashSet<PermissionEntry> {
-        let mut entries = self.direct_entries();
-        for (principal, targets) in &self.escalation_targets {
-            for target in targets {
-                for permission in self.target_grants(target) {
-                    entries.insert(entry(principal, permission));
+    /// group membership. Built on first use for the access diff, which
+    /// compares two snapshots entry by entry, and kept.
+    pub fn direct_entries(&self) -> &HashSet<PermissionEntry> {
+        self.direct_entries.get_or_init(|| {
+            let mut entries = HashSet::new();
+            for principal in self.principals() {
+                for permission in self.direct_grants(&principal) {
+                    entries.insert(entry(&principal, permission));
                 }
             }
+            entries
+        })
+    }
+
+    /// `direct_entries` plus what escalation reaches, likewise kept.
+    pub fn effective_entries(&self) -> &HashSet<PermissionEntry> {
+        self.effective_entries.get_or_init(|| {
+            let mut entries = self.direct_entries().clone();
+            for (principal, targets) in &self.escalation_targets {
+                for target in targets {
+                    for permission in self.target_grants(target) {
+                        entries.insert(entry(principal, permission));
+                    }
+                }
+            }
+            entries
+        })
+    }
+
+    /// The grants `principal` holds: its direct grants, and with
+    /// `effective` also those of every identity and group it controls.
+    pub fn held_grants(&self, principal: &Subject, effective: bool) -> Vec<&Permission> {
+        let mut held: Vec<&Permission> = self.direct_grants(principal).collect();
+        if effective {
+            for target in self.escalation_targets.get(principal).into_iter().flatten() {
+                held.extend(self.target_grants(target));
+            }
         }
-        entries
+        held
+    }
+
+    /// `principal` holds a grant covering `query` (see `held_grants`).
+    pub fn covers(&self, principal: &Subject, query: &Permission, effective: bool) -> bool {
+        self.held_grants(principal, effective)
+            .into_iter()
+            .any(|granted| grant_covers(granted, query))
     }
 
     /// The identities and groups `principal` controls whose grants include
