@@ -15,6 +15,7 @@ use mangle_common::Value;
 use crate::engine::EvalStore;
 
 pub(crate) mod facts;
+mod resource_scope;
 
 use facts::{Permission, parse_binding_subject, parse_strings, unexpected_row};
 pub use facts::{PermissionTables, Subject, SubjectKind};
@@ -194,6 +195,9 @@ impl RbacAccessModel {
     /// `expected` (here and in the other checks) lists names, which match a
     /// principal of any kind.
     ///
+    /// In a namespace, a grant on a cluster-scoped resource (see
+    /// `resource_scope`) does not count: no request for it carries a namespace.
+    ///
     /// `direct_perm` is already the closed-world finite RBAC relation derived by Mangle, so this
     /// scans those entries directly instead of asking Z3 to synthesize string witnesses.
     pub fn check_access_invariant(
@@ -205,11 +209,15 @@ impl RbacAccessModel {
     ) -> Vec<Violation> {
         let expected: HashSet<&str> = expected.iter().copied().collect();
         self.tables
-            .principals_with_direct(|(entry_namespace, _, entry_resource, entry_verb)| {
-                ns_covers(entry_namespace, namespace)
-                    && value_covers(entry_resource, resource)
-                    && value_covers(entry_verb, verb)
-            })
+            .principals_with_direct(
+                |(entry_namespace, entry_api_group, entry_resource, entry_verb)| {
+                    ns_covers(entry_namespace, namespace)
+                        && (namespace.is_empty()
+                            || resource_scope::can_apply_in_namespace(entry_api_group, resource))
+                        && value_covers(entry_resource, resource)
+                        && value_covers(entry_verb, verb)
+                },
+            )
             .into_iter()
             .filter(|principal| self.is_reported(principal, &expected))
             .map(|principal| {
@@ -227,6 +235,12 @@ impl RbacAccessModel {
 
     /// Check that only the `allowed` principals have any direct access in `namespace`.
     ///
+    /// Access means a grant that can apply to some request in `namespace`: one
+    /// made there or cluster-wide, on a resource that is not cluster-scoped
+    /// (`resource_scope`). A cluster-wide grant such as `nodes get`, or
+    /// `selfsubjectaccessreviews create` for every authenticated user, is not
+    /// access to the namespace. Wildcard and unknown resources count.
+    ///
     /// This is the same closed-world RBAC model used by the Z3 encoding, but it avoids the
     /// expensive free-string witness search by enumerating the finite direct-permission relation.
     pub fn check_namespace_isolation(&self, namespace: &str, allowed: &[&str]) -> Vec<Violation> {
@@ -238,7 +252,10 @@ impl RbacAccessModel {
         for (subject, permissions) in &self.tables.grants {
             let Some(example) = permissions
                 .iter()
-                .filter(|(entry_namespace, ..)| ns_covers(entry_namespace, namespace))
+                .filter(|(entry_namespace, api_group, resource, _)| {
+                    ns_covers(entry_namespace, namespace)
+                        && resource_scope::can_apply_in_namespace(api_group, resource)
+                })
                 .map(|(_, _, resource, verb)| (resource.as_str(), verb.as_str()))
                 .min()
             else {
@@ -722,10 +739,14 @@ fn permission<'a>(
     }
 }
 
-/// A granted permission covers a query when every field does.
+/// A granted permission covers a query when every field does. A query in a
+/// namespace for a cluster-scoped resource (see `resource_scope`) is covered
+/// by nothing: no such request exists.
 fn permission_covers(granted: &Permission, query: PermissionPattern<'_>) -> bool {
     let (namespace, api_group, resource, verb) = granted;
     ns_covers(namespace, query.namespace)
+        && (query.namespace.is_empty()
+            || resource_scope::can_apply_in_namespace(query.apigroup, query.resource))
         && value_covers(api_group, query.apigroup)
         && value_covers(resource, query.resource)
         && value_covers(verb, query.verb)
@@ -1038,6 +1059,121 @@ mod tests {
                 .any(|v| v.principal == Subject::username("admin@example.com")),
             "direct_violations missed cluster-wide grant"
         );
+    }
+
+    #[test]
+    fn isolation_ignores_grants_on_cluster_scoped_resources() {
+        // Every authenticated user may read cluster trust bundles and nodes,
+        // which live outside namespaces; ns-readers may also list pods
+        // everywhere.
+        let role = |name: &str, api_group: &str, resource: &str, verb: &str| {
+            format!(
+                r#"{{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{{"name":"{name}"}},"rules":[{{"apiGroups":["{api_group}"],"resources":["{resource}"],"verbs":["{verb}"]}}]}}"#
+            )
+        };
+        let binding = |name: &str, group: &str| {
+            format!(
+                r#"{{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{{"name":"{name}"}},"roleRef":{{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"{name}"}},"subjects":[{{"kind":"Group","name":"{group}"}}]}}"#
+            )
+        };
+        let extra = [
+            r#"{"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"app","namespace":"payments"}}"#.to_string(),
+            role("bundles", "certificates.k8s.io", "clustertrustbundles", "get"),
+            binding("bundles", "system:authenticated"),
+            role("node-reader", "", "nodes", "get"),
+            binding("node-reader", "system:authenticated"),
+            role("pod-lister", "", "pods", "list"),
+            binding("pod-lister", "ns-readers"),
+        ]
+        .join("\n");
+        let eval = load_engine_with(&extra).evaluate().expect("evaluate");
+        let model = RbacAccessModel::from_store(&eval);
+
+        let flagged: Vec<Subject> = model
+            .check_namespace_isolation("payments", &[])
+            .into_iter()
+            .map(|v| v.principal)
+            .collect();
+        assert!(
+            flagged.contains(&Subject::group("ns-readers")),
+            "{flagged:?}"
+        );
+        for principal in [
+            Subject::group("system:authenticated"),
+            Subject::username("system:serviceaccount:payments:app"),
+        ] {
+            assert!(!flagged.contains(&principal), "{principal}: {flagged:?}");
+        }
+
+        // Grants with apigroup "*" (cluster-admin in the fixture) still count:
+        // nodes in some other group could be namespaced.
+        assert!(
+            !model
+                .check_access_invariant("payments", "nodes", "get", &[])
+                .iter()
+                .any(|v| v.principal == Subject::group("system:authenticated")),
+            "nodes are cluster-scoped"
+        );
+        assert!(
+            model
+                .check_access_invariant("", "nodes", "get", &[])
+                .iter()
+                .any(|v| v.principal == Subject::group("system:authenticated"))
+        );
+    }
+
+    #[test]
+    fn every_check_ignores_cluster_scoped_grants_in_a_namespace() {
+        // Every authenticated user may get nodes, which live outside
+        // namespaces, so no check may count it as access in payments.
+        let extra = [
+            r#"{"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"app","namespace":"payments"}}"#,
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"node-reader"},"rules":[{"apiGroups":[""],"resources":["nodes"],"verbs":["get"]}]}"#,
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"node-reader"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"node-reader"},"subjects":[{"kind":"Group","name":"system:authenticated"}]}"#,
+        ]
+        .join("\n");
+        let eval = load_engine_with(&extra).evaluate().expect("evaluate");
+        let model = RbacAccessModel::from_store(&eval);
+        let authenticated = Subject::group("system:authenticated");
+        let flags = |violations: Vec<super::Violation>| {
+            violations.iter().any(|v| v.principal == authenticated)
+        };
+
+        assert!(!flags(model.check_access_invariant(
+            "payments",
+            "nodes",
+            "get",
+            &[]
+        )));
+        assert!(!flags(model.check_namespace_isolation("payments", &[])));
+        assert!(!flags(model.check_reaches(
+            "payments",
+            "",
+            "nodes",
+            "get",
+            &[],
+            true
+        )));
+        assert!(!flags(
+            model.direct_violations("payments", "", "nodes", "get")
+        ));
+        assert!(
+            model
+                .paths_for_principal(&authenticated, Some(("payments", "", "nodes", "get")))
+                .is_empty()
+        );
+
+        // Cluster-wide, the grant counts everywhere.
+        assert!(flags(model.check_access_invariant("", "nodes", "get", &[])));
+        assert!(flags(model.check_reaches(
+            "",
+            "",
+            "nodes",
+            "get",
+            &[],
+            true
+        )));
+        assert!(flags(model.direct_violations("", "", "nodes", "get")));
     }
 
     #[test]
