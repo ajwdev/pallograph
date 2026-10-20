@@ -153,10 +153,12 @@ func GenerateRequests(world *World, limit int, seed uint64) []Request {
 	return requests
 }
 
-// subjectPrincipals returns principals a binding's subjects match, plus a
-// decoy for each service account: the same name in an unrelated namespace.
-// A group subject is represented by a principal the authenticator would
-// put in it.
+// subjectPrincipals returns principals a binding's subjects match, plus
+// decoys they must not: for each service account, the same name in an
+// unrelated namespace; for each user, another user in a group of the same
+// name; for each group, a user of the same name outside it. Users and
+// groups are separate namespaces to the authorizer. A group subject is
+// represented by a principal the authenticator would put in it.
 func subjectPrincipals(subjects []rbacv1.Subject, bindingNamespace string) []principal {
 	serviceAccount := func(namespace, name string) principal {
 		username := serviceAccountUsername(namespace, name)
@@ -167,7 +169,9 @@ func subjectPrincipals(subjects []rbacv1.Subject, bindingNamespace string) []pri
 	for _, subject := range subjects {
 		switch subject.Kind {
 		case rbacv1.UserKind:
-			principals = append(principals, principal{subject.Name, authenticatedGroups(subject.Name)})
+			member := "member-of-" + subject.Name
+			principals = append(principals, principal{subject.Name, authenticatedGroups(subject.Name)},
+				principal{member, authenticatedGroups(member, subject.Name)})
 		case rbacv1.ServiceAccountKind:
 			namespace := subject.Namespace
 			if namespace == "" {
@@ -180,7 +184,9 @@ func subjectPrincipals(subjects []rbacv1.Subject, bindingNamespace string) []pri
 		case rbacv1.GroupKind:
 			switch namespace, isNamespaceGroup := strings.CutPrefix(subject.Name, "system:serviceaccounts:"); {
 			case subject.Name == user.AllAuthenticated:
-				principals = append(principals, principal{unboundUser, authenticatedGroups(unboundUser)})
+				// A service account is authenticated too.
+				principals = append(principals, principal{unboundUser, authenticatedGroups(unboundUser)},
+					serviceAccount(unrelatedNamespace, "pallograph-sa"))
 			case subject.Name == user.AllUnauthenticated:
 				principals = append(principals, principal{user.Anonymous, authenticatedGroups(user.Anonymous)})
 			case subject.Name == "system:serviceaccounts":
@@ -190,7 +196,8 @@ func subjectPrincipals(subjects []rbacv1.Subject, bindingNamespace string) []pri
 					serviceAccount(unrelatedNamespace, "pallograph-sa"))
 			default:
 				member := "member-of-" + subject.Name
-				principals = append(principals, principal{member, authenticatedGroups(member, subject.Name)})
+				principals = append(principals, principal{member, authenticatedGroups(member, subject.Name)},
+					principal{subject.Name, authenticatedGroups(subject.Name)})
 			}
 		}
 	}
@@ -258,8 +265,9 @@ func firstVerbOutside(verbs []string, vocabulary vocabulary) string {
 // matches, with each wildcard replaced by representatives), and for each
 // resource entry a near miss per field: another apiGroup, resource,
 // subresource, verb and, for resourceNames rules, another name and no name.
-// For a non-resource rule: each URL, the boundaries of its prefix, and an
-// unrelated path, with the rule's verbs and one it does not grant.
+// For a non-resource rule: each URL, the boundaries of its prefix, the same
+// with any interior "*" filled in, and an unrelated path, with the rule's
+// verbs and one it does not grant.
 func ruleProbes(rule rbacv1.PolicyRule, vocabulary vocabulary) []probe {
 	if len(rule.NonResourceURLs) > 0 {
 		return nonResourceProbes(rule, vocabulary)
@@ -345,18 +353,29 @@ func ruleProbes(rule rbacv1.PolicyRule, vocabulary vocabulary) []probe {
 func nonResourceProbes(rule rbacv1.PolicyRule, vocabulary vocabulary) []probe {
 	paths := []string{unrelatedPath}
 	for _, url := range rule.NonResourceURLs {
-		prefix, isPrefix := strings.CutSuffix(url, "*")
+		// The authorizer strips every trailing "*", so "/a/**" is the
+		// prefix "/a/". A "*" anywhere else is a literal character.
+		prefix := strings.TrimRight(url, "*")
+		var urlPaths []string
 		switch {
-		case !isPrefix:
+		case prefix == url:
 			// A literal URL must not match the paths below it.
-			paths = append(paths, url, strings.TrimSuffix(url, "/")+"/pallograph-child")
+			urlPaths = []string{url, strings.TrimSuffix(url, "/") + "/pallograph-child"}
 		case prefix == "":
-			paths = append(paths, "/pallograph/any")
+			urlPaths = []string{"/pallograph/any"}
 		default:
-			// The prefix itself, a path below it, and a sibling that shares
-			// its leading characters.
-			paths = append(paths, prefix, prefix+"pallograph/child",
-				fmt.Sprintf("%s-pallograph", strings.TrimSuffix(prefix, "/")))
+			// The URL as written, the prefix itself, a path below it, and a
+			// sibling that shares its leading characters.
+			urlPaths = []string{url, prefix, prefix + "pallograph/child",
+				fmt.Sprintf("%s-pallograph", strings.TrimSuffix(prefix, "/"))}
+		}
+		paths = append(paths, urlPaths...)
+		if strings.Contains(prefix, "*") {
+			// An interior "*" is not a wildcard: the same paths with it
+			// filled in must not match.
+			for _, path := range urlPaths {
+				paths = append(paths, strings.ReplaceAll(path, "*", "pallograph"))
+			}
 		}
 	}
 

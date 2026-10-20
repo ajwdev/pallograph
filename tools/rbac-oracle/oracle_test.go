@@ -164,3 +164,135 @@ func TestAggregationWithoutSources(t *testing.T) {
 		})
 	}
 }
+
+// decisionCase is one hand-checked decision in a curated world.
+type decisionCase struct {
+	name    string
+	request Request
+	allowed bool
+}
+
+// resourceRequest and nonResourceRequest build requests the way the
+// authenticator presents them: the username with its implicit groups,
+// plus any extra ones.
+func resourceRequest(username, namespace, group, resource, subresource, name, verb string, groups ...string) Request {
+	return Request{User: username, Groups: authenticatedGroups(username, groups...), Namespace: namespace,
+		APIGroup: group, Resource: resource, Subresource: subresource, Name: name, Verb: verb}
+}
+
+func nonResourceRequest(username, path string, groups ...string) Request {
+	return Request{User: username, Groups: authenticatedGroups(username, groups...), Path: path, Verb: "get"}
+}
+
+// checkDecisions loads the curated world named world and checks each
+// case's decision.
+func checkDecisions(t *testing.T, world string, tests []decisionCase) {
+	t.Helper()
+	loaded, err := LoadWorld("../../tests/rbac_compat/worlds/" + world)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oracle := NewOracle(loaded)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decision, err := oracle.Decide(&test.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decision.Allowed != test.allowed {
+				t.Errorf("allowed = %v, want %v (reason %q, tags %v)",
+					decision.Allowed, test.allowed, decision.Reason, decision.Tags)
+			}
+		})
+	}
+}
+
+func TestNamesURLsSubresourcesDecisions(t *testing.T) {
+	urlReader := func(path string) Request {
+		return nonResourceRequest("member-of-url-readers", path, "url-readers")
+	}
+	checkDecisions(t, "names-urls-subresources", []decisionCase{
+		{"empty resourceNames grants a name", resourceRequest("alice", "team-a", "", "configmaps", "", "anything", "get"), true},
+		{"empty resourceNames grants no name", resourceRequest("alice", "team-a", "", "configmaps", "", "", "get"), true},
+		{"resourceNames star is the literal name", resourceRequest("bob", "team-a", "", "secrets", "", "*", "get"), true},
+		{"resourceNames star is not a wildcard", resourceRequest("bob", "team-a", "", "secrets", "", "db-password", "get"), false},
+		{"resourceNames star needs a name", resourceRequest("bob", "team-a", "", "secrets", "", "", "get"), false},
+		{"*/scale on a core resource", resourceRequest("carol", "team-a", "", "replicationcontrollers", "scale", "", "update"), true},
+		{"*/scale on apps", resourceRequest("carol", "", "apps", "deployments", "scale", "web", "get"), true},
+		{"*/scale is not the resource", resourceRequest("carol", "team-a", "apps", "deployments", "", "", "get"), false},
+		{"*/scale is not another subresource", resourceRequest("carol", "team-a", "apps", "deployments", "status", "", "get"), false},
+		{"pods/* matches the literal subresource", resourceRequest("carol", "team-a", "", "pods", "*", "", "get"), true},
+		{"pods/* is not a wildcard", resourceRequest("carol", "team-a", "", "pods", "log", "", "get"), false},
+		{"pods/* is not pods", resourceRequest("carol", "team-a", "", "pods", "", "", "get"), false},
+		{"exact URL", urlReader("/healthz"), true},
+		{"exact URL is not a prefix", urlReader("/healthz/ready"), false},
+		{"prefix URL", urlReader("/debug/pprof"), true},
+		{"prefix URL matches the bare prefix", urlReader("/debug/"), true},
+		{"prefix URL needs the separator", urlReader("/debug"), false},
+		{"double star strips both", urlReader("/double/x"), true},
+		{"double star prefix", urlReader("/double/"), true},
+		{"interior star is literal", urlReader("/foo/*/bar"), true},
+		{"interior star is not a wildcard", urlReader("/foo/x/bar"), false},
+		{"interior star with trailing prefix", urlReader("/logs/*/tail/today"), true},
+		{"interior star with trailing prefix is literal", urlReader("/logs/app/tail/today"), false},
+		{"URL rules need the group", nonResourceRequest("url-readers", "/healthz"), false},
+		{"star URL", nonResourceRequest("dave", "/anything/at/all"), true},
+		{"star URL with another verb", Request{User: "dave", Groups: authenticatedGroups("dave"), Path: "/healthz", Verb: "post"}, false},
+		{"URL rules via a RoleBinding", nonResourceRequest("erin", "/metrics"), false},
+		{"URL prefix via a RoleBinding", nonResourceRequest("erin", "/version/x"), false},
+	})
+}
+
+func TestAggregationShapesDecisions(t *testing.T) {
+	checkDecisions(t, "aggregation-shapes", []decisionCase{
+		{"chain reaches the bottom", resourceRequest("alice", "team-a", "", "services", "", "", "get"), true},
+		{"chain replaces the top's own rules", resourceRequest("alice", "team-a", "", "configmaps", "", "", "list"), false},
+		{"chain replaces the middle's own rules", resourceRequest("alice", "team-a", "", "secrets", "", "", "get"), false},
+		{"chain middle via a RoleBinding", resourceRequest("bob", "team-a", "", "services", "", "", "get"), true},
+		{"chain middle loses its own rules", resourceRequest("bob", "team-a", "", "secrets", "", "", "get"), false},
+		{"cycle member a gets the source", resourceRequest("carol", "", "", "endpoints", "", "", "get"), true},
+		{"cycle member b gets the source", resourceRequest("dave", "", "", "endpoints", "", "", "get"), true},
+		{"cycle adds nothing else", resourceRequest("dave", "", "", "endpoints", "", "", "list"), false},
+		{"ruleless source keeps own rules", resourceRequest("erin", "team-a", "", "pods", "", "", "list"), true},
+		{"aggregating a role that kept its own rules", resourceRequest("frank", "team-a", "", "pods", "", "", "get"), true},
+		{"two selectors union", resourceRequest("grace", "team-a", "", "services", "", "", "get"), true},
+		{"two selectors replace own rules", resourceRequest("grace", "team-a", "", "secrets", "", "", "list"), false},
+	})
+}
+
+func TestAggregationMatchAllDecisions(t *testing.T) {
+	checkDecisions(t, "aggregation-match-all", []decisionCase{
+		{"empty selector gets an unlabelled source", resourceRequest("alice", "team-a", "", "pods", "", "", "get"), true},
+		{"empty selector gets a labelled source", resourceRequest("alice", "", "apps", "deployments", "", "", "list"), true},
+		{"empty selector gets URL rules", nonResourceRequest("alice", "/healthz"), true},
+		{"empty selector grants nothing else", resourceRequest("alice", "team-a", "", "secrets", "", "", "get"), false},
+		{"empty matchLabels gets an unlabelled source", resourceRequest("bob", "team-a", "", "pods", "", "", "get"), true},
+		{"empty matchLabels gets a labelled source", resourceRequest("bob", "team-a", "apps", "deployments", "", "", "list"), true},
+		{"empty matchLabels via a RoleBinding is namespaced", resourceRequest("bob", "team-b", "", "pods", "", "", "get"), false},
+		{"empty matchLabels URL rules via a RoleBinding", nonResourceRequest("bob", "/healthz"), false},
+	})
+}
+
+func TestSubjectsAndGroupsDecisions(t *testing.T) {
+	serviceAccount := func(namespace, name, requestNamespace, resource, verb string) Request {
+		return resourceRequest(serviceAccountUsername(namespace, name), requestNamespace, "", resource, "", "", verb)
+	}
+	checkDecisions(t, "subjects-and-groups", []decisionCase{
+		{"user ops", resourceRequest("ops", "team-a", "", "pods", "", "", "get"), true},
+		{"user ops is not group ops", resourceRequest("ops", "team-a", "", "secrets", "", "", "get"), false},
+		{"group ops", resourceRequest("member-of-ops", "team-a", "", "secrets", "", "", "get", "ops"), true},
+		{"group ops is not user ops", resourceRequest("member-of-ops", "team-a", "", "pods", "", "", "get", "ops"), false},
+		{"system:serviceaccounts:<ns>", serviceAccount("team-a", "any", "team-b", "configmaps", "get"), true},
+		{"system:serviceaccounts:<ns> other namespace", serviceAccount("team-b", "any", "team-b", "configmaps", "get"), false},
+		{"system:serviceaccounts:<ns> needs a service account", resourceRequest("team-a", "team-a", "", "configmaps", "", "", "get"), false},
+		{"system:serviceaccounts", serviceAccount("elsewhere", "any", "team-b", "services", "get"), true},
+		{"system:serviceaccounts via a RoleBinding is namespaced", serviceAccount("elsewhere", "any", "team-a", "services", "get"), false},
+		{"system:serviceaccounts needs a service account", resourceRequest("alice", "team-b", "", "services", "", "", "get"), false},
+		{"system:authenticated includes service accounts", serviceAccount("elsewhere", "any", "", "namespaces", "list"), true},
+		{"system:authenticated includes users", resourceRequest("alice", "", "", "namespaces", "", "", "list"), true},
+		{"system:authenticated excludes anonymous", resourceRequest("system:anonymous", "", "", "namespaces", "", "", "list"), false},
+		{"service account from another namespace", serviceAccount("team-b", "builder", "team-a", "pods", "get"), true},
+		{"service account from another namespace, not its own", serviceAccount("team-b", "builder", "team-b", "pods", "get"), false},
+		{"same service account name in the binding namespace", serviceAccount("team-a", "builder", "team-a", "pods", "get"), false},
+	})
+}

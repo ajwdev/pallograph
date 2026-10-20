@@ -1,0 +1,82 @@
+# Empty aggregation selectors. "{}" and "{matchLabels: {}}" both select
+# every ClusterRole (but the aggregator itself), including each other, so
+# both aggregators below end up with every source's rules, URL rules
+# included. TestAggregationMatchAllDecisions in tools/rbac-oracle pins the
+# decisions.
+#
+# Neither aggregator has rules of its own: they select each other, and own
+# rules in such a cycle would leave the result to the order the controller
+# visits the roles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: match-all-empty
+aggregationRule:
+  clusterRoleSelectors:
+  - {}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: match-all-labels
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels: {}
+---
+# Sources: one unlabelled, one labelled, one with URL rules.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: source-pods
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: source-deployments
+  labels:
+    aggregation-match-all.pallograph.dev/any-label: "true"
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: source-healthz
+rules:
+- nonResourceURLs: ["/healthz"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alice-match-all-empty
+subjects:
+- kind: User
+  name: alice
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: match-all-empty
+---
+# Through a RoleBinding: resource rules apply in team-a only, URL rules not
+# at all.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bob-match-all-labels
+  namespace: team-a
+subjects:
+- kind: User
+  name: bob
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: match-all-labels
