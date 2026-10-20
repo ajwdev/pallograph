@@ -15,9 +15,14 @@
 //! structural and must stay readable: enums (`operator`, `effect`, ...),
 //! `apiVersion`/`kind`, RBAC verbs/resources/apiGroups (when public),
 //! well-known scheduling labels (arch, zone, instance-type, ...), and
-//! resource quantities. Built-in principals from `src/builtins.txt` and a
-//! few reserved names (`default`, `cluster-admin`, `kube-system`) are kept
-//! whole so the engine's literals still match. Secret/ConfigMap base64
+//! resource quantities. Built-in principals from `src/builtins.txt`, the
+//! groups and users the API server adds to every request
+//! (`system:authenticated`, `system:serviceaccounts`, ...; `KEEP_PRINCIPALS`)
+//! and a few reserved names (`default`, `cluster-admin`, `kube-system`) are
+//! kept whole so the engine's literals still match. Other `system:` names
+//! keep only the `system:` prefix. In `system:serviceaccount:<ns>:<sa>`,
+//! `system:serviceaccounts:<ns>` and `system:node:<node>` each name is
+//! anonymized as the object's own name is. Secret/ConfigMap base64
 //! payloads are replaced with random base64 of the same length.
 //!
 //! IP addresses and `ip-A-B-C-D` / `ec2-A-B-C-D` hostnames are rewritten
@@ -51,6 +56,27 @@ const KEEP_NAMES: &[&str] = &[
     "kube-system",
     "kube-public",
     "kube-node-lease",
+];
+/// Groups and users the API server attaches to requests itself. The RBAC
+/// rules match these literally, so a binding to them must keep its name.
+/// They are not in `src/builtins.txt` because that file hides principals
+/// from SMT output, and a grant to `system:authenticated` is a finding.
+const KEEP_PRINCIPALS: &[&str] = &[
+    "system:authenticated",
+    "system:unauthenticated",
+    "system:serviceaccounts",
+    "system:masters",
+    "system:anonymous",
+];
+/// Principal names Kubernetes builds from a fixed prefix plus a number of
+/// `:`-separated object names: `system:serviceaccount:<ns>:<sa>`,
+/// `system:serviceaccounts:<ns>` and `system:node:<node>`. The prefix is
+/// kept and each name is anonymized as the object's own name is, so the
+/// principal still joins with its Namespace, ServiceAccount or Node.
+const PRINCIPAL_PREFIXES: &[(&str, usize)] = &[
+    ("system:serviceaccount:", 2),
+    ("system:serviceaccounts:", 1),
+    ("system:node:", 1),
 ];
 /// String fields that are schema enums; kept verbatim.
 const ENUM_KEYS: &[&str] = &[
@@ -498,7 +524,11 @@ impl Mapper {
             })
             .collect();
 
-        let mut keep_exact: HashSet<String> = KEEP_NAMES.iter().map(|s| s.to_string()).collect();
+        let mut keep_exact: HashSet<String> = KEEP_NAMES
+            .iter()
+            .chain(KEEP_PRINCIPALS)
+            .map(|s| s.to_string())
+            .collect();
         let mut keep_prefix = Vec::new();
         for line in word_list(BUILTINS) {
             if let Some(p) = line.strip_suffix('*') {
@@ -779,19 +809,43 @@ impl Mapper {
             }
             return s.to_string();
         }
+        if let Some(out) = self.rewrite_principal(path, s) {
+            return out;
+        }
         self.rewrite(s)
     }
 
-    /// Rewrite address-like spans, then the rest token-wise. The `system:` /
-    /// `system:serviceaccount:` prefixes are kept because the engine parses
-    /// them.
+    /// Rewrite a principal built from one of `PRINCIPAL_PREFIXES`, passing
+    /// each object name through `apply` as if it stood alone. `kube-system`
+    /// or `default` in a username then stays as it does on the object, and
+    /// a namespace maps to the same fake everywhere. `None` if `s` is not
+    /// such a principal.
+    fn rewrite_principal(&mut self, path: &[&str], s: &str) -> Option<String> {
+        let (prefix, count) = PRINCIPAL_PREFIXES.iter().find(|(p, _)| s.starts_with(p))?;
+        let names: Vec<&str> = s[prefix.len()..].split(':').collect();
+        let is_object_name = |n: &&str| {
+            !n.is_empty()
+                && n.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+        };
+        if names.len() != *count || !names.iter().all(is_object_name) {
+            return None;
+        }
+        let mapped: Vec<String> = names
+            .iter()
+            .map(|n| self.apply(path, n, Act::Text))
+            .collect();
+        Some(format!("{prefix}{}", mapped.join(":")))
+    }
+
+    /// Rewrite address-like spans, then the rest token-wise. The tokens of a
+    /// `PRINCIPAL_PREFIXES` prefix, or a bare `system:`, are kept because the
+    /// engine parses them.
     fn rewrite(&mut self, s: &str) -> String {
-        let mut keep_lead = if s.starts_with("system:serviceaccount:") {
-            2
-        } else if s.starts_with("system:") {
-            1
-        } else {
-            0
+        let mut keep_lead = match PRINCIPAL_PREFIXES.iter().find(|(p, _)| s.starts_with(p)) {
+            Some((p, _)) => runs(p).iter().filter(|r| r.0).count(),
+            None if s.starts_with("system:") => 1,
+            None => 0,
         };
         let mut out = String::with_capacity(s.len());
         let mut at = 0;
@@ -1281,6 +1335,67 @@ mod tests {
         );
         // quantity-ish and tiny tokens survive rewriting
         assert_eq!(run(&mut m, "500m 8080 ab"), "500m 8080 ab");
+    }
+
+    #[test]
+    fn request_groups_and_users_kept_whole() {
+        let mut m = mapper(4);
+        for s in KEEP_PRINCIPALS.iter().chain(&[
+            "system:nodes",
+            "system:bootstrappers",
+            "system:monitoring",
+        ]) {
+            assert_eq!(m.apply(&["subjects", "name"], s, Act::Text), *s);
+        }
+        // any other `system:` group keeps only its prefix
+        let o = m.apply(&["subjects", "name"], "system:billing-team", Act::Text);
+        assert!(o.starts_with("system:"), "{o}");
+        assert_ne!(o, "system:billing-team");
+        assert_eq!(o.len(), "system:billing-team".len());
+    }
+
+    #[test]
+    fn principal_names_join_their_objects() {
+        let v = j(r#"{"kind":"List","items":[
+            {"kind":"Namespace","metadata":{"name":"payments"}},
+            {"kind":"ServiceAccount","metadata":{"name":"billing","namespace":"payments"}},
+            {"kind":"Node","metadata":{"name":"worker-7"}},
+            {"kind":"ClusterRoleBinding","metadata":{"name":"b"},"subjects":[
+              {"kind":"Group","name":"system:serviceaccounts:payments"},
+              {"kind":"User","name":"system:serviceaccount:payments:billing"},
+              {"kind":"User","name":"system:serviceaccount:payments:default"},
+              {"kind":"User","name":"system:serviceaccount:kube-system:my-addon"},
+              {"kind":"Group","name":"system:serviceaccounts:kube-system"},
+              {"kind":"User","name":"system:node:worker-7"}]}]}"#);
+        let (o, m) = anon(&v);
+        let namespace = o["items"][0]["metadata"]["name"].as_str().unwrap();
+        let account = o["items"][1]["metadata"]["name"].as_str().unwrap();
+        let node = o["items"][2]["metadata"]["name"].as_str().unwrap();
+        assert_ne!(namespace, "payments");
+        assert_ne!(node, "worker-7");
+        assert_eq!(o["items"][1]["metadata"]["namespace"], namespace);
+        let subjects: Vec<&str> = o["items"][3]["subjects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(subjects[0], format!("system:serviceaccounts:{namespace}"));
+        assert_eq!(
+            subjects[1],
+            format!("system:serviceaccount:{namespace}:{account}")
+        );
+        assert_eq!(
+            subjects[2],
+            format!("system:serviceaccount:{namespace}:default")
+        );
+        let addon = subjects[3]
+            .strip_prefix("system:serviceaccount:kube-system:")
+            .unwrap();
+        assert_ne!(addon, "my-addon");
+        assert_eq!(subjects[4], "system:serviceaccounts:kube-system");
+        assert_eq!(subjects[5], format!("system:node:{node}"));
+        assert!(check(std::slice::from_ref(&o), &m).is_empty());
     }
 
     #[test]

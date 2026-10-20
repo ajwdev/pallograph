@@ -47,8 +47,14 @@ values are public or structural and must stay readable:
 - RBAC verbs, resources and apiGroups, only when public (see below)
 - well-known scheduling labels (arch, zone, instance-type, ...)
 - resource quantities
-- built-in principals from `src/builtins.txt`, plus `default`,
-  `cluster-admin` and `kube-system`, so the engine's literals still match
+- built-in principals from `src/builtins.txt`, the groups and users the API
+  server adds to requests (`system:authenticated`, `system:unauthenticated`,
+  `system:serviceaccounts`, `system:masters`, `system:anonymous`), plus
+  `default`, `cluster-admin` and `kube-system`, so the engine's literals
+  still match
+- the prefix of `system:serviceaccount:<ns>:<sa>`,
+  `system:serviceaccounts:<ns>` and `system:node:<node>`; each name in them
+  is anonymized as the object's own name is, so they still join
 
 Secret and ConfigMap base64 payloads are replaced with random base64 of the
 same length.
