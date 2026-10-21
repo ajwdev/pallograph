@@ -198,14 +198,20 @@ fn print_help() {
         "  \\snapshot <name>                       — save current eval state as a named snapshot"
     );
     println!(
-        "  \\diff <name>                           — diff current state against a named snapshot"
+        "  \\diff <name>                           — diff the state in use (live, unless \\use points elsewhere) against a named snapshot"
     );
     println!("  \\diff <name1> <name2>                  — diff two named snapshots");
     println!(
-        "  \\access-diff <name>                    — diff RBAC permissions, direct and through escalation, vs named snapshot"
+        "  \\access-diff <name>                    — diff RBAC permissions, direct and through escalation, vs the state in use (live, unless \\use points elsewhere)"
     );
     println!(
         "  \\access-diff <name1> <name2>           — diff RBAC permissions between two named snapshots"
+    );
+    println!(
+        "  \\use <name>                            — point ?-, \\why, \\show and friends at a named snapshot (no name: back to the live state)"
+    );
+    println!(
+        "  \\use <name> <command>                  — run one command against <name>, then return to the previous state"
     );
     println!();
     println!("RBAC access / SMT / Z3");
@@ -354,6 +360,92 @@ fn run_match(
     eprintln!("Found {} match(es).", matched.len());
 }
 
+/// The interactive prompt, red like the rest of the REPL's chrome. `\use`
+/// with no snapshot (`None`) points it back at the plain prompt; `\use
+/// <name>` names the snapshot queries are pointed at.
+fn prompt(in_use: Option<&str>) -> String {
+    match in_use {
+        None => "\x1b[1;31mpallograph>\x1b[0m ".to_string(),
+        Some(name) => format!("\x1b[1;31mpallograph ({name})>\x1b[0m "),
+    }
+}
+
+/// The state read-only commands run against: the named snapshot's frozen
+/// store under `\use <name>`, or the live `current_store` otherwise.
+fn active_store<'a>(
+    current_store: &'a EvalStore,
+    snapshots: &'a BTreeMap<String, FrozenState>,
+    in_use: &Option<String>,
+) -> &'a EvalStore {
+    match in_use {
+        Some(name) => {
+            &snapshots
+                .get(name)
+                .expect("in_use always names an existing snapshot")
+                .store
+        }
+        None => current_store,
+    }
+}
+
+/// Relation names a `?-` query may reference under `\use <name>`: every
+/// relation the frozen store actually holds rows or keys for, plus any
+/// relation with a `Decl` (covers one with no rows at snapshot time). Unlike
+/// `Engine::known_relations`, this leaves out a relation `\define` added
+/// after the snapshot was taken: it did not exist in the frozen state, so a
+/// query against it is unknown, not merely empty.
+fn known_relations_in_use(
+    engine: &Engine,
+    active: &EvalStore,
+) -> std::collections::HashSet<String> {
+    let mut known: std::collections::HashSet<String> = engine
+        .relation_docs()
+        .map(|docs| docs.into_keys().collect())
+        .unwrap_or_default();
+    known.extend(active.relation_names().map(str::to_string));
+    known
+}
+
+/// Print `true` and refuse a state-changing command (`+`, `-`, `~`,
+/// `\define`, `\load`, `\load-k8s`, `\source`, `\reset`, `\snapshot`) while a
+/// snapshot is in use: a frozen state never changes, so there is nothing for
+/// the command to act on. `\match` and `\match_all` are refused for the same
+/// reason even though they leave the EDB untouched: they re-evaluate the
+/// live engine, which a frozen snapshot has none of.
+fn refuse_if_in_use(in_use: &Option<String>) -> bool {
+    if let Some(name) = in_use {
+        eprintln!("Snapshot '{name}' is in use; \\use to return to the live state.");
+        true
+    } else {
+        false
+    }
+}
+
+/// Print a `?-` query's result rows in the current output format, shared by
+/// the live (`_N`-backed) and `\use` (throwaway) result paths.
+fn print_query_rows(format: OutputFormat, vars: &[String], tuples: &[Vec<Value>]) {
+    if format == OutputFormat::Table {
+        let rows: Vec<Vec<String>> = tuples
+            .iter()
+            .map(|t| t.iter().map(|v| v.to_string()).collect())
+            .collect();
+        print!("{}", render_table(vars, &rows));
+        return;
+    }
+    for tuple in tuples {
+        if format == OutputFormat::Ndjson {
+            println!("{}", ndjson_row(tuple, |i| vars.get(i).cloned()));
+        } else {
+            let parts: Vec<String> = vars
+                .iter()
+                .zip(tuple.iter())
+                .map(|(name, val)| format!("{name} = {val}"))
+                .collect();
+            println!("  {}", parts.join(", "));
+        }
+    }
+}
+
 /// Run the REPL until EOF or `::quit`. Returns `false` if any `::smt` check
 /// reported a failure during the session (the binary then exits with status 1).
 pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Result<bool> {
@@ -385,16 +477,33 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
     let mut had_failure = false;
     let mut query_counter: u32 = 0;
     let mut snapshots: BTreeMap<String, FrozenState> = BTreeMap::new();
-    let mut pending: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    // The `bool` is whether the line belongs in rustyline history: `true` for
+    // a pasted multi-line command split apart below, `false` for the inner
+    // command and restore sentinel a `\use <name> <command>` one-shot queues,
+    // so up-arrow recalls the one-shot line as typed rather than its parts.
+    let mut pending: std::collections::VecDeque<(String, bool)> = std::collections::VecDeque::new();
+    // `None` = live state; `Some(name)` = `\use <name>` is pointing read-only
+    // commands at that frozen snapshot.
+    let mut in_use: Option<String> = None;
+    // `\use <name> <command>` queues `<command>` and this sentinel onto the
+    // front of `pending`, so the command runs with `<name>` in use and the
+    // sentinel then restores whatever was in use before — on every `continue`
+    // path, since it is just another queued line. The null byte keeps it out
+    // of reach of anything a person could type.
+    const USE_RESTORE_PREFIX: &str = "\0use-restore:";
 
     loop {
-        let raw = if let Some(queued) = pending.pop_front() {
-            Ok(queued)
+        let (raw, to_history) = if let Some((queued, to_history)) = pending.pop_front() {
+            (Ok(queued), to_history)
         } else {
-            rl.readline("\x1b[1;31mpallograph>\x1b[0m ")
+            (rl.readline(&prompt(in_use.as_deref())), true)
         };
         match raw {
             Ok(line) => {
+                if let Some(prev) = line.strip_prefix(USE_RESTORE_PREFIX) {
+                    in_use = (!prev.is_empty()).then(|| prev.to_string());
+                    continue;
+                }
                 let line = line.trim().to_string();
                 if line.is_empty() {
                     continue;
@@ -415,14 +524,16 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 if line.contains('\n') {
                     let cmds = split_commands(&line);
                     if cmds.len() > 1 {
-                        pending.extend(cmds);
+                        pending.extend(cmds.into_iter().map(|cmd| (cmd, true)));
                         continue;
                     }
                     // Single command whose newlines are all inside strings
                     // (e.g. terminal line-wrap during paste). Collapse them.
                 }
                 let line = collapse_string_newlines(&line);
-                rl.add_history_entry(&line)?;
+                if to_history {
+                    rl.add_history_entry(&line)?;
+                }
 
                 let is_mutator = line.starts_with(['+', '-', '~']);
                 if current_store_stale && !is_mutator {
@@ -508,10 +619,11 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         .filter(|t| *t != "--all" && *t != "*")
                         .collect();
                     let docs = engine.relation_docs().unwrap_or_default();
+                    let active = active_store(&current_store, &snapshots, &in_use);
                     if names.is_empty() {
                         // List view. By default only documented relations are shown;
                         // undocumented intermediates are hidden unless --all is given.
-                        let mut names: Vec<&str> = current_store
+                        let mut names: Vec<&str> = active
                             .relation_names()
                             .filter(|n| !n.starts_with(':'))
                             .collect();
@@ -531,10 +643,8 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 .and_then(|d| d.description.as_deref())
                                 .map(|d| format!("  — {d}"))
                                 .unwrap_or_default();
-                            let arity = arity_display(
-                                current_store.scan(n).first().map(|t| t.len()),
-                                docs.get(n),
-                            );
+                            let arity =
+                                arity_display(active.scan(n).first().map(|t| t.len()), docs.get(n));
                             println!("  {n}/{arity}{desc}");
                         }
                         if hidden > 0 {
@@ -545,7 +655,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     } else {
                         // Detail view: a psql \d-style block per requested relation.
                         for n in names {
-                            print_relation_detail(n, &current_store, docs.get(n));
+                            print_relation_detail(n, active, docs.get(n));
                         }
                     }
                     continue;
@@ -555,10 +665,16 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     .or_else(|| line.strip_prefix("?- "))
                 {
                     let raw_body = raw_body.trim();
+                    let active = active_store(&current_store, &snapshots, &in_use);
                     // A typo'd relation is an empty result on the interpreter and
                     // an opaque error on DD; catch it up front either way.
-                    let mut known = engine.known_relations();
-                    known.extend(current_store.relation_names().map(str::to_string));
+                    let known = if in_use.is_some() {
+                        known_relations_in_use(engine, active)
+                    } else {
+                        let mut known = engine.known_relations();
+                        known.extend(current_store.relation_names().map(str::to_string));
+                        known
+                    };
                     let unknown: Vec<String> = body_relations(raw_body)
                         .into_iter()
                         .filter(|r| !known.contains(r))
@@ -581,7 +697,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     if let Some(rel) = single {
                         let given = split_atom(raw_body)
                             .map_or(0, |(_, inner)| count_top_level_args(inner));
-                        if let Some(arity) = relation_arity(&current_store, rel, &cols)
+                        if let Some(arity) = relation_arity(active, rel, &cols)
                             && given > arity
                         {
                             eprintln!("{rel} has {arity} columns, got {given} arguments.");
@@ -589,15 +705,22 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         }
                         // No named variables: list whole tuples, not bindings.
                         if existing.is_empty() {
-                            list_tuples(engine, &current_store, format, rel, raw_body, &cols);
+                            list_tuples(
+                                engine,
+                                active,
+                                format,
+                                rel,
+                                raw_body,
+                                &cols,
+                                in_use.is_none(),
+                            );
                             continue;
                         }
                     } else if existing.is_empty() {
                         eprintln!("No variables to bind. Name one (e.g. X).");
                         continue;
                     }
-                    let (body, vars) = match auto_complete_partial(raw_body, &current_store, &cols)
-                    {
+                    let (body, vars) = match auto_complete_partial(raw_body, active, &cols) {
                         Some((new_body, added)) => {
                             let mut all = existing;
                             all.extend(added);
@@ -606,6 +729,33 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         None => (raw_body.to_string(), existing),
                     };
                     let body = body.as_str();
+
+                    if let Some(name) = &in_use {
+                        // A snapshot is frozen: evaluate just the query rule
+                        // over its facts, keep nothing, and never touch the
+                        // live engine (`known_relations` won't advance either).
+                        let relations = body_relations(raw_body);
+                        let result_name = "__use_query";
+                        let rule = format!("{result_name}({}) :- {body}.", vars.join(", "));
+                        let frozen = &snapshots
+                            .get(name)
+                            .expect("in_use always names an existing snapshot")
+                            .store;
+                        match engine.evaluate_query_on(frozen, &relations, rule) {
+                            Ok(result_store) => {
+                                let tuples = result_store.scan(result_name).to_vec();
+                                if tuples.is_empty() {
+                                    eprintln!("No results.");
+                                } else {
+                                    print_query_rows(format, &vars, &tuples);
+                                    eprintln!("Found {} result(s).", tuples.len());
+                                }
+                            }
+                            Err(e) => eprintln!("Error: {e:#}"),
+                        }
+                        continue;
+                    }
+
                     let result_name = format!("_{query_counter}");
                     let rule = format!("{result_name}({}) :- {body}.", vars.join(", "));
                     if let Err(e) = engine.add_query_rule(rule) {
@@ -621,28 +771,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 eprintln!("No results.");
                                 engine.remove_rules_for(&result_name);
                             } else {
-                                if format == OutputFormat::Table {
-                                    let rows: Vec<Vec<String>> = tuples
-                                        .iter()
-                                        .map(|t| t.iter().map(|v| v.to_string()).collect())
-                                        .collect();
-                                    print!("{}", render_table(&vars, &rows));
-                                }
-                                for tuple in &tuples {
-                                    if format == OutputFormat::Table {
-                                        // Printed above as one table.
-                                    } else if format == OutputFormat::Ndjson {
-                                        // Keys are the query's variable names.
-                                        println!("{}", ndjson_row(tuple, |i| vars.get(i).cloned()));
-                                    } else {
-                                        let parts: Vec<String> = vars
-                                            .iter()
-                                            .zip(tuple.iter())
-                                            .map(|(name, val)| format!("{name} = {val}"))
-                                            .collect();
-                                        println!("  {}", parts.join(", "));
-                                    }
-                                }
+                                print_query_rows(format, &vars, &tuples);
                                 eprintln!("Found {} result(s): (→ {result_name})", tuples.len());
                                 query_counter += 1;
                             }
@@ -656,6 +785,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
 
                 if line == "::reset" {
+                    if refuse_if_in_use(&in_use) {
+                        continue;
+                    }
                     engine.reset_session();
                     // Named snapshots are frozen copies, independent of the
                     // engine's live state, so they survive ::reset untouched.
@@ -670,6 +802,40 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     continue;
                 }
 
+                if line == "::use" || line.starts_with("::use ") {
+                    let rest = line.strip_prefix("::use").unwrap_or("").trim();
+                    if rest.is_empty() {
+                        in_use = None;
+                        eprintln!("Using live state.");
+                        continue;
+                    }
+                    let (name, command) = match rest.split_once(char::is_whitespace) {
+                        Some((n, c)) => (n.to_string(), Some(c.trim().to_string())),
+                        None => (rest.to_string(), None),
+                    };
+                    if !snapshots.contains_key(&name) {
+                        eprintln!("No snapshot named '{name}'.");
+                        continue;
+                    }
+                    match command {
+                        None => {
+                            eprintln!("Using snapshot '{name}'.");
+                            in_use = Some(name);
+                        }
+                        Some(command) => {
+                            // One-shot: queue the command to run with `name`
+                            // in use, then a sentinel to restore whatever was
+                            // in use before — on every `continue` path, since
+                            // it is just the next queued line.
+                            let prev = in_use.clone().unwrap_or_default();
+                            pending.push_front((format!("{USE_RESTORE_PREFIX}{prev}"), false));
+                            pending.push_front((command, false));
+                            in_use = Some(name);
+                        }
+                    }
+                    continue;
+                }
+
                 if let Some(rest) = line.strip_prefix("::why ") {
                     if !engine.supports_provenance() {
                         eprintln!(
@@ -680,12 +846,15 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         continue;
                     }
                     let rest = rest.trim();
+                    let active = active_store(&current_store, &snapshots, &in_use);
                     match query::parse_query(rest) {
                         Ok(q) => {
                             // A live session is the source of truth: mutators
                             // don't refresh `current_store` while one exists.
+                            // Under `\use`, the frozen store is always read
+                            // directly: it has no live session of its own.
                             let live: Vec<Vec<Value>>;
-                            let rows: &[Vec<Value>] = if engine.has_session() {
+                            let rows: &[Vec<Value>] = if in_use.is_none() && engine.has_session() {
                                 live = match engine.query_live(&q.predicate) {
                                     Ok(rows) => rows,
                                     Err(e) => {
@@ -695,11 +864,28 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 };
                                 &live
                             } else {
-                                current_store.scan(&q.predicate)
+                                active.scan(&q.predicate)
                             };
                             let matched = query::filter_tuples(rows, &q);
                             if matched.is_empty() {
                                 eprintln!("No matching facts for '{rest}'.");
+                            } else if in_use.is_some() {
+                                // A frozen state carries its own provenance when
+                                // the interpreter produced it, or none yet on DD
+                                // (`FrozenState::lazy_provenance`; a later task
+                                // fills it in alongside the snapshot's rows).
+                                if engine.has_session() {
+                                    for tuple in matched {
+                                        println!("{}({})", q.predicate, join_values(tuple));
+                                        println!("  └─ (no provenance captured for this snapshot)");
+                                    }
+                                } else {
+                                    let index = build_provenance_index(&active.provenance);
+                                    for tuple in matched {
+                                        println!("{}({})", q.predicate, join_values(tuple));
+                                        print_why(&index, &q.predicate, tuple, 1, &mut Vec::new());
+                                    }
+                                }
                             } else if let Some(session) = engine.provenance_session() {
                                 // DD backend: lazy provenance, one shortest proof
                                 // reconstructed on demand from the live session.
@@ -733,23 +919,28 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     if relations.is_empty() {
                         eprintln!("Usage: ::smtlib <relation> [relation ...]");
                     } else {
+                        let active = active_store(&current_store, &snapshots, &in_use);
                         let cfg = z3::Config::new();
                         let ctx = z3::Context::new(&cfg);
                         let mut enc = smt::SmtEncoder::new(&ctx);
-                        enc.load(&current_store, &relations);
+                        enc.load(active, &relations);
                         println!("{}", enc.to_smtlib());
                     }
                     continue;
                 }
 
                 if let Some(rest) = line.strip_prefix("::smt ") {
-                    if !smt_command(rest.trim(), &current_store, format) {
+                    let active = active_store(&current_store, &snapshots, &in_use);
+                    if !smt_command(rest.trim(), active, format) {
                         had_failure = true;
                     }
                     continue;
                 }
 
                 if let Some(name) = line.strip_prefix("::snapshot ") {
+                    if refuse_if_in_use(&in_use) {
+                        continue;
+                    }
                     let name = name.trim().to_string();
                     if name.is_empty() || name.contains(char::is_whitespace) {
                         eprintln!("Snapshot names cannot be empty or contain spaces.");
@@ -814,7 +1005,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     };
                     let after: &EvalStore = match after_snap {
                         Some(s) => &s.store,
-                        None => &current_store,
+                        None => active_store(&current_store, &snapshots, &in_use),
                     };
                     let diff = Diff::between(&before.store, after);
                     print!("{diff}");
@@ -834,9 +1025,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 eprintln!("No snapshot named '{}'.", name);
                                 continue;
                             };
+                            // The implicit "current" side is whatever is in
+                            // use; the header names it instead of "current".
+                            let after = active_store(&current_store, &snapshots, &in_use);
+                            let after_label = in_use.as_deref().unwrap_or("current");
                             let before_tables = tables_of(&before_snap.store);
-                            let after_tables = tables_of(&current_store);
-                            print_access_diff(&before_tables, &after_tables, name, "current");
+                            let after_tables = tables_of(after);
+                            print_access_diff(&before_tables, &after_tables, name, after_label);
                         }
                         [name1, name2] => {
                             let Some(s1) = lookup(name1) else {
@@ -859,6 +1054,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
 
                 if let Some(rule) = line.strip_prefix("::define ") {
+                    if refuse_if_in_use(&in_use) {
+                        continue;
+                    }
                     let checkpoint = engine.rules_len();
                     if let Err(e) =
                         engine.add_rule(format!("{}.", rule.trim_end_matches('.').trim()))
@@ -881,6 +1079,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
 
                 if let Some(rest) = line.strip_prefix("::source ") {
+                    if refuse_if_in_use(&in_use) {
+                        continue;
+                    }
                     let src = rest.trim();
                     match load::read_source(src) {
                         Ok(bytes) => match std::str::from_utf8(&bytes) {
@@ -899,6 +1100,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
 
                 if let Some(rest) = line.strip_prefix("::load-k8s ") {
+                    if refuse_if_in_use(&in_use) {
+                        continue;
+                    }
                     let rest = rest.trim();
                     let source_result: anyhow::Result<Box<dyn crate::edb::FactSource>> =
                         if let Some(command) = rest.strip_prefix('!') {
@@ -923,6 +1127,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
 
                 if let Some(rest) = line.strip_prefix("::load ") {
+                    if refuse_if_in_use(&in_use) {
+                        continue;
+                    }
                     let rest = rest.trim();
                     // Split on first whitespace: <relation> <source>
                     let (relation, source) = match rest.find(|c: char| c.is_whitespace()) {
@@ -949,6 +1156,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
                 // ~pred(old...). pred(new...).  — atomic replace (retract + insert, one eval)
                 if let Some(rest) = line.strip_prefix('~') {
+                    if refuse_if_in_use(&in_use) {
+                        continue;
+                    }
                     let rest = rest.trim();
                     // Split into two atoms at the boundary between "). " and the next predicate.
                     match split_two_atoms(rest) {
@@ -1004,6 +1214,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
                 // +pred(args).  — insert ground fact
                 if let Some(inner) = line.strip_prefix('+') {
+                    if refuse_if_in_use(&in_use) {
+                        continue;
+                    }
                     let inner = inner.trim_end_matches('.').trim();
                     match parse_ground_tuple(inner) {
                         Ok((rel, tuple)) => {
@@ -1040,6 +1253,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
                 // -pred(args).  — retract ground fact
                 if let Some(inner) = line.strip_prefix('-') {
+                    if refuse_if_in_use(&in_use) {
+                        continue;
+                    }
                     let inner = inner.trim_end_matches('.').trim();
                     match parse_ground_tuple(inner) {
                         Ok((rel, tuple)) => {
@@ -1067,6 +1283,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
                 // ::match <Kind> <namespace> <selector>  — scoped to one Kind
                 if let Some(rest) = line.strip_prefix("::match ") {
+                    if refuse_if_in_use(&in_use) {
+                        continue;
+                    }
                     let parts: Vec<&str> = rest.trim().splitn(3, char::is_whitespace).collect();
                     match parts.as_slice() {
                         [kind, namespace, selector] => {
@@ -1081,6 +1300,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
                 // ::match_all <namespace> <selector>  — any Kind
                 if let Some(rest) = line.strip_prefix("::match_all ") {
+                    if refuse_if_in_use(&in_use) {
+                        continue;
+                    }
                     let parts: Vec<&str> = rest.trim().splitn(2, char::is_whitespace).collect();
                     match parts.as_slice() {
                         [namespace, selector] => {
@@ -2488,7 +2710,9 @@ fn render_table(headers: &[String], rows: &[Vec<String>]) -> String {
 
 /// Print the tuples of `rel` matching the constants in `body`, one row per
 /// line (`Column = value, ...`, or `rel(a, b, ...)` in compact format). `_` and
-/// missing trailing arguments match anything.
+/// missing trailing arguments match anything. `live` is false under `\use`: a
+/// frozen snapshot has no live session of its own, so `store` is read directly
+/// even when the live engine has one.
 fn list_tuples(
     engine: &Engine,
     store: &EvalStore,
@@ -2496,17 +2720,18 @@ fn list_tuples(
     rel: &str,
     body: &str,
     cols: &[String],
+    live: bool,
 ) {
-    let live: Vec<Vec<Value>>;
-    let rows: &[Vec<Value>] = if engine.has_session() {
-        live = match engine.query_live(rel) {
+    let live_rows: Vec<Vec<Value>>;
+    let rows: &[Vec<Value>] = if live && engine.has_session() {
+        live_rows = match engine.query_live(rel) {
             Ok(rows) => rows,
             Err(e) => {
                 eprintln!("Error: {e:#}");
                 return;
             }
         };
-        &live
+        &live_rows
     } else {
         store.scan(rel)
     };
@@ -2705,6 +2930,15 @@ mod query_helper_tests {
         assert_eq!(lines[2], format!("  \"a\"{}  get", " ".repeat(w - 3)));
         assert_eq!(lines[3], format!("  {}…  line\\nbreak", "x".repeat(w - 1)));
         assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn prompt_names_snapshot_in_use() {
+        assert_eq!(prompt(None), "\x1b[1;31mpallograph>\x1b[0m ");
+        assert_eq!(
+            prompt(Some("before")),
+            "\x1b[1;31mpallograph (before)>\x1b[0m "
+        );
     }
 
     #[test]

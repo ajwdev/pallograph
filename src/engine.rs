@@ -1100,6 +1100,26 @@ impl Engine {
         self.backend.evaluate(&self.edb, &self.rule_sources)
     }
 
+    /// Evaluate `rule` as the only rule source, against a frozen state's rows
+    /// for `relations` as the only input facts (EDB). Used by `\use <name>` so
+    /// a `?-` query under a snapshot runs just the query rule over the frozen
+    /// facts: the live engine's rule set is not re-run, and this never
+    /// touches the live engine (no session, no `self.edb`, no `self.rule_sources`).
+    pub fn evaluate_query_on(
+        &self,
+        state: &EvalStore,
+        relations: &[String],
+        rule: String,
+    ) -> Result<EvalStore> {
+        let mut edb: Vec<(String, Vec<Value>)> = Vec::new();
+        for rel in relations {
+            for tuple in state.scan(rel) {
+                edb.push((rel.clone(), tuple.clone()));
+            }
+        }
+        self.backend.evaluate(&edb, std::slice::from_ref(&rule))
+    }
+
     /// Names of every relation the engine knows: declared, defined by a rule
     /// or fact in the sources, or holding EDB rows.
     pub fn known_relations(&self) -> std::collections::HashSet<String> {
