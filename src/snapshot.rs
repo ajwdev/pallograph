@@ -6,18 +6,20 @@ use std::fmt;
 
 use mangle_common::Value;
 
+use crate::dd::session::FrozenLazyProvenance;
 use crate::engine::{EvalStore, is_scratch_relation};
 
 /// A `\snapshot`'s saved state: a frozen copy of the eval store at the
 /// moment `\snapshot` ran, so later mutations to the live engine (`+`, `-`,
 /// `~`, `::reset`) never change it.
 ///
-/// `lazy_provenance` is always `None` in this task; a later task gives
-/// `\why` an explanation path for frozen states, carrying the DD backend's
-/// lazy provenance session alongside the frozen facts.
+/// `\why` under `\use` explains facts from the frozen state's own
+/// provenance: `store.provenance` on the interpreter, or `lazy_provenance`
+/// on the DD backend. `lazy_provenance` is `None` when the snapshot was
+/// taken without a DD provenance session.
 pub struct FrozenState {
     pub store: EvalStore,
-    pub lazy_provenance: Option<()>,
+    pub lazy_provenance: Option<FrozenLazyProvenance>,
 }
 
 pub struct Diff {

@@ -68,6 +68,7 @@ use super::build::{
 use super::build_strata;
 use super::lower::{LoweredRule, Slot, Step};
 use super::value::{Row, SENTINEL_EDB, Val};
+use crate::engine::is_scratch_relation;
 
 // ---------------------------------------------------------------------------
 // Command protocol
@@ -115,6 +116,14 @@ pub enum Command {
         head: Row,
         max_height: u32,
         resp: Sender<Option<Grounding>>,
+    },
+    /// Lazy provenance: copy every live row and annotation (leaving out
+    /// `?-` query results) and the rules, so `\snapshot` can keep a frozen
+    /// copy that `why_height`/`why_step` answer from after the live session
+    /// moves on. `annotated_relations` is left empty for the caller to fill.
+    /// Responds with `Err` while any rule has live evaluation errors.
+    FreezeProvenance {
+        resp: Sender<std::result::Result<FrozenLazyProvenance, String>>,
     },
     /// Attempt to add new IDB rules by layering a fresh dataflow.
     ///
@@ -181,6 +190,51 @@ pub struct Premise {
     pub rule_id: u32,
     /// `0` if this premise is a base fact.
     pub height: u32,
+}
+
+/// The lazy provenance queries `::why` backward-chains over: answered by a
+/// live [`DdSession`], or by a [`FrozenLazyProvenance`] kept with a snapshot.
+pub trait LazyProvenance {
+    /// True if `rel` has provenance annotations, so `why_height` can answer
+    /// for its facts.
+    fn has_provenance_for(&self, rel: &str) -> bool;
+    /// The fact's stored `(rule_id, min_height)`, or `None` if it has none.
+    fn why_height(&self, rel: &str, fact: &Row) -> Option<Annotation>;
+    /// One grounding of `rule_id` deriving `head` whose positive premises all
+    /// have height below `max_height`, or `None` if there is no such grounding.
+    fn why_step(&self, rule_id: u32, head: &Row, max_height: u32) -> Option<Grounding>;
+}
+
+/// A copy of a provenance session's rows, annotations and rules, taken by
+/// [`DdSession::freeze_provenance`]. It answers the same lazy provenance
+/// queries as the session did when it was taken, unaffected by later
+/// changes to the session (or the session going away).
+#[derive(Clone)]
+pub struct FrozenLazyProvenance {
+    rows: HashMap<String, Vec<Row>>,
+    annotations: HashMap<String, HashMap<Row, Annotation>>,
+    rules_by_id: Arc<HashMap<u32, LoweredRule>>,
+    annotated_relations: std::collections::HashSet<String>,
+}
+
+impl LazyProvenance for FrozenLazyProvenance {
+    fn has_provenance_for(&self, rel: &str) -> bool {
+        self.annotated_relations.contains(rel)
+    }
+
+    fn why_height(&self, rel: &str, fact: &Row) -> Option<Annotation> {
+        self.annotations.get(rel)?.get(fact).copied()
+    }
+
+    fn why_step(&self, rule_id: u32, head: &Row, max_height: u32) -> Option<Grounding> {
+        let rule = self.rules_by_id.get(&rule_id)?;
+        let mut rows_of =
+            |rel: &str| -> Vec<Row> { self.rows.get(rel).cloned().unwrap_or_default() };
+        let mut annotation_of = |rel: &str, tuple: &Row| -> Option<Annotation> {
+            self.annotations.get(rel)?.get(tuple).copied()
+        };
+        reconstruct_grounding(rule, head, max_height, &mut rows_of, &mut annotation_of)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +625,20 @@ pub struct DdSession {
     /// Relations that have provenance annotations: everything built at spawn
     /// when `provenance` is on. Rules layered on afterwards are not included.
     annotated_relations: std::collections::HashSet<String>,
+}
+
+impl LazyProvenance for DdSession {
+    fn has_provenance_for(&self, rel: &str) -> bool {
+        DdSession::has_provenance_for(self, rel)
+    }
+
+    fn why_height(&self, rel: &str, fact: &Row) -> Option<Annotation> {
+        DdSession::why_height(self, rel, fact)
+    }
+
+    fn why_step(&self, rule_id: u32, head: &Row, max_height: u32) -> Option<Grounding> {
+        DdSession::why_step(self, rule_id, head, max_height)
+    }
 }
 
 impl DdSession {
@@ -1182,6 +1250,27 @@ impl DdSession {
                             };
                             let _ = resp.send(result);
                         }
+                        Command::FreezeProvenance { resp } => {
+                            let result = live_errors(&mut error_traces).map(|()| {
+                                let rows = traces
+                                    .iter_mut()
+                                    .filter(|(rel, _)| !is_scratch_relation(rel))
+                                    .map(|(rel, t)| (rel.clone(), drain_trace_rows(t)))
+                                    .collect();
+                                let annotations = annotation_traces
+                                    .iter_mut()
+                                    .filter(|(rel, _)| !is_scratch_relation(rel))
+                                    .map(|(rel, t)| (rel.clone(), drain_annotations(t)))
+                                    .collect();
+                                FrozenLazyProvenance {
+                                    rows,
+                                    annotations,
+                                    rules_by_id: Arc::clone(&rules_by_id),
+                                    annotated_relations: std::collections::HashSet::new(),
+                                }
+                            });
+                            let _ = resp.send(result);
+                        }
                         Command::AddRules {
                             all_rule_sources,
                             new_head,
@@ -1483,6 +1572,27 @@ impl DdSession {
             resp: resp_tx,
         });
         resp_rx.recv().unwrap_or(None)
+    }
+
+    /// Copy this session's lazy provenance, as it stands now, into a
+    /// [`FrozenLazyProvenance`] that later changes to the session do not
+    /// touch. `?-` query results are left out.
+    ///
+    /// Fails while any rule has live evaluation errors, like [`Self::query`].
+    pub fn freeze_provenance(&self) -> Result<FrozenLazyProvenance> {
+        let (resp_tx, resp_rx) = bounded(1);
+        let _ = self.tx.send(Command::FreezeProvenance { resp: resp_tx });
+        let mut frozen = resp_rx
+            .recv()
+            .map_err(|e| anyhow::anyhow!("dd worker exited: {e}"))?
+            .map_err(anyhow::Error::msg)?;
+        frozen.annotated_relations = self
+            .annotated_relations
+            .iter()
+            .filter(|rel| !is_scratch_relation(rel))
+            .cloned()
+            .collect();
+        Ok(frozen)
     }
 
     /// Attempt to add a new IDB rule by layering a fresh dataflow on top of the
@@ -2427,5 +2537,82 @@ mod tests {
         assert_eq!(g.premises[0].rel, "src");
         assert_eq!(g.premises[0].row.clone().into_values(), vec![v_str("x")]);
         assert_eq!(g.premises[0].height, 0);
+    }
+
+    /// The transitive-closure fixture from `lazy_provenance_transitive_closure`,
+    /// with one extra edge so the proof of path(a, d) has three levels.
+    fn spawn_path_session() -> DdSession {
+        let edb: Vec<(String, Vec<Value>)> = vec![
+            ("edge".to_string(), vec![v_str("a"), v_str("b")]),
+            ("edge".to_string(), vec![v_str("b"), v_str("c")]),
+            ("edge".to_string(), vec![v_str("c"), v_str("d")]),
+        ];
+        let rules = vec![
+            "Decl edge(Src, Dst).\nDecl path(Src, Dst).\n\
+             path(X, Y) :- edge(X, Y).\n\
+             path(X, Z) :- edge(X, Y), path(Y, Z)."
+                .to_string(),
+        ];
+        DdSession::spawn_with_provenance(&edb, &rules, true).expect("spawn lazy")
+    }
+
+    /// A frozen copy answers every provenance query the live session it was
+    /// taken from answers, with the same annotations, and its groundings
+    /// strictly decrease height.
+    #[test]
+    fn frozen_provenance_matches_live_session() {
+        let session = spawn_path_session();
+        let frozen = session.freeze_provenance().expect("freeze");
+
+        for rel in ["edge", "path"] {
+            assert!(frozen.has_provenance_for(rel), "{rel} should be annotated");
+            for tuple in session.query(rel).unwrap() {
+                let fact = Row::from(tuple.as_slice());
+                let annotation = frozen.why_height(rel, &fact);
+                assert_eq!(
+                    annotation,
+                    session.why_height(rel, &fact),
+                    "{rel}{tuple:?}: frozen annotation differs from live"
+                );
+                let (rule_id, height) = annotation.expect("every fact is annotated");
+                if rule_id == SENTINEL_EDB {
+                    continue;
+                }
+                let grounding = frozen
+                    .why_step(rule_id, &fact, height)
+                    .unwrap_or_else(|| panic!("{rel}{tuple:?}: no frozen grounding"));
+                for premise in &grounding.premises {
+                    assert!(
+                        premise.height < height,
+                        "{rel}{tuple:?}: premise {premise:?} not below height {height}"
+                    );
+                }
+            }
+        }
+        assert!(!frozen.has_provenance_for("nosuch"));
+    }
+
+    /// Retracting an input fact the proof used breaks the live proof, but the
+    /// frozen copy still reconstructs it.
+    #[test]
+    fn frozen_provenance_outlives_retraction() {
+        let session = spawn_path_session();
+        let ad = Row::from(&[v_str("a"), v_str("d")][..]);
+        let (rule_id, height) = session
+            .why_height("path", &ad)
+            .expect("path(a,d) must have an annotation");
+        let frozen = session.freeze_provenance().expect("freeze");
+
+        session.retract("edge".to_string(), Row::from(&[v_str("b"), v_str("c")][..]));
+        session.commit();
+
+        assert!(
+            session.why_step(rule_id, &ad, height).is_none(),
+            "live proof of path(a,d) should be gone after retracting edge(b,c)"
+        );
+        assert!(
+            frozen.why_step(rule_id, &ad, height).is_some(),
+            "frozen proof of path(a,d) should survive the retraction"
+        );
     }
 }

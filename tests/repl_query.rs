@@ -526,3 +526,40 @@ fn access_diff_under_use_names_state() {
         );
     }
 }
+
+/// A snapshot keeps the proof of a fact as it stood when it was taken:
+/// after the binding that gave alice `pods/exec` is retracted, `\why` under
+/// `\use before` still explains her escalation, on both backends.
+#[test]
+fn why_on_snapshot_survives_retraction() {
+    let why = r#"\why controls_identity("alice", "system:serviceaccount:kube-system:default")"#;
+    let commands = format!(
+        "\\source examples/exec-escalation/alice-exec.mg\n\
+         {why}\n\
+         \\snapshot before\n\
+         -binding_subject(\"kube-system\", \"rb-alice-exec\", /user, \"alice\").\n\
+         \\use before {why}\n\
+         ::quit\n"
+    );
+    for args in [
+        &["--backend", "interpreter"][..],
+        &["--backend", "dd", "--provenance"][..],
+    ] {
+        let (stdout, stderr) = run_session_with(args, &commands);
+        let (live, frozen) = stdout
+            .split_once("Saved snapshot 'before'")
+            .unwrap_or_else(|| panic!("{args:?}: no snapshot saved: {stdout}\n{stderr}"));
+        assert!(
+            live.contains("(EDB fact)"),
+            "{args:?}: live: {live}\n{stderr}"
+        );
+        assert!(
+            frozen.contains("(EDB fact)"),
+            "{args:?}: frozen: {frozen}\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("no provenance captured"),
+            "{args:?}: {stdout}"
+        );
+    }
+}

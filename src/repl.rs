@@ -14,6 +14,7 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
+use crate::dd::session::LazyProvenance;
 use crate::edb::{K8sManifestsSource, ShellSource};
 use crate::engine::{Engine, EvalStore, RelationDoc};
 use crate::load;
@@ -869,40 +870,45 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             let matched = query::filter_tuples(rows, &q);
                             if matched.is_empty() {
                                 eprintln!("No matching facts for '{rest}'.");
-                            } else if in_use.is_some() {
-                                // A frozen state carries its own provenance when
-                                // the interpreter produced it, or none yet on DD
-                                // (`FrozenState::lazy_provenance`; a later task
-                                // fills it in alongside the snapshot's rows).
-                                if engine.has_session() {
-                                    for tuple in matched {
-                                        println!("{}({})", q.predicate, join_values(tuple));
-                                        println!("  └─ (no provenance captured for this snapshot)");
-                                    }
-                                } else {
-                                    let index = build_provenance_index(&active.provenance);
-                                    for tuple in matched {
-                                        println!("{}({})", q.predicate, join_values(tuple));
-                                        print_why(&index, &q.predicate, tuple, 1, &mut Vec::new());
-                                    }
-                                }
-                            } else if let Some(session) = engine.provenance_session() {
+                            } else if engine.has_session() {
                                 // DD backend: lazy provenance, one shortest proof
-                                // reconstructed on demand from the live session.
+                                // reconstructed on demand from the live session,
+                                // or from the copy `\snapshot` froze under `\use`.
+                                let provenance: Option<&dyn LazyProvenance> = match &in_use {
+                                    Some(name) => snapshots
+                                        .get(name)
+                                        .and_then(|s| s.lazy_provenance.as_ref())
+                                        .map(|p| p as &dyn LazyProvenance),
+                                    None => engine
+                                        .provenance_session()
+                                        .map(|s| s as &dyn LazyProvenance),
+                                };
                                 for tuple in matched {
                                     println!("{}({})", q.predicate, join_values(tuple));
-                                    if !session.has_provenance_for(&q.predicate) {
+                                    let Some(provenance) = provenance else {
+                                        if in_use.is_some() {
+                                            println!(
+                                                "  └─ (no provenance captured for this snapshot)"
+                                            );
+                                        } else {
+                                            println!("  └─ (no provenance for this session)");
+                                        }
+                                        continue;
+                                    };
+                                    if !provenance.has_provenance_for(&q.predicate) {
                                         println!(
                                             "  └─ (no provenance: `?-` query results are not tracked)"
                                         );
                                         continue;
                                     }
                                     let row = crate::dd::value::Row::from(tuple.as_slice());
-                                    let annotation = session.why_height(&q.predicate, &row);
-                                    print_why_lazy(session, &row, annotation, 1);
+                                    let annotation = provenance.why_height(&q.predicate, &row);
+                                    print_why_lazy(provenance, &row, annotation, 1);
                                 }
                             } else {
-                                let index = build_provenance_index(&current_store.provenance);
+                                // Interpreter: the active store (frozen under
+                                // `\use`) carries its own provenance.
+                                let index = build_provenance_index(&active.provenance);
                                 for tuple in matched {
                                     println!("{}({})", q.predicate, join_values(tuple));
                                     print_why(&index, &q.predicate, tuple, 1, &mut Vec::new());
@@ -950,6 +956,17 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         eprintln!("Snapshot '{name}' already exists.");
                         continue;
                     }
+                    let lazy_provenance = match engine
+                        .provenance_session()
+                        .map(|s| s.freeze_provenance())
+                        .transpose()
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("Error: {e:#}");
+                            continue;
+                        }
+                    };
                     let frozen_store = current_store.frozen_copy();
                     let rc = frozen_store
                         .relation_names()
@@ -964,7 +981,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         name,
                         FrozenState {
                             store: frozen_store,
-                            lazy_provenance: None,
+                            lazy_provenance,
                         },
                     );
                     continue;
@@ -2255,7 +2272,7 @@ fn join_values(tuple: &[Value]) -> String {
 /// caller for the top-level fact, and taken from the `Premise` when recursing,
 /// so each node costs one `why_step` and no extra lookup.
 fn print_why_lazy(
-    session: &crate::dd::session::DdSession,
+    provenance: &dyn LazyProvenance,
     row: &crate::dd::value::Row,
     annotation: Option<crate::dd::build::Annotation>,
     depth: usize,
@@ -2280,7 +2297,7 @@ fn print_why_lazy(
             return;
         }
     };
-    let Some(grounding) = session.why_step(rule_id, row, height) else {
+    let Some(grounding) = provenance.why_step(rule_id, row, height) else {
         println!("{indent}└─ (no grounding found)");
         return;
     };
@@ -2291,7 +2308,7 @@ fn print_why_lazy(
     for p in &grounding.premises {
         let values = p.row.clone().into_values();
         println!("{indent}  {}({})", p.rel, join_values(&values));
-        print_why_lazy(session, &p.row, Some((p.rule_id, p.height)), depth + 1);
+        print_why_lazy(provenance, &p.row, Some((p.rule_id, p.height)), depth + 1);
     }
     for n in &grounding.negated {
         let args = n
