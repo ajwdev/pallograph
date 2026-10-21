@@ -14,6 +14,7 @@ use mangle_common::Value;
 
 use crate::engine::EvalStore;
 
+pub mod diff;
 pub(crate) mod facts;
 mod resource_scope;
 

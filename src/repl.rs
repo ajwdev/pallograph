@@ -20,7 +20,7 @@ use crate::load;
 use crate::query;
 use crate::rbac;
 use crate::smt;
-use crate::snapshot::{Diff, Scope, Snapshot};
+use crate::snapshot::{Diff, FrozenState};
 
 struct ReplHelper {
     path_completer: FilenameCompleter,
@@ -384,9 +384,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
     let mut format = format;
     let mut had_failure = false;
     let mut query_counter: u32 = 0;
-    let mut snapshot_counter: u64 = 0;
-    let mut snapshot_names: HashMap<String, u64> = HashMap::new();
-    let mut snapshot_data: HashMap<u64, Snapshot> = HashMap::new();
+    let mut snapshots: BTreeMap<String, FrozenState> = BTreeMap::new();
     let mut pending: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     loop {
@@ -425,8 +423,6 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
                 let line = collapse_string_newlines(&line);
                 rl.add_history_entry(&line)?;
-                // Rewrite snapshot->relation references to snapshot__relation before parsing.
-                let line = rewrite_snapshot_refs(&line);
 
                 let is_mutator = line.starts_with(['+', '-', '~']);
                 if current_store_stale && !is_mutator {
@@ -661,19 +657,8 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
                 if line == "::reset" {
                     engine.reset_session();
-                    // Re-materialize named snapshots — they survive ::reset.
-                    let mut snapshot_facts = Vec::new();
-                    for (snap_name, version) in &snapshot_names {
-                        if let Some(snap) = snapshot_data.get(version) {
-                            for (rel, tuples) in snap.iter() {
-                                let namespaced = format!("{snap_name}__{rel}");
-                                for tuple in tuples {
-                                    snapshot_facts.push((namespaced.clone(), tuple.clone()));
-                                }
-                            }
-                        }
-                    }
-                    engine.add_facts(snapshot_facts);
+                    // Named snapshots are frozen copies, independent of the
+                    // engine's live state, so they survive ::reset untouched.
                     query_counter = 0;
                     match engine.evaluate() {
                         Ok(new_store) => {
@@ -766,38 +751,37 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
                 if let Some(name) = line.strip_prefix("::snapshot ") {
                     let name = name.trim().to_string();
-                    let snap = Snapshot::from_eval(&current_store, Scope::All);
-                    let rc = snap.relation_count();
-                    let fc = snap.fact_count();
-                    let mut snapshot_facts = Vec::with_capacity(fc);
-                    for (rel, tuples) in snap.iter() {
-                        let namespaced = format!("{name}__{rel}");
-                        for tuple in tuples {
-                            snapshot_facts.push((namespaced.clone(), tuple.clone()));
-                        }
+                    if name.is_empty() || name.contains(char::is_whitespace) {
+                        eprintln!("Snapshot names cannot be empty or contain spaces.");
+                        continue;
                     }
-                    engine.add_facts(snapshot_facts);
-                    snapshot_counter += 1;
-                    let version = snapshot_counter;
-                    snapshot_names.insert(name.clone(), version);
-                    snapshot_data.insert(version, snap);
-                    match engine.evaluate() {
-                        Ok(new_store) => {
-                            current_store = new_store;
-                            println!(
-                                "Saved snapshot '{name}' v{version} ({rc} relations, {fc} facts)."
-                            );
-                        }
-                        Err(e) => eprintln!("Error: {e:#}"),
+                    if snapshots.contains_key(&name) {
+                        eprintln!("Snapshot '{name}' already exists.");
+                        continue;
                     }
+                    let frozen_store = current_store.frozen_copy();
+                    let rc = frozen_store
+                        .relation_names()
+                        .filter(|r| !frozen_store.scan(r).is_empty())
+                        .count();
+                    let fc: usize = frozen_store
+                        .relation_names()
+                        .map(|r| frozen_store.scan(r).len())
+                        .sum();
+                    println!("Saved snapshot '{name}' ({rc} relations, {fc} facts).");
+                    snapshots.insert(
+                        name,
+                        FrozenState {
+                            store: frozen_store,
+                            lazy_provenance: None,
+                        },
+                    );
                     continue;
                 }
 
                 if let Some(rest) = line.strip_prefix("::diff ") {
                     let parts: Vec<&str> = rest.trim().splitn(2, ' ').collect();
-                    let lookup = |n: &str| -> Option<&Snapshot> {
-                        snapshot_names.get(n).and_then(|v| snapshot_data.get(v))
-                    };
+                    let lookup = |n: &str| -> Option<&FrozenState> { snapshots.get(n) };
                     let (before, after_snap) = match parts.as_slice() {
                         [name] => match lookup(name) {
                             Some(s) => (s, None),
@@ -828,23 +812,20 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             continue;
                         }
                     };
-                    let current_snap;
-                    let after: &Snapshot = match after_snap {
-                        Some(s) => s,
-                        None => {
-                            current_snap = Snapshot::from_eval(&current_store, Scope::All);
-                            &current_snap
-                        }
+                    let after: &EvalStore = match after_snap {
+                        Some(s) => &s.store,
+                        None => &current_store,
                     };
-                    let diff = Diff::between(before, after);
+                    let diff = Diff::between(&before.store, after);
                     print!("{diff}");
                     continue;
                 }
 
                 if let Some(rest) = line.strip_prefix("::access-diff ") {
                     let parts: Vec<&str> = rest.trim().splitn(2, ' ').collect();
-                    let lookup = |n: &str| -> Option<&Snapshot> {
-                        snapshot_names.get(n).and_then(|v| snapshot_data.get(v))
+                    let lookup = |n: &str| -> Option<&FrozenState> { snapshots.get(n) };
+                    let tables_of = |store: &EvalStore| {
+                        rbac::PermissionTables::from_scan(&|rel| store.scan(rel).to_vec())
                     };
 
                     match parts.as_slice() {
@@ -853,12 +834,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 eprintln!("No snapshot named '{}'.", name);
                                 continue;
                             };
-                            let cfg = z3::Config::new();
-                            let ctx = z3::Context::new(&cfg);
-                            let mut enc = smt::SmtEncoder::new(&ctx);
-                            enc.load_rbac_tables_from_snapshot_as(before_snap, name);
-                            enc.load_rbac_tables_as(&current_store, "current");
-                            print_access_diff(&enc, name, "current");
+                            let before_tables = tables_of(&before_snap.store);
+                            let after_tables = tables_of(&current_store);
+                            print_access_diff(&before_tables, &after_tables, name, "current");
                         }
                         [name1, name2] => {
                             let Some(s1) = lookup(name1) else {
@@ -869,12 +847,9 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 eprintln!("No snapshot named '{}'.", name2);
                                 continue;
                             };
-                            let cfg = z3::Config::new();
-                            let ctx = z3::Context::new(&cfg);
-                            let mut enc = smt::SmtEncoder::new(&ctx);
-                            enc.load_rbac_tables_from_snapshot_as(s1, name1);
-                            enc.load_rbac_tables_from_snapshot_as(s2, name2);
-                            print_access_diff(&enc, name1, name2);
+                            let t1 = tables_of(&s1.store);
+                            let t2 = tables_of(&s2.store);
+                            print_access_diff(&t1, &t2, name1, name2);
                         }
                         _ => eprintln!(
                             "Usage: ::access-diff <snap>  or  ::access-diff <snap1> <snap2>"
@@ -1329,11 +1304,16 @@ fn print_reaches_grouped(violations: &[rbac::Violation]) {
     }
 }
 
-fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label: &str) {
-    let can_gained = enc.check_permission_expansion(before_label, after_label);
-    let can_lost = enc.check_permission_contraction(before_label, after_label);
-    let eff_gained = enc.check_effective_can_expansion(before_label, after_label);
-    let eff_lost = enc.check_effective_can_contraction(before_label, after_label);
+fn print_access_diff(
+    before: &rbac::PermissionTables,
+    after: &rbac::PermissionTables,
+    before_label: &str,
+    after_label: &str,
+) {
+    let can_gained = rbac::diff::check_permission_expansion(before, after);
+    let can_lost = rbac::diff::check_permission_contraction(before, after);
+    let eff_gained = rbac::diff::check_effective_can_expansion(before, after);
+    let eff_lost = rbac::diff::check_effective_can_contraction(before, after);
 
     let total_gained = can_gained.len() + eff_gained.len();
     let total_lost = can_lost.len() + eff_lost.len();
@@ -1397,19 +1377,19 @@ fn print_access_diff(enc: &smt::SmtEncoder<'_>, before_label: &str, after_label:
             "  EFFECTIVE GAINED ({}) [escalation-aware]:",
             eff_gained.len()
         );
-        print_eff_diffs_grouped(&eff_gained, enc.permission_tables.get(after_label));
+        print_eff_diffs_grouped(&eff_gained, after);
     }
     if !eff_lost.is_empty() {
         println!("  EFFECTIVE LOST ({}) [escalation-aware]:", eff_lost.len());
-        print_eff_diffs_grouped(&eff_lost, enc.permission_tables.get(before_label));
+        print_eff_diffs_grouped(&eff_lost, before);
     }
 }
 
 fn per_principal_verdicts(
-    can_gained: &[smt::diff::CanDiff],
-    can_lost: &[smt::diff::CanDiff],
-    eff_gained: &[smt::diff::EffDiff],
-    eff_lost: &[smt::diff::EffDiff],
+    can_gained: &[rbac::diff::CanDiff],
+    can_lost: &[rbac::diff::CanDiff],
+    eff_gained: &[rbac::diff::EffDiff],
+    eff_lost: &[rbac::diff::EffDiff],
 ) -> Vec<(rbac::Subject, usize, usize)> {
     let mut map: BTreeMap<rbac::Subject, (usize, usize)> = BTreeMap::new();
     for d in can_gained {
@@ -1440,7 +1420,7 @@ fn per_principal_verdicts(
 /// Group effective-can diffs by (principal, escalation-target) and print.
 /// `tables` says which identities and groups each permission was reached
 /// through; permissions reached through none were gained directly.
-fn print_eff_diffs_grouped(diffs: &[smt::diff::EffDiff], tables: Option<&rbac::PermissionTables>) {
+fn print_eff_diffs_grouped(diffs: &[rbac::diff::EffDiff], tables: &rbac::PermissionTables) {
     // (principal, target) → indices into diffs. No target = direct grant.
     let mut groups: BTreeMap<(rbac::Subject, Option<rbac::Subject>), Vec<usize>> = BTreeMap::new();
 
@@ -1451,20 +1431,19 @@ fn print_eff_diffs_grouped(diffs: &[smt::diff::EffDiff], tables: Option<&rbac::P
             d.resource.clone(),
             d.verb.clone(),
         );
-        let targets = tables.map(|tables| tables.escalation_via(&d.principal, &permission));
-        match targets {
-            Some(targets) if !targets.is_empty() => {
-                for target in targets {
-                    groups
-                        .entry((d.principal.clone(), Some(target.clone())))
-                        .or_default()
-                        .push(i);
-                }
-            }
-            _ => groups
+        let targets = tables.escalation_via(&d.principal, &permission);
+        if targets.is_empty() {
+            groups
                 .entry((d.principal.clone(), None))
                 .or_default()
-                .push(i),
+                .push(i);
+        } else {
+            for target in targets {
+                groups
+                    .entry((d.principal.clone(), Some(target.clone())))
+                    .or_default()
+                    .push(i);
+            }
         }
     }
 
@@ -2394,37 +2373,6 @@ fn insert_sourced_program(
     engine.evaluate()
 }
 
-/// Rewrite `snapshot->relation` to the internal `snapshot__relation` form,
-/// skipping inside string literals. Applied before any Mangle parsing so that
-/// `before->can(P, NS, AG, R, V)` and rule bodies work transparently.
-fn rewrite_snapshot_refs(s: &str) -> String {
-    if !s.contains("->") {
-        return s.to_string();
-    }
-    let mut result = String::with_capacity(s.len());
-    let mut in_string = false;
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            '"' => {
-                in_string = !in_string;
-                result.push('"');
-                i += 1;
-            }
-            '-' if !in_string && i + 1 < chars.len() && chars[i + 1] == '>' => {
-                result.push_str("__");
-                i += 2;
-            }
-            c => {
-                result.push(c);
-                i += 1;
-            }
-        }
-    }
-    result
-}
-
 fn count_top_level_args(s: &str) -> usize {
     split_top_level_args(s).len()
 }
@@ -2690,11 +2638,11 @@ fn edit_distance(a: &str, b: &str) -> usize {
 }
 
 /// Up to three known relations close to `name`, nearest first. Query results
-/// (`_N`) and snapshot copies (`x__rel`) are not suggested.
+/// (`_N`) are not suggested.
 fn suggest(name: &str, known: &std::collections::HashSet<String>) -> Vec<String> {
     let mut scored: Vec<(usize, &String)> = known
         .iter()
-        .filter(|k| !k.starts_with('_') && !k.contains("__"))
+        .filter(|k| !k.starts_with('_'))
         .map(|k| (edit_distance(name, k), k))
         .filter(|(d, _)| *d <= 2.max(name.len() / 4))
         .collect();
@@ -2721,16 +2669,11 @@ mod query_helper_tests {
 
     #[test]
     fn suggests_near_names_only() {
-        let known: std::collections::HashSet<String> = [
-            "direct_perm",
-            "indirect_perm",
-            "pod",
-            "_0",
-            "a__direct_perm",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let known: std::collections::HashSet<String> =
+            ["direct_perm", "indirect_perm", "pod", "_0"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
         assert_eq!(
             suggest("direct_perms", &known),
             ["direct_perm", "indirect_perm"]

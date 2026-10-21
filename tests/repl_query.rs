@@ -232,3 +232,110 @@ fn access_diff_sees_fact_changes_across_backends() {
     );
     assert_eq!(results[0], results[1]);
 }
+
+/// `\snapshot` freezes a copy of the eval state; it must not inject
+/// `<name>__<relation>` facts into the live engine, so querying one is an
+/// unknown relation, not a hit.
+#[test]
+fn snapshot_does_not_add_relations_to_live_state() {
+    for backend in ["interpreter", "dd"] {
+        let (_, stderr) = run_session_with(
+            &["--backend", backend],
+            "\\snapshot before\n?- before__direct_perm(N, K, Ns, G, R, Rn, V)\n::quit\n",
+        );
+        assert!(
+            stderr.contains("Unknown relation 'before__direct_perm'"),
+            "{backend}: {stderr}"
+        );
+    }
+}
+
+/// A second `\snapshot` under a name already taken is refused, leaving the
+/// first snapshot (and the current state) untouched.
+#[test]
+fn snapshot_refuses_taken_name() {
+    for backend in ["interpreter", "dd"] {
+        let (stdout, stderr) = run_session_with(
+            &["--backend", backend],
+            "\\snapshot before\n\\snapshot before\n\\diff before\n::quit\n",
+        );
+        assert!(
+            stderr.contains("Snapshot 'before' already exists."),
+            "{backend}: {stderr}"
+        );
+        assert!(stdout.contains("(no changes)"), "{backend}: {stdout}");
+    }
+}
+
+/// `\snapshot a b` is a name with a space in it, not a name followed by
+/// stray words: it is refused, and no snapshot named `a` is created.
+#[test]
+fn snapshot_refuses_name_with_space() {
+    for backend in ["interpreter", "dd"] {
+        let (_, stderr) = run_session_with(
+            &["--backend", backend],
+            "\\snapshot a b\n\\diff a\n::quit\n",
+        );
+        assert!(
+            stderr.contains("Snapshot names cannot be empty or contain spaces."),
+            "{backend}: {stderr}"
+        );
+        assert!(
+            stderr.contains("No snapshot named 'a'."),
+            "{backend}: {stderr}"
+        );
+    }
+}
+
+/// Taking a second snapshot must not fold the facts of an earlier one into
+/// it: two snapshots of the same, unchanged state report the same counts.
+#[test]
+fn snapshots_do_not_copy_earlier_snapshots() {
+    for backend in ["interpreter", "dd"] {
+        let (stdout, _) = run_session_with(
+            &["--backend", backend],
+            "\\snapshot a\n\\snapshot b\n::quit\n",
+        );
+        let counts: Vec<&str> = stdout
+            .lines()
+            .filter_map(|l| l.strip_prefix("Saved snapshot "))
+            .map(|l| l.split_once('(').expect("relation/fact counts").1)
+            .collect();
+        assert_eq!(counts.len(), 2, "{backend}: {stdout}");
+        assert_eq!(counts[0], counts[1], "{backend}: {stdout}");
+    }
+}
+
+/// A `?-` query's result relation (`_0`) is scratch, not eval state a
+/// snapshot should freeze.
+#[test]
+fn snapshot_leaves_out_query_results() {
+    for backend in ["interpreter", "dd"] {
+        let (stdout, _) = run_session_with(
+            &["--backend", backend],
+            "?- direct_perm(\"admin@example.com\", K, Ns, G, R, Rn, V)\n\
+             \\snapshot before\n\
+             \\diff before\n\
+             ::quit\n",
+        );
+        assert!(
+            !stdout.lines().any(|l| l.contains("_0")),
+            "{backend}: {stdout}"
+        );
+    }
+}
+
+/// `::reset` drops added facts and rules but keeps named snapshots: a diff
+/// against one taken before the reset sees no change.
+#[test]
+fn reset_keeps_snapshots() {
+    for backend in ["interpreter", "dd"] {
+        let commands = "\\snapshot before\n\
+             +binding_subject(\"kube-system\", \"rb-bob\", /user, \"bob@example.com\").\n\
+             \\reset\n\
+             \\diff before\n\
+             ::quit\n";
+        let (stdout, _) = run_session_with(&["--backend", backend], commands);
+        assert!(stdout.contains("(no changes)"), "{backend}: {stdout}");
+    }
+}

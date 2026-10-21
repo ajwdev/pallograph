@@ -15,9 +15,20 @@ use mangle_ir::{Inst, InstId, Ir, NameId};
 pub(crate) const EDB_DECLS: &str = include_str!("../rules/00_edb_prelude.mg");
 
 /// Snapshot of all derived facts after an evaluation pass.
+#[derive(Clone)]
 pub struct EvalStore {
     facts: HashMap<String, Vec<Vec<Value>>>,
     pub provenance: Vec<ProvenanceEntry>,
+}
+
+/// True for relations a frozen state (`\snapshot`) or a `Diff` should not
+/// see: the interpreter's GroupBy scratch space (`$temp_grp_0`; the DD
+/// backend has none) and a `?-` query's result relation (`_0`, `_1`, ...).
+pub(crate) fn is_scratch_relation(name: &str) -> bool {
+    name.starts_with('$')
+        || name
+            .strip_prefix('_')
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
 impl EvalStore {
@@ -30,6 +41,36 @@ impl EvalStore {
 
     pub fn relation_names(&self) -> impl Iterator<Item = &str> {
         self.facts.keys().map(String::as_str)
+    }
+
+    /// Build an `EvalStore` directly from already-evaluated facts, with no
+    /// provenance. Used to freeze a snapshot's facts and, in tests, to build
+    /// an `EvalStore` without running the engine.
+    pub fn from_facts(facts: HashMap<String, Vec<Vec<Value>>>) -> EvalStore {
+        EvalStore {
+            facts,
+            provenance: Vec::new(),
+        }
+    }
+
+    /// Clone this eval state, leaving out scratch relations (see
+    /// `is_scratch_relation`). `\snapshot` freezes a copy this way: later
+    /// mutations to the live engine state must not change it, and the copy
+    /// must not include query results or interpreter temporaries.
+    pub fn frozen_copy(&self) -> EvalStore {
+        let facts = self
+            .facts
+            .iter()
+            .filter(|(name, _)| !is_scratch_relation(name))
+            .map(|(name, tuples)| (name.clone(), tuples.clone()))
+            .collect();
+        let provenance = self
+            .provenance
+            .iter()
+            .filter(|entry| !is_scratch_relation(&entry.derived.0))
+            .cloned()
+            .collect();
+        EvalStore { facts, provenance }
     }
 }
 

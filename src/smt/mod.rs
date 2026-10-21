@@ -10,7 +10,6 @@ use z3::{FuncDecl, Solver, Sort};
 
 use crate::engine::EvalStore;
 use crate::rbac::PermissionTables;
-pub mod diff;
 pub mod rbac_model;
 pub mod scheduling;
 
@@ -21,8 +20,9 @@ pub struct SmtEncoder<'ctx> {
     pub solver: Solver<'ctx>,
     pub decls: HashMap<String, FuncDecl<'ctx>>,
     pub facts: HashMap<String, Vec<Vec<Value>>>,
-    /// The RBAC tables `\access-diff` compares, per snapshot. Key is the
-    /// suffix passed to `load_rbac_tables_as` (empty for `load_rbac_tables`).
+    /// The RBAC tables loaded by `load_rbac_tables`, under the empty key.
+    /// `\access-diff` now compares `PermissionTables` directly (see
+    /// `rbac::diff`), so this is only read by the `profile_smt_access` bin.
     pub permission_tables: HashMap<String, PermissionTables>,
 }
 
