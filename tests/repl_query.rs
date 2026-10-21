@@ -185,3 +185,50 @@ fn sourced_examples_match_across_backends() {
         assert_eq!(results[0], results[1], "{example}");
     }
 }
+
+/// Facts asserted and retracted on either side of a `\snapshot` must reach
+/// both the snapshot and the current state that `\access-diff` compares
+/// against, on both backends.
+#[test]
+fn access_diff_sees_fact_changes_across_backends() {
+    let alice = r#"role_rule("kube-system", "alice-debug", {/apiGroups: [""], /resources: ["pods/exec"], /verbs: ["create"]})"#;
+    let bob = r#"role_rule("kube-system", "bob-oncall", {/apiGroups: [""], /resources: ["pods/exec"], /verbs: ["create"]})"#;
+    let commands = format!(
+        "+binding_subject(\"kube-system\", \"rb-alice\", /user, \"alice@example.com\").\n\
+         +binding_roleref(\"kube-system\", \"rb-alice\", \"Role\", \"alice-debug\").\n\
+         +{alice}.\n\
+         \\snapshot before\n\
+         -{alice}.\n\
+         +binding_subject(\"kube-system\", \"rb-bob\", /user, \"bob@example.com\").\n\
+         +binding_roleref(\"kube-system\", \"rb-bob\", \"Role\", \"bob-oncall\").\n\
+         +{bob}.\n\
+         \\access-diff before\n\
+         ::quit\n"
+    );
+    let results = ["interpreter", "dd"].map(|backend| {
+        let (stdout, _) = run_session_with(&["--backend", backend], &commands);
+        let mut verdicts: Vec<String> = stdout
+            .lines()
+            .filter(|line| line.starts_with("    FAIL  ") || line.starts_with("    PASS  "))
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
+        // The backends list rows in different orders.
+        verdicts.sort();
+        verdicts
+    });
+    assert!(
+        results[0]
+            .iter()
+            .any(|line| line.starts_with("FAIL bob@example.com")),
+        "{:?}",
+        results[0]
+    );
+    assert!(
+        results[0]
+            .iter()
+            .any(|line| line.starts_with("PASS alice@example.com")),
+        "{:?}",
+        results[0]
+    );
+    assert_eq!(results[0], results[1]);
+}
