@@ -101,6 +101,8 @@ escalation and the REPL commands that catch it:
   that quietly grew `serviceaccounts/token create` months earlier.
 - [`karpenter-unschedulable`](examples/karpenter-unschedulable/): pods no
   NodePool can ever satisfy.
+- [`indirect-perm`](examples/indirect-perm/): rebuild the old `indirect_perm`
+  table, permissions borrowed through escalation, as a view.
 
 ## Configuration
 
