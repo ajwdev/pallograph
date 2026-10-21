@@ -79,13 +79,11 @@ pub fn load_tuples(engine: &mut Engine, relation: &str, source: &str) -> Result<
         }
     }
 
-    let mut count = 0;
-    for tuple in tuples {
-        if engine.add_fact(relation.to_string(), tuple) {
-            count += 1;
-        }
-    }
-    Ok(count)
+    Ok(engine.add_facts(
+        tuples
+            .into_iter()
+            .map(|tuple| (relation.to_string(), tuple)),
+    ))
 }
 
 fn parse_tuples(bytes: &[u8]) -> Result<Vec<Vec<Value>>> {

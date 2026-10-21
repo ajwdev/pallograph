@@ -22,7 +22,13 @@ impl Snapshot {
     pub fn from_eval(eval: &EvalStore, scope: Scope) -> Self {
         let mut relations = BTreeMap::new();
         let names: Vec<String> = match scope {
-            Scope::All => eval.relation_names().map(String::from).collect(),
+            // `$`-prefixed relations are the interpreter's scratch space (e.g.
+            // `$temp_grp_0` for a GroupBy), not facts; the DD backend has none.
+            Scope::All => eval
+                .relation_names()
+                .filter(|name| !name.starts_with('$'))
+                .map(String::from)
+                .collect(),
             Scope::Only(names) => names,
         };
         for name in names {
