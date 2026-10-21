@@ -1,0 +1,56 @@
+# An aggregation selector with empty matchLabels, "{matchLabels: {}}",
+# selects every ClusterRole but the aggregator itself, like "{}" in
+# aggregation-match-all. TestAggregationMatchAllLabelsDecisions in
+# tools/rbac-oracle pins the decisions.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: match-all-labels
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels: {}
+---
+# Sources: one unlabelled, one labelled, one with URL rules.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: source-pods
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: source-deployments
+  labels:
+    aggregation-match-all.pallograph.dev/any-label: "true"
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: source-healthz
+rules:
+- nonResourceURLs: ["/healthz"]
+  verbs: ["get"]
+---
+# Through a RoleBinding: resource rules apply in team-a only, URL rules not
+# at all.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bob-match-all-labels
+  namespace: team-a
+subjects:
+- kind: User
+  name: bob
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: match-all-labels

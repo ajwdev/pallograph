@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use mangle_common::Value;
 use z3::ast::String as Z3String;
 use z3::ast::{Ast, Dynamic, Int};
-use z3::{FuncDecl, RecFuncDecl, Solver, Sort};
+use z3::{FuncDecl, Solver, Sort};
 
 use crate::engine::EvalStore;
+use crate::rbac::PermissionTables;
 pub mod diff;
 pub mod rbac_model;
 pub mod scheduling;
@@ -19,15 +20,10 @@ pub struct SmtEncoder<'ctx> {
     pub ctx: &'ctx z3::Context,
     pub solver: Solver<'ctx>,
     pub decls: HashMap<String, FuncDecl<'ctx>>,
-    /// Recursively-defined functions (used for can, effective_can axioms).
-    /// RecFuncDecl derefs to FuncDecl; use `get_decl` for a unified lookup.
-    pub rec_decls: HashMap<String, RecFuncDecl<'ctx>>,
     pub facts: HashMap<String, Vec<Vec<Value>>>,
-    /// (principal, namespace, apigroup, resource, verb) entries per named suffix.
-    /// Key is the suffix passed to assert_rbac_axioms_as (empty string = bare "can").
-    pub can_entries: HashMap<String, Vec<(String, String, String, String, String)>>,
-    /// (principal, namespace, apigroup, resource, verb) entries for effective_can, same keying.
-    pub eff_entries: HashMap<String, Vec<(String, String, String, String, String)>>,
+    /// The RBAC tables `\access-diff` compares, per snapshot. Key is the
+    /// suffix passed to `load_rbac_tables_as` (empty for `load_rbac_tables`).
+    pub permission_tables: HashMap<String, PermissionTables>,
 }
 
 impl<'ctx> SmtEncoder<'ctx> {
@@ -36,20 +32,8 @@ impl<'ctx> SmtEncoder<'ctx> {
             ctx,
             solver: Solver::new(ctx),
             decls: HashMap::new(),
-            rec_decls: HashMap::new(),
             facts: HashMap::new(),
-            can_entries: HashMap::new(),
-            eff_entries: HashMap::new(),
-        }
-    }
-
-    /// Return a reference to the named decl, checking `rec_decls` (closed
-    /// recursive definitions) before `decls` (ground-fact uninterpreted fns).
-    pub fn get_decl(&self, name: &str) -> Option<&FuncDecl<'ctx>> {
-        if let Some(rd) = self.rec_decls.get(name) {
-            Some(rd) // RecFuncDecl derefs to &FuncDecl<'ctx>
-        } else {
-            self.decls.get(name)
+            permission_tables: HashMap::new(),
         }
     }
 

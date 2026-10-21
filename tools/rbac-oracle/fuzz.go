@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -16,16 +17,19 @@ import (
 // The palette random worlds draw from. It is deliberately small, so that
 // rules collide and overlap, and it covers every matching feature the
 // authorizer has, including the ones that look like features but are not
-// ("pods/*" is a literal subresource, not a wildcard).
+// ("pods/*" is a literal subresource, "*" in resourceNames a literal name
+// and an interior "*" in a URL a literal character, none of them
+// wildcards). The group "user-1" shares its name with a user, which the
+// authorizer keeps apart.
 var (
 	fuzzNamespaces   = []string{"ns-a", "ns-b"}
 	fuzzAPIGroups    = []string{"", "", "apps", "batch", "example.com", rbacv1.APIGroupAll}
 	fuzzResources    = []string{"pods", "configmaps", "secrets", "deployments", "jobs", "pods/exec", "pods/log", "deployments/scale", "*/scale", "pods/*", rbacv1.ResourceAll}
 	fuzzVerbs        = []string{"get", "list", "create", "delete", "patch", rbacv1.VerbAll}
-	fuzzNames        = []string{"alpha", "beta"}
-	fuzzURLs         = []string{"/healthz", "/metrics", "/debug/*", "/api", "/api/*", rbacv1.NonResourceAll}
+	fuzzNames        = []string{"alpha", "beta", "*"}
+	fuzzURLs         = []string{"/healthz", "/metrics", "/debug/*", "/debug/**", "/api", "/api/*", "/api/*/status", rbacv1.NonResourceAll}
 	fuzzUsers        = []string{"user-1", "user-2", "user-3"}
-	fuzzGroups       = []string{"group-1", "group-2", "system:authenticated", "system:unauthenticated", "system:serviceaccounts", "system:serviceaccounts:ns-a"}
+	fuzzGroups       = []string{"group-1", "group-2", "user-1", "system:authenticated", "system:unauthenticated", "system:serviceaccounts", "system:serviceaccounts:ns-a"}
 	fuzzSAs          = []string{"sa-1", "sa-2"}
 	fuzzLabelKeys    = []string{"fuzz.pallograph.dev/agg-x", "fuzz.pallograph.dev/agg-y"}
 	fuzzMissingRoles = "missing-role"
@@ -60,8 +64,12 @@ func fuzzWorld(random *rand.Rand) []runtime.Object {
 			Resources: pickSome(fuzzResources, 2),
 			Verbs:     pickSome(fuzzVerbs, 3),
 		}
-		if chance(25) {
+		switch {
+		case chance(25):
 			rule.ResourceNames = pickSome(fuzzNames, 2)
+		case chance(10):
+			// Written as "resourceNames: []", which grants every name.
+			rule.ResourceNames = []string{emptyResourceNames}
 		}
 		return rule
 	}
@@ -168,6 +176,23 @@ func fuzzWorld(random *rand.Rand) []runtime.Object {
 	return objects
 }
 
+// emptyResourceNames stands in for a rule fuzzWorld wants written as
+// "resourceNames: []". The field is omitempty, so an empty list would not
+// survive marshaling; marshalFuzzObject swaps the marker for one.
+const emptyResourceNames = "pallograph-empty-resource-names"
+
+// marshalFuzzObject marshals object to YAML the way yaml.Marshal does (via
+// JSON), writing marked resourceNames as an empty list.
+func marshalFuzzObject(object runtime.Object) ([]byte, error) {
+	document, err := json.Marshal(object)
+	if err != nil {
+		return nil, err
+	}
+	document = bytes.ReplaceAll(document,
+		[]byte(`"resourceNames":["`+emptyResourceNames+`"]`), []byte(`"resourceNames":[]`))
+	return yaml.JSONToYAML(document)
+}
+
 // GenerateWorlds writes count random worlds under dir, named
 // fuzz-<seed>-<index>, and validates each by loading it back.
 func GenerateWorlds(dir string, seed uint64, count int) ([]string, error) {
@@ -182,7 +207,7 @@ func GenerateWorlds(dir string, seed uint64, count int) ([]string, error) {
 		var manifest bytes.Buffer
 		fmt.Fprintf(&manifest, "# Random world %d from rbac-oracle gen-worlds -seed %d.\n", index, seed)
 		for i, object := range fuzzWorld(random) {
-			document, err := yaml.Marshal(object)
+			document, err := marshalFuzzObject(object)
 			if err != nil {
 				return nil, err
 			}

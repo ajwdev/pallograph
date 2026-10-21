@@ -368,6 +368,158 @@ fn string_builtins() {
 }
 
 #[test]
+fn string_ends_with() {
+    let e = edb(&[
+        ("url", vec![s("/debug/*")]),
+        ("url", vec![s("/healthz")]),
+        ("url", vec![s("*")]),
+        ("url", vec![s("")]),
+    ]);
+    assert_parity(
+        "string_ends_with",
+        &e,
+        "Decl url(U).\nDecl prefix_url(U).\n\
+         prefix_url(U) :- url(U), :string:ends_with(U, \"*\").",
+    );
+}
+
+#[test]
+fn string_concat_feeds_starts_with() {
+    // Both arguments of :string:starts_with are bound: the prefix is built
+    // per namespace, the way service account usernames are matched to their
+    // system:serviceaccounts:<ns> group.
+    let e = edb(&[
+        ("ns", vec![s("team-a")]),
+        ("ns", vec![s("team")]),
+        ("user", vec![s("system:serviceaccount:team-a:deployer")]),
+        ("user", vec![s("system:serviceaccount:team-b:deployer")]),
+        ("user", vec![s("alice")]),
+    ]);
+    assert_parity(
+        "concat_starts_with",
+        &e,
+        "Decl ns(N).\nDecl user(U).\nDecl candidate(U, N, P).\nDecl in_ns(U, N).\n\
+         candidate(U, N, P) :- user(U), ns(N)\n\
+           |> let P = fn:string:concat(\"system:serviceaccount:\", N, \":\").\n\
+         in_ns(U, N) :- candidate(U, N, P), :string:starts_with(U, P).",
+    );
+}
+
+/// A struct value in the shape `json_to_value` builds: field names are
+/// `/name` constants interleaved with their values.
+fn record(fields: &[(&str, Value)]) -> Value {
+    let mut pairs = Vec::new();
+    for (field, value) in fields {
+        pairs.push(Value::Name(format!("/{field}")));
+        pairs.push(value.clone());
+    }
+    Value::Compound(CompoundKind::Struct, pairs)
+}
+
+fn string_list(values: &[&str]) -> Value {
+    Value::Compound(CompoundKind::List, values.iter().map(|v| s(v)).collect())
+}
+
+#[test]
+fn negated_match_field_absent_field() {
+    // Rule 1 has resourceNames, rule 2 has it empty, rule 3 lacks the
+    // field, and 4 is not a struct at all.
+    let e = edb(&[
+        (
+            "rule",
+            vec![
+                n(1),
+                record(&[
+                    ("verbs", string_list(&["get"])),
+                    ("resourceNames", string_list(&["a"])),
+                ]),
+            ],
+        ),
+        (
+            "rule",
+            vec![
+                n(2),
+                record(&[
+                    ("verbs", string_list(&["get"])),
+                    ("resourceNames", string_list(&[])),
+                ]),
+            ],
+        ),
+        (
+            "rule",
+            vec![n(3), record(&[("verbs", string_list(&["get"]))])],
+        ),
+        ("rule", vec![n(4), s("not a struct")]),
+    ]);
+    // Both planners reject `!:match_field(R, /resourceNames, _)` ("all
+    // arguments must be bound by earlier premises"), so "field absent" is a
+    // negation over a helper relation keyed on the struct. The negated
+    // check mode itself needs a bound value.
+    assert_parity(
+        "negated_match_field",
+        &e,
+        "Decl rule(I, R).\nDecl names_present(R).\nDecl lacks_names(I).\nDecl lacks_get(I).\n\
+         names_present(R) :- rule(_, R), :match_field(R, /resourceNames, _).\n\
+         lacks_names(I) :- rule(I, R), !names_present(R).\n\
+         lacks_get(I) :- rule(I, R), !:match_field(R, /verbs, [\"get\"]).",
+    );
+}
+
+#[test]
+fn negation_over_lower_recursive_stratum() {
+    // The shape of ClusterRole aggregation: a role aggregating sources that
+    // (transitively) have rules uses theirs, otherwise its own. has_rules is
+    // positively recursive and sits in the stratum below the negation.
+    // a -> b -> c is a chain, d <-> e is a cycle fed by c, and f aggregates
+    // only g, which has no rules, so f keeps its own.
+    let e = edb(&[
+        ("own", vec![s("b"), s("b-own")]),
+        ("own", vec![s("c"), s("c-own")]),
+        ("own", vec![s("f"), s("f-own")]),
+        ("agg", vec![s("a"), s("b")]),
+        ("agg", vec![s("b"), s("c")]),
+        ("agg", vec![s("d"), s("e")]),
+        ("agg", vec![s("e"), s("d")]),
+        ("agg", vec![s("e"), s("c")]),
+        ("agg", vec![s("f"), s("g")]),
+    ]);
+    assert_parity(
+        "negation_over_recursion",
+        &e,
+        "Decl own(R, X).\nDecl agg(R, S).\nDecl has_rules(R).\nDecl nonempty(R).\n\
+         Decl effective(R, X).\n\
+         has_rules(R) :- own(R, _).\n\
+         has_rules(R) :- agg(R, S), has_rules(S).\n\
+         nonempty(R) :- agg(R, S), has_rules(S).\n\
+         effective(R, X) :- own(R, X), !nonempty(R).\n\
+         effective(R, X) :- agg(R, S), effective(S, X).",
+    );
+}
+
+#[test]
+fn join_on_struct_column() {
+    // Equal structs built separately must join. A struct with the same
+    // fields in another order, or another value, must compare the same way
+    // on both backends.
+    let rule = record(&[("verbs", s("get")), ("resources", s("pods"))]);
+    let reordered = record(&[("resources", s("pods")), ("verbs", s("get"))]);
+    let other = record(&[("verbs", s("list")), ("resources", s("pods"))]);
+    let e = edb(&[
+        ("grant", vec![s("alice"), rule.clone()]),
+        ("grant", vec![s("bob"), other.clone()]),
+        ("needs", vec![rule, n(1)]),
+        ("needs", vec![reordered, n(2)]),
+        ("needs", vec![other, n(3)]),
+    ]);
+    assert_parity(
+        "struct_join",
+        &e,
+        "Decl grant(P, R).\nDecl needs(R, I).\nDecl satisfied(P, I).\n\
+         satisfied(P, I) :- grant(P, R), needs(R, I).",
+    );
+}
+
+#[test]
 fn constants_in_body() {
     let e = edb(&[
         ("perm", vec![s("alice"), s("read")]),
@@ -430,6 +582,35 @@ fn mixed_value_types() {
         &e,
         "Decl rec(I, S, F).\nDecl copy(I, S, F).\n\
          copy(I, S, F) :- rec(I, S, F).",
+    );
+}
+
+#[test]
+fn name_constant_and_strings_in_one_column() {
+    // One column holding a /name constant next to strings, as ResourceName
+    // does in rules/rbac_roles.mg: /any for every name, or a literal name,
+    // including "". A join on the column must not equate /any with a string.
+    let e = edb(&[
+        ("rule", vec![s("r1")]),
+        ("rule", vec![s("r2")]),
+        ("rule", vec![s("r3")]),
+        ("rule_name", vec![s("r2"), s("web")]),
+        ("rule_name", vec![s("r3"), s("")]),
+        ("request", vec![n(1), s("web")]),
+        ("request", vec![n(2), s("")]),
+        ("request", vec![n(3), s("other")]),
+    ]);
+    assert_parity(
+        "name_and_strings",
+        &e,
+        "Decl rule(R).\nDecl rule_name(R, N).\nDecl request(I, N).\n\
+         Decl named(R).\nDecl scope(R, N).\nDecl request_name(I, N).\nDecl allowed(I, R).\n\
+         named(R) :- rule_name(R, _).\n\
+         scope(R, /any) :- rule(R), !named(R).\n\
+         scope(R, N) :- rule_name(R, N).\n\
+         request_name(I, /any) :- request(I, _).\n\
+         request_name(I, N) :- request(I, N).\n\
+         allowed(I, R) :- request_name(I, N), scope(R, N).",
     );
 }
 

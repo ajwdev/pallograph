@@ -197,6 +197,9 @@ func (o *Oracle) sourceTags(source string) ([]string, error) {
 	if roleKind == "ClusterRole" && o.world.AggregatedRoles[roleName] {
 		tags = append(tags, "role-aggregated")
 	}
+	if roleKind == "ClusterRole" && o.world.AggregationCycleRoles[roleName] {
+		tags = append(tags, "role-on-aggregation-cycle")
+	}
 
 	switch subjectKind {
 	case rbacv1.UserKind:

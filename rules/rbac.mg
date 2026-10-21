@@ -1,328 +1,95 @@
-# RBAC rules - models Kubernetes RBAC objects and derives effective permissions.
+# RBAC decisions - joins subjects to role permissions and answers
+# authorization requests the way the kube-apiserver RBAC authorizer does.
 #
-# Base facts (EDB - Extensional Database, i.e. facts asserted directly, not derived):
-#   k8s/5          - Kubernetes objects loaded from the cluster
-#   user_groups/2  - (Username, Group) populated at query time from a UserInfo struct
+# The model is split across three files:
+#   rbac_roles.mg     - what each Role and ClusterRole grants (role_rule,
+#                       clusterrole_rule, policy_rule_perm), including
+#                       ClusterRole aggregation
+#   rbac_subjects.mg  - who each binding applies to (binding_subject,
+#                       binding_roleref) and the subjects a principal acts
+#                       as (principal_group, principal_subject)
+#   rbac.mg           - this file: direct_perm, direct_url_perm and
+#                       rbac_allowed
 #
-# Predicate hierarchy (IDB - Intensional Database, i.e. facts derived by rules):
-#   k8s/5
-#     → role/3, clusterrole/2, rolebinding/3, clusterrolebinding/2  (type filters)
-#     → role_perm/5, clusterrole_perm/4                             (permission flattening)
-#     → rolebinding_subject_{sa,user,group}                         (subject extraction)
-#     → clusterrolebinding_subject_{sa,user,group}                  (subject extraction)
-#     → rolebinding_roleref/4, clusterrolebinding_roleref/2         (roleref extraction)
-#     → sa_{role,rb_clusterrole,crb}_perm                          (effective SA perms)
-#     → user_{role,rb_clusterrole,crb}_perm                        (effective user perms)
-#     → group_{role,rb_clusterrole,crb}_perm                       (effective group perms)
-#   user_groups/2
-#     → all_{sa,user,group}_perm/N  (union of all binding paths, with Namespace)
-#     → all_{sa,user,group}_ns_perm (namespace-scoped paths only)
-#     → all_user_cluster_perm       (cluster-wide paths only, for users+groups)
-#   all_{sa,user,group}_perm/N
-#     → direct_perm/5  (principal, namespace, apigroup, resource, verb; wildcards preserved as-is)
-
-# ---- Type filter predicates ----
-
-role(Namespace, Name, Data) :-
-    k8s("rbac.authorization.k8s.io/v1", "Role", Namespace, Name, Data).
-
-clusterrole(Name, Data) :-
-    k8s("rbac.authorization.k8s.io/v1", "ClusterRole", "", Name, Data).
-
-rolebinding(Namespace, Name, Data) :-
-    k8s("rbac.authorization.k8s.io/v1", "RoleBinding", Namespace, Name, Data).
-
-clusterrolebinding(Name, Data) :-
-    k8s("rbac.authorization.k8s.io/v1", "ClusterRoleBinding", "", Name, Data).
-
-# ---- Permission flattening ----
+# Facts loaded from the cluster or supplied by the caller (EDB) used here:
+#   access_request/9, access_request_group/2  - requests to decide
 #
-# Each Role/ClusterRole has a list of PolicyRules. Each PolicyRule has lists of
-# apiGroups, resources, and verbs. We flatten the three nested lists into
-# individual (apiGroup, resource, verb) tuples via three :list:member calls.
+# Derived relations (IDB):
+#   direct_perm/7, direct_url_perm/4  (grants per binding subject)
+#   rbac_allowed/1                    (decisions for access_request)
 #
-# Note: "*" in any position is a Kubernetes wildcard string. It is stored as the
-# Mangle string "*" and matched literally — see policies.mg for wildcard coverage
-# predicates used at policy-check time.
-
-role_perm(Namespace, RoleName, ApiGroup, Resource, Verb) :-
-    role(Namespace, RoleName, Data),
-    :match_field(Data, /rules, Rules),
-    :list:member(PolicyRule, Rules),
-    :match_field(PolicyRule, /apiGroups, ApiGroups),
-    :match_field(PolicyRule, /resources, Resources),
-    :match_field(PolicyRule, /verbs, Verbs),
-    :list:member(ApiGroup, ApiGroups),
-    :list:member(Resource, Resources),
-    :list:member(Verb, Verbs).
-
-clusterrole_perm(RoleName, ApiGroup, Resource, Verb) :-
-    clusterrole(RoleName, Data),
-    :match_field(Data, /rules, Rules),
-    :list:member(PolicyRule, Rules),
-    :match_field(PolicyRule, /apiGroups, ApiGroups),
-    :match_field(PolicyRule, /resources, Resources),
-    :match_field(PolicyRule, /verbs, Verbs),
-    :list:member(ApiGroup, ApiGroups),
-    :list:member(Resource, Resources),
-    :list:member(Verb, Verbs).
-
-# ---- Subject kind helpers ----
+# Grants are kept per binding subject, not copied to every member of a
+# group: a grant to system:authenticated would otherwise be repeated for
+# every principal. To ask what a principal can do, join principal_subject
+# with direct_perm:
 #
-# :match_field requires its output argument to be a free variable — constants
-# are not allowed. Use helper predicates for kind matching, the same pattern
-# as is_true/1 in policies.mg.
-subject_kind_sa("ServiceAccount").
-subject_kind_user("User").
-subject_kind_group("Group").
-
-# ---- Subject extraction ----
+#   principal_subject(P, Kind, Name), direct_perm(Name, Kind, Ns, G, R, N, V)
 #
-# Subjects in bindings are kind-typed: ServiceAccount subjects have a namespace
-# field; User and Group subjects do not. We handle each kind with a separate
-# predicate so that :match_field on /namespace only runs for ServiceAccounts,
-# where the field is guaranteed to exist.
+# Wildcards ("*") are kept as literal strings in the permission relations and
+# only interpreted by rbac_allowed. A ResourceName of /any means any name.
 
-rolebinding_subject_sa(BindingNs, BindingName, SubjectNs, SubjectName) :-
-    rolebinding(BindingNs, BindingName, Data),
-    :match_field(Data, /subjects, Subjects),
-    :list:member(Subject, Subjects),
-    :match_field(Subject, /kind, Kind),
-    subject_kind_sa(Kind),
-    :match_field(Subject, /namespace, SubjectNs),
-    :match_field(Subject, /name, SubjectName).
-
-rolebinding_subject_user(BindingNs, BindingName, SubjectName) :-
-    rolebinding(BindingNs, BindingName, Data),
-    :match_field(Data, /subjects, Subjects),
-    :list:member(Subject, Subjects),
-    :match_field(Subject, /kind, Kind),
-    subject_kind_user(Kind),
-    :match_field(Subject, /name, SubjectName).
-
-rolebinding_subject_group(BindingNs, BindingName, GroupName) :-
-    rolebinding(BindingNs, BindingName, Data),
-    :match_field(Data, /subjects, Subjects),
-    :list:member(Subject, Subjects),
-    :match_field(Subject, /kind, Kind),
-    subject_kind_group(Kind),
-    :match_field(Subject, /name, GroupName).
-
-clusterrolebinding_subject_sa(BindingName, SubjectNs, SubjectName) :-
-    clusterrolebinding(BindingName, Data),
-    :match_field(Data, /subjects, Subjects),
-    :list:member(Subject, Subjects),
-    :match_field(Subject, /kind, Kind),
-    subject_kind_sa(Kind),
-    :match_field(Subject, /namespace, SubjectNs),
-    :match_field(Subject, /name, SubjectName).
-
-clusterrolebinding_subject_user(BindingName, SubjectName) :-
-    clusterrolebinding(BindingName, Data),
-    :match_field(Data, /subjects, Subjects),
-    :list:member(Subject, Subjects),
-    :match_field(Subject, /kind, Kind),
-    subject_kind_user(Kind),
-    :match_field(Subject, /name, SubjectName).
-
-# ---- RoleRef extraction ----
-
-rolebinding_roleref(BindingNs, BindingName, RefKind, RefName) :-
-    rolebinding(BindingNs, BindingName, Data),
-    :match_field(Data, /roleRef, RoleRef),
-    :match_field(RoleRef, /kind, RefKind),
-    :match_field(RoleRef, /name, RefName).
-
-clusterrolebinding_roleref(BindingName, RefName) :-
-    clusterrolebinding(BindingName, Data),
-    :match_field(Data, /roleRef, RoleRef),
-    :match_field(RoleRef, /name, RefName).
-
-# ---- Effective permissions ----
+# ---- Grants per binding subject ----
 #
-# Three join paths for each subject type. Namespace is always preserved:
-#   1. Subject → RoleBinding → Role              (Namespace = binding namespace)
-#   2. Subject → RoleBinding → ClusterRole       (Namespace = binding namespace)
-#   3. Subject → ClusterRoleBinding → ClusterRole (Namespace = "")
+# The subject name comes first in these relations because the planner looks
+# a relation up by the first argument already bound (or constant) and checks
+# the rest afterwards. Keyed on Kind, which only has three values, a join
+# would compare every request against almost every grant.
 
-# Path 1: RoleBinding → Role
-sa_role_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb) :-
-    rolebinding_subject_sa(Namespace, BindingName, SANs, SAName),
-    rolebinding_roleref(Namespace, BindingName, "Role", RoleName),
-    role_perm(Namespace, RoleName, ApiGroup, Resource, Verb).
-
-# Path 2: RoleBinding → ClusterRole (namespace-scoped effect)
-sa_rb_clusterrole_perm(SANs, SAName, BindingNs, ApiGroup, Resource, Verb) :-
-    rolebinding_subject_sa(BindingNs, BindingName, SANs, SAName),
-    rolebinding_roleref(BindingNs, BindingName, "ClusterRole", ClusterRoleName),
-    clusterrole_perm(ClusterRoleName, ApiGroup, Resource, Verb).
-
-# Path 3: ClusterRoleBinding → ClusterRole (cluster-wide)
-sa_crb_perm(SANs, SAName, ApiGroup, Resource, Verb) :-
-    clusterrolebinding_subject_sa(BindingName, SANs, SAName),
-    clusterrolebinding_roleref(BindingName, ClusterRoleName),
-    clusterrole_perm(ClusterRoleName, ApiGroup, Resource, Verb).
-
-# User paths (no namespace for the subject)
-user_role_perm(UserName, BindingNs, ApiGroup, Resource, Verb) :-
-    rolebinding_subject_user(BindingNs, BindingName, UserName),
-    rolebinding_roleref(BindingNs, BindingName, "Role", RoleName),
-    role_perm(BindingNs, RoleName, ApiGroup, Resource, Verb).
-
-user_rb_clusterrole_perm(UserName, BindingNs, ApiGroup, Resource, Verb) :-
-    rolebinding_subject_user(BindingNs, BindingName, UserName),
-    rolebinding_roleref(BindingNs, BindingName, "ClusterRole", ClusterRoleName),
-    clusterrole_perm(ClusterRoleName, ApiGroup, Resource, Verb).
-
-user_crb_perm(UserName, ApiGroup, Resource, Verb) :-
-    clusterrolebinding_subject_user(BindingName, UserName),
-    clusterrolebinding_roleref(BindingName, ClusterRoleName),
-    clusterrole_perm(ClusterRoleName, ApiGroup, Resource, Verb).
-
-# ---- Group subject extraction ----
-
-clusterrolebinding_subject_group(BindingName, GroupName) :-
-    clusterrolebinding(BindingName, Data),
-    :match_field(Data, /subjects, Subjects),
-    :list:member(Subject, Subjects),
-    :match_field(Subject, /kind, Kind),
-    subject_kind_group(Kind),
-    :match_field(Subject, /name, GroupName).
-
-# ---- Group effective permissions ----
-#
-# Mirror of the user paths, but keyed on group name. Groups appear as
-# subjects in both RoleBindings and ClusterRoleBindings.
-
-# Path 1: RoleBinding → Role (namespace-scoped)
-group_role_perm(GroupName, BindingNs, ApiGroup, Resource, Verb) :-
-    rolebinding_subject_group(BindingNs, BindingName, GroupName),
-    rolebinding_roleref(BindingNs, BindingName, "Role", RoleName),
-    role_perm(BindingNs, RoleName, ApiGroup, Resource, Verb).
-
-# Path 2: RoleBinding → ClusterRole (namespace-scoped effect)
-group_rb_clusterrole_perm(GroupName, BindingNs, ApiGroup, Resource, Verb) :-
-    rolebinding_subject_group(BindingNs, BindingName, GroupName),
-    rolebinding_roleref(BindingNs, BindingName, "ClusterRole", ClusterRoleName),
-    clusterrole_perm(ClusterRoleName, ApiGroup, Resource, Verb).
-
-# Path 3: ClusterRoleBinding → ClusterRole (cluster-wide)
-group_crb_perm(GroupName, ApiGroup, Resource, Verb) :-
-    clusterrolebinding_subject_group(BindingName, GroupName),
-    clusterrolebinding_roleref(BindingName, ClusterRoleName),
-    clusterrole_perm(ClusterRoleName, ApiGroup, Resource, Verb).
-
-# ---- all_sa_perm / all_user_perm / all_group_perm ----
-#
-# Full union of all binding paths, namespace preserved (CRB emits "").
-# Kept for enumeration use cases (e.g. listing all known users/groups in
-# escalation rules) and direct policy queries. Not used by can/4 below.
-
-all_sa_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb) :-
-    sa_role_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb).
-
-all_sa_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb) :-
-    sa_rb_clusterrole_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb).
-
-all_sa_perm(SANs, SAName, "", ApiGroup, Resource, Verb) :-
-    sa_crb_perm(SANs, SAName, ApiGroup, Resource, Verb).
-
-all_group_perm(GroupName, Namespace, ApiGroup, Resource, Verb) :-
-    group_role_perm(GroupName, Namespace, ApiGroup, Resource, Verb).
-
-all_group_perm(GroupName, Namespace, ApiGroup, Resource, Verb) :-
-    group_rb_clusterrole_perm(GroupName, Namespace, ApiGroup, Resource, Verb).
-
-all_group_perm(GroupName, "", ApiGroup, Resource, Verb) :-
-    group_crb_perm(GroupName, ApiGroup, Resource, Verb).
-
-all_user_perm(Username, Namespace, ApiGroup, Resource, Verb) :-
-    user_role_perm(Username, Namespace, ApiGroup, Resource, Verb).
-
-all_user_perm(Username, Namespace, ApiGroup, Resource, Verb) :-
-    user_rb_clusterrole_perm(Username, Namespace, ApiGroup, Resource, Verb).
-
-
-all_user_perm(Username, "", ApiGroup, Resource, Verb) :-
-    user_crb_perm(Username, ApiGroup, Resource, Verb).
-
-all_user_perm(Username, Namespace, ApiGroup, Resource, Verb) :-
-    user_groups(Username, Group),
-    group_role_perm(Group, Namespace, ApiGroup, Resource, Verb).
-
-all_user_perm(Username, Namespace, ApiGroup, Resource, Verb) :-
-    user_groups(Username, Group),
-    group_rb_clusterrole_perm(Group, Namespace, ApiGroup, Resource, Verb).
-
-all_user_perm(Username, "", ApiGroup, Resource, Verb) :-
-    user_groups(Username, Group),
-    group_crb_perm(Group, ApiGroup, Resource, Verb).
-
-# ---- Aggregated ClusterRoles ----
-#
-# ClusterRoles can declare an aggregationRule whose clusterRoleSelectors list
-# pulls in permissions from any ClusterRole whose labels match. This is how the
-# built-in cluster-admin/admin/edit/view roles work.
-#
-# Each clusterRoleSelectors[i] entry is emitted by edb.rs as a synthetic selector
-# owner (ApiVersion="pallograph.dev/agg", Kind="ClusterRoleAggregation",
-# Namespace=i, Name=<AggCR>), with its matchLabels and matchExpressions requirements
-# stored as standard selector_match_label/selector_expr_*/6 EDB facts. The
-# selector_matches/8 engine in labels.mg then provides:
-#   - AND semantics within one selector: all requirements must hold.
-#   - OR semantics across selectors: each index is a separate owner.
-#
-# Note: an empty clusterRoleSelector (no matchLabels, no matchExpressions) produces
-# no requirements and therefore matches nothing (fail-closed). This differs from the
-# K8s aggregation controller, which treats an empty selector as "match all", but is
-# safer for security analysis purposes.
-
-clusterrole_aggregates(AggCR, SourceCR) :-
-    selector_matches("pallograph.dev/agg", "ClusterRoleAggregation", SelIdx, AggCR,
-                     "rbac.authorization.k8s.io/v1", "ClusterRole", "", SourceCR).
-
-clusterrole_perm(AggCR, ApiGroup, Resource, Verb) :-
-    clusterrole_aggregates(AggCR, SourceCR),
-    clusterrole_perm(SourceCR, ApiGroup, Resource, Verb).
-
-# ---- direct_perm ----
-#
-# Flat union of all binding paths for every subject type. Wildcards ("*") are
-# preserved as-is — no expansion. Namespace="" for cluster-wide grants (CRB path).
-# SA principals are formatted as system:serviceaccount:<ns>:<name>.
-
-Decl direct_perm(Principal, Namespace, ApiGroup, Resource, Verb)
+Decl direct_perm(Principal, Kind, Namespace, ApiGroup, Resource, ResourceName, Verb)
   descr [
-    doc("Effective RBAC permissions granted directly by a binding (no escalation)."),
-    arg(Principal, "user, group, or system:serviceaccount:<ns>:<name>"),
+    doc("Resource permissions each binding subject holds directly, before group membership or escalation; join principal_subject to expand groups."),
+    arg(Principal, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
+    arg(Kind, "/user, /group or /serviceaccount"),
     arg(Namespace, "namespace the grant applies in; empty for cluster-wide"),
     arg(ApiGroup, "API group; * is a literal wildcard"),
-    arg(Resource, "resource, e.g. pods; * is a literal wildcard"),
+    arg(Resource, "resource or resource/subresource; * and */sub are literal wildcards"),
+    arg(ResourceName, "object name, or /any for every name; the empty name and * are literal names"),
     arg(Verb, "verb, e.g. get/list/create; * is a literal wildcard")
   ].
 
-direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
-    all_user_perm(Principal, Namespace, ApiGroup, Resource, Verb).
+# RoleBinding to a Role: the Role lives in the binding's namespace, and the
+# grant applies there.
+direct_perm(Name, Kind, Namespace, ApiGroup, Resource, ResourceName, Verb) :-
+    binding_subject(Namespace, Binding, Kind, Name),
+    binding_roleref(Namespace, Binding, "Role", Role),
+    role_rule(Namespace, Role, Rule),
+    policy_rule_perm(Rule, ApiGroup, Resource, ResourceName, Verb).
 
-direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
-    all_sa_perm(SANs, SAName, Namespace, ApiGroup, Resource, Verb)
-    |> let Principal = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+# RoleBinding to a ClusterRole applies in the binding's namespace;
+# ClusterRoleBinding (binding namespace "") applies cluster-wide.
+direct_perm(Name, Kind, Namespace, ApiGroup, Resource, ResourceName, Verb) :-
+    binding_subject(Namespace, Binding, Kind, Name),
+    binding_roleref(Namespace, Binding, "ClusterRole", Role),
+    clusterrole_rule(Role, Rule),
+    policy_rule_perm(Rule, ApiGroup, Resource, ResourceName, Verb).
 
-direct_perm(Principal, Namespace, ApiGroup, Resource, Verb) :-
-    all_group_perm(Principal, Namespace, ApiGroup, Resource, Verb).
+# Non-resource requests are never namespaced, so the authorizer only reaches
+# URL rules through ClusterRoleBindings.
+Decl direct_url_perm(Principal, Kind, Url, Verb)
+  descr [
+    doc("Non-resource URL permissions each binding subject holds via ClusterRoleBindings."),
+    arg(Principal, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
+    arg(Kind, "/user, /group or /serviceaccount"),
+    arg(Url, "nonResourceURLs entry; * and a trailing * are literal wildcards"),
+    arg(Verb, "verb; * is a literal wildcard")
+  ].
+
+direct_url_perm(Name, Kind, Url, Verb) :-
+    binding_subject("", Binding, Kind, Name),
+    binding_roleref("", Binding, "ClusterRole", Role),
+    clusterrole_rule(Role, Rule),
+    policy_rule_url_perm(Rule, Url, Verb).
 
 # ---- Access decisions ----
 #
 # rbac_allowed(Id) answers, for each access_request, whether the RBAC
-# authorizer would allow it. It reads direct_perm, so it inherits that
-# relation's modelling: resourceNames and nonResourceURLs rules are not
-# represented, and neither are groups the request does not list in
-# access_request_group. The RBAC compatibility harness
-# (tests/rbac_compat.rs) measures this relation against the kube-apiserver
-# authorizer.
+# authorizer would allow it. It mirrors RuleAllows in k8s
+# plugin/pkg/auth/authorizer/rbac/rbac.go. The RBAC compatibility harness
+# (tests/rbac_compat.rs) measures it against the real authorizer.
 #
-# Each access_request_grant_* relation lists the grant values that match
-# one field of the request: the value itself, or the "*" wildcard.
+# The request_* relations list, per request, every value a grant could hold
+# and still match one field of the request. A request is allowed when some
+# direct_perm row is built entirely from such values.
 
 Decl rbac_allowed(Id)
   descr [
@@ -330,51 +97,157 @@ Decl rbac_allowed(Id)
     arg(Id, "access_request id")
   ].
 
-access_request_principal(Id, User) :-
+# Subjects a request matches: a User or ServiceAccount subject by username,
+# a Group subject by membership.
+request_subject(Id, /user, User) :-
     access_request(Id, User, _, _, _, _, _, _, _).
 
-access_request_principal(Id, Group) :-
+request_subject(Id, /serviceaccount, User) :-
+    access_request(Id, User, _, _, _, _, _, _, _).
+
+request_subject(Id, /group, Group) :-
     access_request_group(Id, Group).
 
+request_subject(Id, /group, Group) :-
+    request_service_account_group(Id, Group).
+
+# A ServiceAccount token authenticates as system:serviceaccount:<ns>:<name>
+# and carries the groups system:serviceaccounts,
+# system:serviceaccounts:<ns> and system:authenticated. Requests list no
+# groups for service accounts, so they are derived from the username here.
+request_service_account_rest(Id, Rest) :-
+    access_request(Id, User, _, _, _, _, _, _, _),
+    :string:starts_with(User, "system:serviceaccount:")
+    |> let Rest = fn:string:replace(User, "system:serviceaccount:", "", 1).
+
+# The username must split into <ns>:<name>.
+request_service_account(Id, User) :-
+    request_service_account_rest(Id, Rest),
+    :string:contains(Rest, ":"),
+    access_request(Id, User, _, _, _, _, _, _, _).
+
+# There is no string split, so instead of extracting <ns> from the username,
+# each system:serviceaccounts:<ns> group some binding names is turned into
+# the username prefix system:serviceaccount:<ns>: and tested against it.
+# A <ns> containing ":" can never be the namespace part of a username.
+service_account_namespace_group(Group, Namespace) :-
+    binding_subject(_, _, /group, Group),
+    :string:starts_with(Group, "system:serviceaccounts:")
+    |> let Namespace = fn:string:replace(Group, "system:serviceaccounts:", "", 1).
+
+service_account_namespace_group_prefix(Group, Prefix) :-
+    service_account_namespace_group(Group, Namespace),
+    !:string:contains(Namespace, ":")
+    |> let Prefix = fn:string:concat("system:serviceaccount:", Namespace, ":").
+
+request_service_account_group(Id, "system:serviceaccounts") :-
+    request_service_account(Id, _).
+
+request_service_account_group(Id, "system:authenticated") :-
+    request_service_account(Id, _).
+
+request_service_account_group(Id, Group) :-
+    request_service_account(Id, User),
+    service_account_namespace_group_prefix(Group, Prefix),
+    :string:starts_with(User, Prefix).
+
 # RoleBinding grants apply in their own namespace; ClusterRoleBinding grants
-# (Namespace "") apply everywhere.
-access_request_grant_namespace(Id, Namespace) :-
+# (Namespace "") apply everywhere, including cluster-scoped requests.
+request_grant_namespace(Id, Namespace) :-
     access_request(Id, _, Namespace, _, _, _, _, _, _).
 
-access_request_grant_namespace(Id, "") :-
+request_grant_namespace(Id, "") :-
     access_request(Id, _, _, _, _, _, _, _, _).
 
-access_request_grant_api_group(Id, ApiGroup) :-
+request_grant_api_group(Id, ApiGroup) :-
     access_request(Id, _, _, ApiGroup, _, _, _, _, _).
 
-access_request_grant_api_group(Id, "*") :-
+request_grant_api_group(Id, "*") :-
     access_request(Id, _, _, _, _, _, _, _, _).
 
-# Rules name subresources as "resource/subresource".
-access_request_grant_resource(Id, Resource) :-
+# Rules name subresources as "resource/subresource". "*" matches every
+# resource and subresource, and "*/sub" matches subresource sub of any
+# resource. "res/*" is not a wildcard.
+request_grant_resource(Id, Resource) :-
     access_request(Id, _, _, _, Resource, Subresource, _, _, _),
     Subresource = "".
 
-access_request_grant_resource(Id, Combined) :-
+request_grant_resource(Id, Combined) :-
     access_request(Id, _, _, _, Resource, Subresource, _, _, _),
     Subresource != ""
     |> let Combined = fn:string:concat(Resource, "/", Subresource).
 
-access_request_grant_resource(Id, "*") :-
+request_grant_resource(Id, AnyResource) :-
+    access_request(Id, _, _, _, _, Subresource, _, _, _),
+    Subresource != ""
+    |> let AnyResource = fn:string:concat("*/", Subresource).
+
+request_grant_resource(Id, "*") :-
     access_request(Id, _, _, _, _, _, _, _, _).
 
-access_request_grant_verb(Id, Verb) :-
+# A grant without resourceNames (/any) matches any request; a named grant only
+# matches a request for exactly that name. A request without a name (list,
+# create) has Name "", so it only matches a grant with resourceNames: [""].
+request_grant_resource_name(Id, /any) :-
+    access_request(Id, _, _, _, _, _, _, _, _).
+
+request_grant_resource_name(Id, Name) :-
+    access_request(Id, _, _, _, _, _, Name, _, _).
+
+request_grant_verb(Id, Verb) :-
     access_request(Id, _, _, _, _, _, _, Verb, _).
 
-access_request_grant_verb(Id, "*") :-
+request_grant_verb(Id, "*") :-
     access_request(Id, _, _, _, _, _, _, _, _).
 
+# Resource requests are the ones without a Path.
 rbac_allowed(Id) :-
     access_request(Id, _, _, _, _, _, _, _, Path),
     Path = "",
-    access_request_principal(Id, Principal),
-    access_request_grant_namespace(Id, Namespace),
-    access_request_grant_api_group(Id, ApiGroup),
-    access_request_grant_resource(Id, Resource),
-    access_request_grant_verb(Id, Verb),
-    direct_perm(Principal, Namespace, ApiGroup, Resource, Verb).
+    request_subject(Id, Kind, Name),
+    direct_perm(Name, Kind, Namespace, ApiGroup, Resource, ResourceName, Verb),
+    request_grant_namespace(Id, Namespace),
+    request_grant_api_group(Id, ApiGroup),
+    request_grant_resource(Id, Resource),
+    request_grant_resource_name(Id, ResourceName),
+    request_grant_verb(Id, Verb).
+
+# ---- Non-resource URL matching ----
+#
+# A nonResourceURLs entry matches a path exactly, or, when it ends in "*",
+# as a prefix: Kubernetes strips every trailing "*" (strings.TrimRight) and
+# tests the rest with HasPrefix. "*" alone thus matches every path.
+#
+# There is no string slicing, so trailing stars are removed one at a time.
+# fn:string:replace only replaces the first match, so a newline is appended
+# as an end marker and "*\n" replaced: that is always the last "*". Paths
+# never contain a newline.
+url_trim_step(Url, Url) :-
+    policy_rule_url_perm(_, Url, _),
+    :string:ends_with(Url, "*").
+
+url_trim_step(Url, Shorter) :-
+    url_trim_step(Url, Current),
+    :string:ends_with(Current, "*")
+    |> let Shorter = fn:string:replace(fn:string:concat(Current, "\n"), "*\n", "", 1).
+
+url_prefix(Url, Prefix) :-
+    url_trim_step(Url, Prefix),
+    !:string:ends_with(Prefix, "*").
+
+request_grant_url(Id, Path) :-
+    access_request(Id, _, _, _, _, _, _, _, Path),
+    Path != "".
+
+request_grant_url(Id, Url) :-
+    access_request(Id, _, _, _, _, _, _, _, Path),
+    Path != "",
+    url_prefix(Url, Prefix),
+    :string:starts_with(Path, Prefix).
+
+# Non-resource requests are the ones with a Path.
+rbac_allowed(Id) :-
+    request_grant_url(Id, Url),
+    request_subject(Id, Kind, Name),
+    request_grant_verb(Id, Verb),
+    direct_url_perm(Name, Kind, Url, Verb).

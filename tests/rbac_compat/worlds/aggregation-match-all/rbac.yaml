@@ -1,0 +1,58 @@
+# An empty aggregation selector, "{}", selects every ClusterRole but the
+# aggregator itself, so match-all-empty ends up with every source's rules,
+# URL rules included. aggregation-match-all-labels does the same for
+# "{matchLabels: {}}". TestAggregationMatchAllDecisions in tools/rbac-oracle
+# pins the decisions.
+#
+# Each world has one match-all aggregator. Two would select each other, an
+# aggregation cycle, and roles on a cycle keep their stored rules instead of
+# being recomputed (see aggregation-cycle-own-rules).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: match-all-empty
+aggregationRule:
+  clusterRoleSelectors:
+  - {}
+---
+# Sources: one unlabelled, one labelled, one with URL rules.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: source-pods
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: source-deployments
+  labels:
+    aggregation-match-all.pallograph.dev/any-label: "true"
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: source-healthz
+rules:
+- nonResourceURLs: ["/healthz"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alice-match-all-empty
+subjects:
+- kind: User
+  name: alice
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: match-all-empty

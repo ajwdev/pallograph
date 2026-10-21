@@ -5,7 +5,7 @@
 # kube-system. This lets alice mint a bearer token for any SA in the namespace
 # — including kube-system:default, which has cluster-admin.
 #
-# The escalation is driven by token_accessible_sa (escalation.mg), which finds
+# The escalation is driven by subject_token_accessible_sa (escalation.mg), which finds
 # every SA in namespaces where alice can create tokens.
 #
 # Attack chain:
@@ -21,6 +21,6 @@
 #   \access-diff baseline
 #   \smt cluster-admin
 
-rolebinding_subject_user("kube-system", "rb-alice-token", "alice").
-rolebinding_roleref("kube-system", "rb-alice-token", "Role", "alice-token-creator").
-role_perm("kube-system", "alice-token-creator", "", "serviceaccounts/token", "create").
+binding_subject("kube-system", "rb-alice-token", /user, "alice").
+binding_roleref("kube-system", "rb-alice-token", "Role", "alice-token-creator").
+role_rule("kube-system", "alice-token-creator", {/apiGroups: [""], /resources: ["serviceaccounts/token"], /verbs: ["create"]}).

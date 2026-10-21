@@ -29,6 +29,12 @@ Only the non-obvious parts:
 - `rules/*.mg` - Mangle rules. `00_edb_prelude.mg` declares the input
   relations and is `include_str!`'d into the binary; `build.rs` compiles every
   rule file at build time, so a broken rule fails `cargo build`.
+- RBAC rules are split three ways: `rules/rbac_roles.mg` (what a role grants,
+  aggregation included), `rules/rbac_subjects.mg` (who a binding applies to,
+  and the subjects a principal acts as) and `rules/rbac.mg` (`direct_perm`,
+  `direct_url_perm` and `rbac_allowed`). File headers list the relations.
+- `hack/relation-sizes.sh` counts rows per RBAC and escalation relation;
+  use it to compare rule revisions.
 - `src/engine.rs` - `Engine` and the `Backend` trait, with two backends
   selected by `--backend` (default `interpreter`):
   - `InterpreterBackend` - batch evaluation via `mangle-interpreter`.
@@ -112,9 +118,30 @@ Known upstream `mangle-rs` bugs, deliberately not patched here:
   `tests/dd_interp_parity.rs`).
 - Multiple GroupBy rules in one ruleset collide on a shared temp relation in
   the interpreter only, so `rules/summary.mg` keeps a single GroupBy rule.
+- The interpreter indexes a struct-valued column by its field count alone
+  (`value_to_index_key` in `mangle-interpreter`), so a lookup keyed on a
+  struct (e.g. a PolicyRule `Rule`) returns nearly every row. Results stay
+  correct, but evaluation is slow. `policy_rule_has_wildcard_verb` in
+  `rules/rbac_roles.mg` is shaped around it.
 
 Don't work around these by making the DD backend diverge from the
 interpreter. Leave the affected test ignored or the rule shaped around the bug.
+
+### Write rules with the planner's lookups in mind
+
+The upstream planner indexes each body atom on its first bound argument
+(variable or constant) only, and checks the other columns afterwards. The DD
+backend turns that into a join keyed on that one column. So:
+
+- Put the selective column first in any relation that other rules look up.
+  `direct_perm` leads with `Principal` for this reason: keyed on its
+  low-cardinality `Kind`, the `rbac_compat` run used about 3.9GB per chunk and
+  ran the machine out of memory.
+- A leading constant picks the index too. `direct_perm(N, K, Ns, "", "pods",
+  _, "create")` with `N` unbound looks up on `ApiGroup = ""`, which is close
+  to a scan.
+- `hack/relation-sizes.sh` counts rows per relation, so you can compare
+  revisions when you change rule shapes.
 
 ## Git
 

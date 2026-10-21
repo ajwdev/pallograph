@@ -20,9 +20,8 @@ to cluster-admin that neither reviewer could see.
 
 Datalog is a good fit for "follow every edge until nothing new shows up"
 (reachability over the permission graph). Z3 handles the questions where the
-search space is too big to enumerate, like "does any request exist that this
-principal can make but shouldn't?" Pallograph glues the two together behind a
-REPL.
+search space is too big to enumerate, like "is there any node this pod could
+ever be scheduled on?" Pallograph glues the two together behind a REPL.
 
 ## Quick start
 
@@ -38,12 +37,12 @@ Point the `prod` profile at a live cluster (it uses your current KUBECONFIG
 context) with `cargo run --bin pallograph -- --profile prod`.
 
 A short session, run against the small fixture: an inventory count, cluster-wide
-wildcard grants, who can reach cluster-admin (Z3), who can assume whose
+wildcard grants, who can reach cluster-admin, who can assume whose
 identity, and the derivation behind one of those answers.
 
 ```
 ?- k8s_object_count
-?- direct_perm(Who, "", "*", "*", "*")
+?- direct_perm(Who, Kind, "", "*", "*", /any, "*")
 \smt cluster-admin
 ?- controls_identity(P, Target)
 \why controls_identity("developer@example.com", "system:serviceaccount:kube-system:default")
@@ -63,11 +62,14 @@ you can see the chain of bindings and rules that produced a fact rather than
 just trust it.
 
 **Play what-if.** `+fact.` and `-fact.` add or retract facts, `\define` adds a
-rule, and `\source` loads a whole `.mg` file. Take a `\snapshot` first, then
-use `\diff` or `\access-diff` to see exactly which facts or RBAC permissions
-moved.
+rule, and `\source` loads a whole `.mg` file (its ground facts go in as
+facts, so `-` can retract them, and the rest as rules). Take a `\snapshot`
+first, then use `\diff` or `\access-diff` to see exactly which facts or RBAC
+permissions moved.
 
-**Ask the solver.** The `\smt` commands hand the question to Z3:
+**Check access and scheduling.** The RBAC `\smt` commands (`check_access`,
+`reaches`, `cluster-admin`) scan the grants the rules derive; the scheduling ones
+hand the question to Z3:
 
 | Command | Question |
 |---------|----------|
@@ -100,6 +102,8 @@ escalation and the REPL commands that catch it:
   that quietly grew `serviceaccounts/token create` months earlier.
 - [`karpenter-unschedulable`](examples/karpenter-unschedulable/): pods no
   NodePool can ever satisfy.
+- [`indirect-perm`](examples/indirect-perm/): rebuild the old `indirect_perm`
+  table, permissions borrowed through escalation, as a view.
 
 ## Configuration
 
@@ -125,12 +129,12 @@ Other flags worth knowing:
 
 ## How it works
 
-The rules live in [`rules/`](rules/) as plain Mangle files. `base.mg` and
-`rbac.mg` project raw objects into relations like `direct_perm/5`; `escalation.mg`
-models identity theft paths (exec into a pod, mint a token, impersonate);
-`labels.mg` implements label selectors; `summary.mg` does inventory counts.
-`build.rs` compiles every rule file at build time, so a broken rule fails
-`cargo build` instead of your demo.
+The rules live in [`rules/`](rules/) as plain Mangle files. `base.mg` projects
+raw objects into typed relations; the three `rbac*.mg` files model RBAC (see
+below); `escalation.mg` models identity theft paths (exec into a pod, mint a
+token, impersonate); `labels.mg` implements label selectors; `summary.mg` does
+inventory counts. `build.rs` compiles every rule file at build time, so a
+broken rule fails `cargo build` instead of your demo.
 
 There are two evaluation backends, and they must produce the same facts:
 
@@ -143,9 +147,69 @@ There are two evaluation backends, and they must produce the same facts:
   matters once the cluster gets big. Provenance is lazy and opt-in; see
   [`docs/lazy-provenance.md`](docs/lazy-provenance.md).
 
-RBAC correctness is checked against upstream Kubernetes itself: the Go program
-in [`tools/rbac-oracle/`](tools/rbac-oracle/) wraps the real RBAC authorizer
-and serves as the oracle for `tests/rbac_compat.rs`.
+### RBAC relations
+
+The RBAC rules are split by question, and each file's header lists its
+relations:
+
+- `rbac_roles.mg`: what a role grants. `role_rule` and `clusterrole_rule`
+  hold each role's PolicyRules (ClusterRole aggregation applied), and
+  `policy_rule_perm` / `policy_rule_url_perm` flatten one PolicyRule into
+  (apiGroup, resource, resourceName, verb) or (URL, verb) rows.
+- `rbac_subjects.mg`: who a binding applies to. `binding_subject` and
+  `binding_roleref` cover RoleBindings and ClusterRoleBindings alike, and
+  `principal_subject(Username, Kind, Name)` lists the subjects a user or
+  service account acts as: itself plus each of its groups.
+- `rbac.mg`: the joins. `direct_perm/7` and `direct_url_perm/4` hold each
+  binding subject's own grants, and `rbac_allowed` decides `access_request`
+  facts the way the kube-apiserver RBAC authorizer does.
+
+Subjects are kind-tagged (`/user`, `/group`, `/serviceaccount`), so a User
+and a Group with the same name stay distinct. Grants are stored once per
+binding subject rather than copied to every group member; to ask what a
+principal can do, join through its groups:
+
+```
+?- principal_subject("alice", Kind, Name), direct_perm(Name, Kind, Ns, G, R, N, V)
+```
+
+Wildcards (`*`) stay literal strings in these relations, and a resourceName
+of `/any` means any name (the rule lists no resourceNames). Escalation works the same way:
+`controls_identity` and `controls_group` say who reaches whom, and the
+permissions gained are joined on demand rather than stored.
+
+### RBAC compatibility harness
+
+`tests/rbac_compat.rs` checks `rbac_allowed` against upstream Kubernetes
+itself. The Go program in [`tools/rbac-oracle/`](tools/rbac-oracle/) loads a
+world of RBAC objects with the API server's defaulting, validation and
+ClusterRole aggregation, generates probe requests for it, and decides them
+with the real RBAC authorizer (the oracle). Pallograph decides the same
+requests on both backends, which must agree with each other exactly; every
+disagreement with the oracle is an over-grant or under-grant, bucketed by
+feature tag.
+
+- Curated worlds under `tests/rbac_compat/worlds/` each target a corner of
+  RBAC (resourceNames, nonResourceURLs, subresources, aggregation shapes,
+  subject kinds, the v1.37 bootstrap policy). `hack/rbac-compat-gen.sh`
+  generates their requests and decisions into `target/rbac-compat/`.
+- `tests/rbac_compat/baseline.json` is a ratchet of known mismatch counts
+  per world. Every entry is `{}`: each curated world matches the authorizer
+  exactly.
+- `hack/rbac-compat.sh -s SEED -n COUNT` is the fuzz tier: it generates
+  random worlds from a seed, decides them with the oracle, and reports
+  worlds whose mismatches the curated worlds do not cover.
+
+The authorizer never runs ClusterRole aggregation: it reads each role's
+stored rules, which the aggregation controller writes. Pallograph and the
+oracle recompute aggregated roles from their selectors, so a what-if change
+(`\load` a role labelled `aggregate-to-admin`) reaches `admin`. The
+exception is a role on an aggregation cycle. There, what the controller
+leaves depends on the order it visits the roles and on what they held
+before, so both take the role's stored rules as they are, which is exact
+for a cluster the controller has settled. Roles that aggregate a cycle role
+are still recomputed and get its stored rules. The
+`aggregation-cycle-own-rules` world pins these shapes.
 
 ## Development
 
@@ -158,8 +222,10 @@ nix develop .#ci -c hack/rbac-compat-gen.sh   # needed before rbac_compat tests
 nix develop .#ci -c cargo test --all-targets --locked
 ```
 
-`hack/` also has scripts for spinning up kind and KWOK clusters to test
-against. [`AGENTS.md`](AGENTS.md) covers repo conventions and known upstream
+`hack/relation-sizes.sh` counts the rows each RBAC and escalation relation
+derives for a rules directory and a set of manifests; use it to compare rule
+revisions, since row counts drive evaluation time and memory. `hack/` also
+has scripts for spinning up kind and KWOK clusters to test against. [`AGENTS.md`](AGENTS.md) covers repo conventions and known upstream
 Mangle bugs we deliberately work around rather than patch.
 
 ## Benchmarks
@@ -216,8 +282,9 @@ Important groups in that target:
 
 - `small_smt_access/load_access_model`: build the finite RBAC access model from
   a pre-evaluated store.
-- `small_smt_access/assert_rbac_axioms_z3`: build the optional Z3 RBAC model,
-  retained as a comparison/control path.
+- `small_smt_access/load_permission_tables`: build the permission tables
+  `\access-diff` compares, for one snapshot. Named `assert_rbac_axioms_z3`
+  before it stopped loading anything into Z3.
 - `small_smt_access/load_access_model_and_cluster_admin` and
   `small_smt_access/load_access_model_and_namespace_isolation`: include access
   model construction plus the query while excluding initial datasource/backend
@@ -246,7 +313,7 @@ samply record target/release/profile_smt_access --scenario cluster-admin --iters
 samply record target/release/profile_smt_access --scenario namespace-isolation --iters 1000
 ```
 
-Other scenarios include `load-access-model`, `encode-z3`, and
+Other scenarios include `load-access-model`, `load-permission-tables`, and
 `direct-cluster-admin`.
 
 ## License

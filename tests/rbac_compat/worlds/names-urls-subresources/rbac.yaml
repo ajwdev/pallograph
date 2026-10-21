@@ -1,0 +1,185 @@
+# Matching edge cases in resourceNames, nonResourceURLs and resources, where
+# the obvious reading of a rule is not what the authorizer does. Each object
+# says which case it covers; TestNamesURLsSubresourcesDecisions in
+# tools/rbac-oracle pins the decisions.
+
+# resourceNames: [] is present but empty, and grants every name, the same
+# as leaving the field out.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: any-configmap
+  namespace: team-a
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: []
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alice-any-configmap
+  namespace: team-a
+subjects:
+- kind: User
+  name: alice
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: any-configmap
+---
+# resourceNames: ["*"] is not a wildcard: it grants only the Secret
+# literally named "*".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: star-named-secret
+  namespace: team-a
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["*"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bob-star-named-secret
+  namespace: team-a
+subjects:
+- kind: User
+  name: bob
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: star-named-secret
+---
+# resourceNames: [""] is the literal empty name, not "any name": it grants
+# only requests that name no object, such as list and create.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: empty-named-pod
+  namespace: team-a
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  resourceNames: [""]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: frank-empty-named-pod
+  namespace: team-a
+subjects:
+- kind: User
+  name: frank
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: empty-named-pod
+---
+# "*/scale" matches the scale subresource of any resource (but not the
+# resource itself); "pods/*" only matches the literal subresource "*".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: subresource-shapes
+rules:
+- apiGroups: ["", "apps"]
+  resources: ["*/scale"]
+  verbs: ["get", "update"]
+- apiGroups: [""]
+  resources: ["pods/*"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: carol-subresource-shapes
+subjects:
+- kind: User
+  name: carol
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: subresource-shapes
+---
+# nonResourceURLs. The authorizer treats a URL as a prefix only when it
+# ends in "*", and then strips every trailing "*": "/double/**" is the
+# prefix "/double/". A "*" anywhere else is a literal character, so
+# "/foo/*/bar" matches only itself, and "/logs/*/tail/*" is the prefix
+# "/logs/*/tail/" with a literal "*" in it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: url-shapes
+rules:
+- nonResourceURLs: ["/healthz", "/debug/*", "/double/**", "/foo/*/bar", "/logs/*/tail/*"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: url-readers-url-shapes
+subjects:
+- kind: Group
+  name: url-readers
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: url-shapes
+---
+# nonResourceURLs: ["*"] matches every path.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: url-everything
+rules:
+- nonResourceURLs: ["*"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dave-url-everything
+subjects:
+- kind: User
+  name: dave
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: url-everything
+---
+# A RoleBinding to a ClusterRole with URL rules grants nothing: non-resource
+# requests have no namespace, and the authorizer only applies RoleBindings
+# to requests in their namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: url-via-rolebinding
+rules:
+- nonResourceURLs: ["/metrics", "/version/*"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: erin-url-via-rolebinding
+  namespace: team-a
+subjects:
+- kind: User
+  name: erin
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: url-via-rolebinding

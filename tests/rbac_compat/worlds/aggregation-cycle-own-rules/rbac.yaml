@@ -1,0 +1,231 @@
+# ClusterRole aggregation cycles where roles have rules of their own.
+# First minimised from fuzz worlds fuzz-1-001 and fuzz-1-008.
+#
+# The clusterrole-aggregation controller replaces an aggregated role's own
+# rules with its sources' rules. On a cycle, what it leaves depends on the
+# order it visits roles and on what the roles held before:
+# TestAggregationCycleVisitOrder in tools/rbac-oracle shows two orders
+# disagreeing. So neither Pallograph (rules/rbac_roles.mg) nor the oracle
+# recomputes a role on a cycle. Its rules are taken as stored, as in a
+# snapshot of a cluster the controller has settled, and the rules written
+# below play that part. Roles off a cycle are still recomputed, and a role
+# that aggregates a cycle role gets the cycle role's stored rules.
+# TestAggregationCycleOwnRulesDecisions pins the oracle's decisions.
+
+# Two-role cycle: cycle-a and cycle-b select each other. Each keeps its
+# stored rule and gets nothing from the other, so alice has secrets only
+# and bob configmaps only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cycle-a
+  labels:
+    aggregation-cycle.pallograph.dev/a: "true"
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-cycle.pallograph.dev/b: "true"
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cycle-b
+  labels:
+    aggregation-cycle.pallograph.dev/b: "true"
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-cycle.pallograph.dev/a: "true"
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alice-cycle-a
+subjects:
+- kind: User
+  name: alice
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cycle-a
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bob-cycle-b
+subjects:
+- kind: User
+  name: bob
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cycle-b
+---
+# A cycle feeding an acyclic aggregator: cycle-reader selects cycle-a, is
+# not on the cycle, and so is recomputed. It gets cycle-a's stored secrets
+# rule, loses its own nodes rule, and does not get cycle-b's configmaps
+# rule through cycle-a.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cycle-reader
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-cycle.pallograph.dev/a: "true"
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: erin-cycle-reader
+subjects:
+- kind: User
+  name: erin
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cycle-reader
+---
+# A cycle with an acyclic chain below it: leak-cycle-a and leak-cycle-b
+# select each other, and leak-cycle-a also selects leak-middle, which
+# aggregates leak-bottom. leak-cycle-a's stored rules hold the pods rule it
+# picked up from below; leak-cycle-b's stored rules are empty. leak-middle
+# is not on the cycle, so it is recomputed: pods replace its own services
+# rule.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: leak-cycle-a
+  labels:
+    aggregation-cycle.pallograph.dev/leak-a: "true"
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-cycle.pallograph.dev/leak-b: "true"
+  - matchLabels:
+      aggregation-cycle.pallograph.dev/leak-middle: "true"
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: leak-cycle-b
+  labels:
+    aggregation-cycle.pallograph.dev/leak-b: "true"
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-cycle.pallograph.dev/leak-a: "true"
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: leak-middle
+  labels:
+    aggregation-cycle.pallograph.dev/leak-middle: "true"
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-cycle.pallograph.dev/leak-bottom: "true"
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: leak-bottom
+  labels:
+    aggregation-cycle.pallograph.dev/leak-bottom: "true"
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+---
+# An acyclic aggregator of a cycle role whose stored rules are empty: the
+# aggregation finds no rules, so empty-cycle-reader keeps its own nodes
+# rule, even though leak-cycle-b's partner leak-cycle-a has rules.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: empty-cycle-reader
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-cycle.pallograph.dev/leak-b: "true"
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: grace-leak-cycle-a
+subjects:
+- kind: User
+  name: grace
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: leak-cycle-a
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: carol-leak-cycle-b
+subjects:
+- kind: User
+  name: carol
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: leak-cycle-b
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dave-leak-middle
+subjects:
+- kind: User
+  name: dave
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: leak-middle
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: frank-empty-cycle-reader
+subjects:
+- kind: User
+  name: frank
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: empty-cycle-reader

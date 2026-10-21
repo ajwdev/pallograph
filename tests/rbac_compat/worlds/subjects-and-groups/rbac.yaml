@@ -1,0 +1,138 @@
+# Who a binding applies to. Users and groups are separate namespaces, and
+# service accounts get groups from their username alone, with no binding
+# naming them. TestSubjectsAndGroupsDecisions in tools/rbac-oracle pins the
+# decisions.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pod-reader
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: secret-reader
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+---
+# User "ops" and Group "ops" are different subjects: the user reads pods,
+# members of the group read secrets, and neither gets the other's grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: user-ops-pod-reader
+subjects:
+- kind: User
+  name: ops
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pod-reader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: group-ops-secret-reader
+subjects:
+- kind: Group
+  name: ops
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: secret-reader
+---
+# Every service account in team-a, via system:serviceaccounts:team-a.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: configmap-reader
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: team-a-serviceaccounts-configmap-reader
+subjects:
+- kind: Group
+  name: system:serviceaccounts:team-a
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: configmap-reader
+---
+# Every service account in any namespace, via system:serviceaccounts, but
+# only in team-b.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: service-reader
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: all-serviceaccounts-service-reader
+  namespace: team-b
+subjects:
+- kind: Group
+  name: system:serviceaccounts
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: service-reader
+---
+# Everyone authenticated, service accounts included, via
+# system:authenticated. system:anonymous is not authenticated.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: namespace-lister
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: authenticated-namespace-lister
+subjects:
+- kind: Group
+  name: system:authenticated
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: namespace-lister
+---
+# A RoleBinding naming a service account from another namespace: it
+# grants that account, in the binding's namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: team-b-builder-pod-reader
+  namespace: team-a
+subjects:
+- kind: ServiceAccount
+  name: builder
+  namespace: team-b
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pod-reader

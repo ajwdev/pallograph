@@ -116,22 +116,8 @@ func evalWorld(dir string) error {
 	}
 
 	oracle := NewOracle(world)
-	for _, counterfactual := range []struct {
-		tag      string
-		variant  worldVariant
-		fallback bool
-	}{
-		{"denied-by-resource-names", withoutResourceNames, false},
-		{"denied-by-aggregation-replacing-rules", aggregationKeepsOwnRules, false},
-		// A rule that has resourceNames and is also discarded by
-		// aggregation needs both.
-		{"denied-by-resource-names-and-aggregation", withoutResourceNames | aggregationKeepsOwnRules, true},
-	} {
-		variantWorld, err := loadWorld(dir, counterfactual.variant)
-		if err != nil {
-			return err
-		}
-		oracle.AddCounterfactual(counterfactual.tag, variantWorld, counterfactual.fallback)
+	if err := addCounterfactuals(oracle, dir); err != nil {
+		return err
 	}
 
 	start := time.Now()
@@ -152,5 +138,32 @@ func evalWorld(dir string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "%s: %d requests, %d allowed, %v\n", dir, len(requests), allowed, elapsed.Round(time.Millisecond))
+	return nil
+}
+
+// counterfactuals are the world variants evalWorld explains denials with,
+// in the order they are consulted.
+var counterfactuals = []struct {
+	tag      string
+	variant  worldVariant
+	fallback bool
+}{
+	{"denied-by-resource-names", withoutResourceNames, false},
+	{"denied-by-aggregation-replacing-rules", aggregationKeepsOwnRules, false},
+	// A rule that has resourceNames and is also discarded by aggregation
+	// needs both.
+	{"denied-by-resource-names-and-aggregation", withoutResourceNames | aggregationKeepsOwnRules, true},
+}
+
+// addCounterfactuals loads each counterfactual variant of the world in dir
+// into oracle.
+func addCounterfactuals(oracle *Oracle, dir string) error {
+	for _, counterfactual := range counterfactuals {
+		variantWorld, err := loadWorld(dir, counterfactual.variant)
+		if err != nil {
+			return err
+		}
+		oracle.AddCounterfactual(counterfactual.tag, variantWorld, counterfactual.fallback)
+	}
 	return nil
 }

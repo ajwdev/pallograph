@@ -1,0 +1,251 @@
+# ClusterRole aggregation shapes beyond one aggregator and one source. The
+# controller replaces an aggregated role's own rules with its sources'
+# rules, unless the sources have none, in which case the own rules stay
+# (see aggregation-without-sources). TestAggregationShapesDecisions in
+# tools/rbac-oracle pins the decisions.
+#
+# Roles on an aggregation cycle are not recomputed: their rules are taken
+# as stored (see aggregation-cycle-own-rules).
+
+# Chain: chain-top aggregates chain-middle, which aggregates chain-bottom.
+# Both upper roles lose their own rules, so alice and bob get services
+# only, and alice does not get chain-middle's own secrets rule.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: chain-top
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-shapes.pallograph.dev/chain-middle: "true"
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: chain-middle
+  labels:
+    aggregation-shapes.pallograph.dev/chain-middle: "true"
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-shapes.pallograph.dev/chain-bottom: "true"
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: chain-bottom
+  labels:
+    aggregation-shapes.pallograph.dev/chain-bottom: "true"
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alice-chain-top
+subjects:
+- kind: User
+  name: alice
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: chain-top
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bob-chain-middle
+  namespace: team-a
+subjects:
+- kind: User
+  name: bob
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: chain-middle
+---
+# Cycle: cycle-a and cycle-b each select the other (and cycle-source) by a
+# shared label. Their rules are written as the controller leaves them,
+# cycle-source's endpoints rule, and taken as stored.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cycle-a
+  labels:
+    aggregation-shapes.pallograph.dev/cycle: "true"
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-shapes.pallograph.dev/cycle: "true"
+rules:
+- apiGroups: [""]
+  resources: ["endpoints"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cycle-b
+  labels:
+    aggregation-shapes.pallograph.dev/cycle: "true"
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-shapes.pallograph.dev/cycle: "true"
+rules:
+- apiGroups: [""]
+  resources: ["endpoints"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cycle-source
+  labels:
+    aggregation-shapes.pallograph.dev/cycle: "true"
+rules:
+- apiGroups: [""]
+  resources: ["endpoints"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: carol-cycle-a
+subjects:
+- kind: User
+  name: carol
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cycle-a
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dave-cycle-b
+subjects:
+- kind: User
+  name: dave
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cycle-b
+---
+# A selector that matches only a role without rules: the aggregated rule
+# list is empty, so matches-ruleless keeps its own rules.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: matches-ruleless
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-shapes.pallograph.dev/ruleless: "true"
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ruleless
+  labels:
+    aggregation-shapes.pallograph.dev/ruleless: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: erin-matches-ruleless
+subjects:
+- kind: User
+  name: erin
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: matches-ruleless
+---
+# Aggregating a role that kept its own rules: keeps-own selects nothing, so
+# it keeps its pods rule, and from-keeps-own picks that rule up.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: keeps-own
+  labels:
+    aggregation-shapes.pallograph.dev/keeps-own: "true"
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-shapes.pallograph.dev/nothing-has-this: "true"
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: from-keeps-own
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-shapes.pallograph.dev/keeps-own: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: frank-from-keeps-own
+subjects:
+- kind: User
+  name: frank
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: from-keeps-own
+---
+# Several selectors: their matches are unioned, and one that matches
+# nothing does not stop the other from replacing the own rules.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: two-selectors
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      aggregation-shapes.pallograph.dev/nothing-has-this: "true"
+  - matchLabels:
+      aggregation-shapes.pallograph.dev/chain-bottom: "true"
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: grace-two-selectors
+subjects:
+- kind: User
+  name: grace
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: two-selectors

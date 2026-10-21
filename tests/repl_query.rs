@@ -3,7 +3,8 @@
 
 //! Drives the built binary over the small fixture to check the REPL's
 //! `?-` query UX: tuple listing, output formats, unknown-relation hints and
-//! the hint printed for input that is not a command.
+//! the hint printed for input that is not a command, and `\source` of the
+//! example scenarios on both backends.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -13,6 +14,11 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 /// Run a REPL session and return (stdout, stderr).
 fn run_session(commands: &str) -> (String, String) {
+    run_session_with(&[], commands)
+}
+
+/// Like [`run_session`], with extra command-line arguments.
+fn run_session_with(args: &[&str], commands: &str) -> (String, String) {
     // Unique per call: tests run in parallel threads of one process.
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir =
@@ -38,6 +44,7 @@ fn run_session(commands: &str) -> (String, String) {
         .arg("-C")
         .arg(&config)
         .args(["--profile", "dev"])
+        .args(args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -65,7 +72,7 @@ fn default_listing_names_columns() {
     let (stdout, _) = run_session(&format!("{ADMIN}\n::quit\n"));
     assert!(
         stdout.contains(
-            r#"Principal = "admin@example.com", Namespace = "", ApiGroup = "*", Resource = "*", Verb = "*""#
+            r#"Principal = "admin@example.com", Kind = /user, Namespace = "", ApiGroup = "*", Resource = "*", ResourceName = /any, Verb = "*""#
         ),
         "stdout: {stdout}"
     );
@@ -75,7 +82,7 @@ fn default_listing_names_columns() {
 fn compact_format_prints_tuples() {
     let (stdout, _) = run_session(&format!("\\format compact\n{ADMIN}\n::quit\n"));
     assert!(
-        stdout.contains(r#"direct_perm("admin@example.com", "", "*", "*", "*")"#),
+        stdout.contains(r#"direct_perm("admin@example.com", /user, "", "*", "*", /any, "*")"#),
         "stdout: {stdout}"
     );
     assert!(!stdout.contains("Principal ="), "stdout: {stdout}");
@@ -110,10 +117,11 @@ fn unknown_relation_suggests_near_names() {
 
 #[test]
 fn too_many_arguments_is_an_error() {
-    let (stdout, stderr) =
-        run_session("?- direct_perm(\"a\", \"b\", \"c\", \"d\", \"e\", \"f\")\n::quit\n");
+    let (stdout, stderr) = run_session(
+        "?- direct_perm(\"a\", \"b\", \"c\", \"d\", \"e\", \"f\", \"g\", \"h\")\n::quit\n",
+    );
     assert!(
-        stderr.contains("direct_perm has 5 columns, got 6 arguments."),
+        stderr.contains("direct_perm has 7 columns, got 8 arguments."),
         "stderr: {stderr}"
     );
     assert!(!stdout.contains("Principal ="), "stdout: {stdout}");
@@ -137,4 +145,43 @@ fn bare_predicate_line_prints_hint() {
         "stderr: {stderr}"
     );
     assert!(!stdout.contains("direct_perm("), "stdout: {stdout}");
+}
+
+/// The example scenarios hold struct-valued `role_rule` facts, which the DD
+/// backend could not evaluate as bodiless rules. Sourced as facts, both
+/// backends must agree on who alice can become.
+#[test]
+fn sourced_examples_match_across_backends() {
+    let examples = [
+        "examples/exec-escalation/alice-exec.mg",
+        "examples/token-escalation/alice-sa-token.mg",
+        "examples/two-hop-escalation/alice-twohop.mg",
+        "examples/hidden-clusterrole/hidden-clusterrole.mg",
+    ];
+    for example in examples {
+        let commands = format!(
+            "\\source {example}\n\\format compact\n?- controls_identity(\"alice\", T)\n::quit\n"
+        );
+        let results = ["interpreter", "dd"].map(|backend| {
+            let (stdout, stderr) = run_session_with(&["--backend", backend], &commands);
+            assert!(
+                stderr.contains("Sourced and evaluated."),
+                "{example} on {backend}: {stderr}"
+            );
+            let mut rows: Vec<String> = stdout
+                .lines()
+                .filter(|line| line.starts_with("  T = "))
+                .map(str::to_string)
+                .collect();
+            // The backends list rows in different orders.
+            rows.sort();
+            rows
+        });
+        assert!(
+            results[0].contains(&r#"  T = "system:serviceaccount:kube-system:default""#.into()),
+            "{example}: {:?}",
+            results[0]
+        );
+        assert_eq!(results[0], results[1], "{example}");
+    }
 }

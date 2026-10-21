@@ -8,7 +8,7 @@
 //! ```text
 //! cargo build --release --bin profile_smt_access
 //! samply record target/release/profile_smt_access --scenario cluster-admin --iters 1000
-//! samply record target/release/profile_smt_access --scenario encode-z3 --iters 100
+//! samply record target/release/profile_smt_access --scenario load-permission-tables --iters 100
 //! ```
 
 use std::hint::black_box;
@@ -31,8 +31,8 @@ enum Fixture {
 enum Scenario {
     /// Build the RBAC access model used by cluster-admin/access checks.
     LoadAccessModel,
-    /// Build the full Z3 RecFuncDecl model, for comparison and diff users.
-    EncodeZ3,
+    /// Build the permission tables `\access-diff` compares, for one snapshot.
+    LoadPermissionTables,
     /// Enumerate principals with a direct cluster-admin grant.
     DirectClusterAdmin,
     /// Enumerate escalation-aware cluster-admin reachability.
@@ -75,9 +75,9 @@ fn access_model(store: &EvalStore, include_builtins: bool) -> RbacAccessModel {
     model
 }
 
-fn z3_encoder<'ctx>(ctx: &'ctx z3::Context, store: &EvalStore) -> SmtEncoder<'ctx> {
+fn permission_tables<'ctx>(ctx: &'ctx z3::Context, store: &EvalStore) -> SmtEncoder<'ctx> {
     let mut enc = SmtEncoder::new(ctx);
-    enc.assert_rbac_axioms(store);
+    enc.load_rbac_tables(store);
     enc
 }
 
@@ -92,15 +92,19 @@ fn main() {
         Scenario::LoadAccessModel => {
             for _ in 0..args.iters {
                 let model = access_model(&store, args.include_builtins);
-                total += black_box(model.direct_permissions.len());
+                total += black_box(model.grant_count());
             }
         }
-        Scenario::EncodeZ3 => {
+        Scenario::LoadPermissionTables => {
             for _ in 0..args.iters {
                 let cfg = z3::Config::new();
                 let ctx = z3::Context::new(&cfg);
-                let enc = z3_encoder(&ctx, &store);
-                total += black_box(enc.can_entries.get("").map_or(0, Vec::len));
+                let enc = permission_tables(&ctx, &store);
+                total += black_box(
+                    enc.permission_tables
+                        .get("")
+                        .map_or(0, |tables| tables.grant_count()),
+                );
             }
         }
         Scenario::DirectClusterAdmin => {

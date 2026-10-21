@@ -304,13 +304,16 @@ fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str
 ///
 /// The sel_obj_candidate Case 2 rule in labels.mg (Namespace="") then pairs these
 /// selectors against all cluster-scoped objects, which includes ClusterRoles.
-/// The aggregation rule in rbac.mg pins the object to "rbac.authorization.k8s.io/v1"
-/// / "ClusterRole" / "" to extract SourceCR from the matches.
+/// The aggregation rule in rbac_roles.mg pins the object to
+/// "rbac.authorization.k8s.io/v1" / "ClusterRole" / "" to extract the source
+/// ClusterRole from the matches.
 ///
-/// Note: an empty clusterRoleSelector (no matchLabels, no matchExpressions) produces
-/// no requirements, so selector_has_requirements is false and it matches nothing —
-/// fail-closed behavior. This is safer for security analysis than the K8s controller
-/// behavior (which treats an empty selector as "match all").
+/// An empty selector (`{}` or `{matchLabels: {}}`) matches every ClusterRole in
+/// Kubernetes, and selector_matches cannot see a selector without requirements,
+/// so such an entry gets a `clusterrole_aggregation_empty_selector(Name, Index)`
+/// fact instead. Only a selector with no matchLabels entries and no
+/// matchExpressions gets it: one whose requirements could not be encoded emits
+/// nothing and matches no ClusterRole (see `emit_selector_requirements`).
 fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Json) {
     let selectors = data
         .get("aggregationRule")
@@ -325,7 +328,17 @@ fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Js
             Value::String(i.to_string()),
             Value::String(name.to_string()),
         ];
-        emit_selector_requirements(store, owner, selector);
+        let description = format!("ClusterRole {name} clusterRoleSelectors[{i}]");
+        if emit_selector_requirements(store, owner, selector, &description) == SelectorFacts::Empty
+        {
+            store.add_fact(
+                "clusterrole_aggregation_empty_selector",
+                vec![
+                    Value::String(name.to_string()),
+                    Value::String(i.to_string()),
+                ],
+            );
+        }
     }
 }
 
@@ -365,6 +378,17 @@ pub fn expression_facts(owner: &[Value], expr: &Expression) -> Vec<(&'static str
 
 // ---- label and selector extraction ----
 
+/// What `emit_selector_requirements` made of one selector.
+#[derive(Debug, PartialEq, Eq)]
+enum SelectorFacts {
+    /// No requirements at all: in Kubernetes the selector matches everything.
+    Empty,
+    /// Every requirement was emitted.
+    Requirements,
+    /// Some requirement could not be encoded, so nothing was emitted.
+    Unencodable,
+}
+
 /// Emit selector requirements (matchLabels and matchExpressions) as EDB facts.
 ///
 /// The `owner` slice must be exactly four Values:
@@ -378,79 +402,125 @@ pub fn expression_facts(owner: &[Value], expr: &Expression) -> Vec<(&'static str
 /// These feed the selector_matches/8 engine in labels.mg, which implements
 /// AND semantics (all requirements within one selector must hold) via the
 /// *_unsatisfied negation pattern.
-fn emit_selector_requirements(store: &mut MemStore, owner: Vec<Value>, selector: &Json) {
-    let match_labels = selector.get("matchLabels").and_then(|v| v.as_object());
-    let match_exprs = selector.get("matchExpressions").and_then(|v| v.as_array());
-
-    if let Some(ml) = match_labels {
-        for (k, v) in ml {
-            if let Json::String(vs) = v {
-                let mut args = owner.clone();
-                args.push(Value::String(k.clone()));
-                args.push(Value::String(vs.clone()));
-                store.add_fact("selector_match_label", args);
+///
+/// Dropping one requirement would make the selector match more objects than
+/// it does in Kubernetes, and dropping all of them could make it look empty,
+/// which for an aggregation selector means every ClusterRole. So when any
+/// requirement cannot be encoded (an unknown operator, a non-string value, a
+/// missing key, In or NotIn without values), nothing is emitted, a warning
+/// naming `description` is printed, and the selector matches nothing.
+fn emit_selector_requirements(
+    store: &mut MemStore,
+    owner: Vec<Value>,
+    selector: &Json,
+    description: &str,
+) -> SelectorFacts {
+    match selector_requirement_facts(&owner, selector) {
+        Ok(facts) if facts.is_empty() => SelectorFacts::Empty,
+        Ok(facts) => {
+            for (relation, args) in facts {
+                store.add_fact(relation, args);
             }
+            SelectorFacts::Requirements
+        }
+        Err(reason) => {
+            eprintln!("warning: {description}: {reason}; the selector will match nothing");
+            SelectorFacts::Unencodable
         }
     }
+}
 
-    if let Some(exprs) = match_exprs {
-        for expr in exprs {
-            let key = match expr.get("key").and_then(|v| v.as_str()) {
-                Some(k) => k,
-                None => continue,
-            };
-            let op = expr.get("operator").and_then(|v| v.as_str()).unwrap_or("");
-            let values = expr.get("values").and_then(|v| v.as_array());
-            match op {
-                "In" => {
-                    for v in values.into_iter().flatten() {
-                        if let Json::String(vs) = v {
-                            let mut args = owner.clone();
-                            args.push(Value::String(key.into()));
-                            args.push(Value::String(vs.clone()));
-                            store.add_fact("selector_expr_in", args);
-                        }
-                    }
-                }
-                "NotIn" => {
-                    for v in values.into_iter().flatten() {
-                        if let Json::String(vs) = v {
-                            let mut args = owner.clone();
-                            args.push(Value::String(key.into()));
-                            args.push(Value::String(vs.clone()));
-                            store.add_fact("selector_expr_notin", args);
-                        }
-                    }
-                }
-                "Exists" => {
-                    let mut args = owner.clone();
-                    args.push(Value::String(key.into()));
-                    store.add_fact("selector_expr_exists", args);
-                }
-                "DoesNotExist" => {
-                    let mut args = owner.clone();
-                    args.push(Value::String(key.into()));
-                    store.add_fact("selector_expr_notexists", args);
-                }
-                _ => {}
-            }
-        }
-    }
+/// The facts for every requirement of `selector`, or why one of them cannot
+/// be encoded.
+fn selector_requirement_facts(
+    owner: &[Value],
+    selector: &Json,
+) -> Result<Vec<(&'static str, Vec<Value>)>, String> {
+    let fact = |relation: &'static str, extra: &[&str]| {
+        let mut args = owner.to_vec();
+        args.extend(extra.iter().map(|e| Value::String((*e).to_string())));
+        (relation, args)
+    };
+    let string = |value: &Json, what: &str| -> Result<String, String> {
+        value
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| format!("{what} {value} is not a string"))
+    };
+
+    let selector = match selector {
+        Json::Null => return Ok(vec![]),
+        Json::Object(map) => map,
+        other => return Err(format!("selector {other} is not an object")),
+    };
+    let mut facts = Vec::new();
 
     // Flat selector (Service-style: no matchLabels/matchExpressions) → matchLabels
-    if match_labels.is_none()
-        && match_exprs.is_none()
-        && let Some(flat) = selector.as_object()
-    {
-        for (k, v) in flat {
-            if let Json::String(vs) = v {
-                let mut args = owner.clone();
-                args.push(Value::String(k.clone()));
-                args.push(Value::String(vs.clone()));
-                store.add_fact("selector_match_label", args);
+    if !selector.contains_key("matchLabels") && !selector.contains_key("matchExpressions") {
+        for (key, value) in selector {
+            let value = string(value, &format!("label {key} value"))?;
+            facts.push(fact("selector_match_label", &[key, &value]));
+        }
+        return Ok(facts);
+    }
+
+    match selector.get("matchLabels") {
+        None | Some(Json::Null) => {}
+        Some(Json::Object(labels)) => {
+            for (key, value) in labels {
+                let value = string(value, &format!("matchLabels {key} value"))?;
+                facts.push(fact("selector_match_label", &[key, &value]));
             }
         }
+        Some(other) => return Err(format!("matchLabels {other} is not an object")),
     }
+
+    let expressions: &[Json] = match selector.get("matchExpressions") {
+        None | Some(Json::Null) => &[],
+        Some(Json::Array(expressions)) => expressions,
+        Some(other) => return Err(format!("matchExpressions {other} is not a list")),
+    };
+    for expression in expressions {
+        let key = match expression.get("key") {
+            Some(key) => string(key, "matchExpressions key")?,
+            None => return Err(format!("matchExpressions entry {expression} has no key")),
+        };
+        let operator = match expression.get("operator") {
+            Some(operator) => string(operator, "matchExpressions operator")?,
+            None => {
+                return Err(format!(
+                    "matchExpressions entry {expression} has no operator"
+                ));
+            }
+        };
+        let values = || -> Result<Vec<String>, String> {
+            let values = expression
+                .get("values")
+                .and_then(Json::as_array)
+                .filter(|values| !values.is_empty())
+                .ok_or_else(|| format!("{operator} on {key} has no values"))?;
+            values
+                .iter()
+                .map(|value| string(value, &format!("{operator} on {key} value")))
+                .collect()
+        };
+        match operator.as_str() {
+            "In" => {
+                for value in values()? {
+                    facts.push(fact("selector_expr_in", &[&key, &value]));
+                }
+            }
+            "NotIn" => {
+                for value in values()? {
+                    facts.push(fact("selector_expr_notin", &[&key, &value]));
+                }
+            }
+            "Exists" => facts.push(fact("selector_expr_exists", &[&key])),
+            "DoesNotExist" => facts.push(fact("selector_expr_notexists", &[&key])),
+            _ => return Err(format!("unknown matchExpressions operator {operator:?}")),
+        }
+    }
+    Ok(facts)
 }
 
 fn extract_labels_and_selectors(
@@ -483,7 +553,12 @@ fn extract_labels_and_selectors(
     let Some(selector) = data.get("spec").and_then(|s| s.get("selector")) else {
         return;
     };
-    emit_selector_requirements(store, owner, selector);
+    let description = if namespace.is_empty() {
+        format!("{kind} {name} spec.selector")
+    } else {
+        format!("{kind} {namespace}/{name} spec.selector")
+    };
+    emit_selector_requirements(store, owner, selector, &description);
 }
 
 fn extract_pod_scheduling(store: &mut MemStore, namespace: &str, name: &str, data: &Json) {
@@ -724,6 +799,28 @@ mod tests {
         );
     }
 
+    /// The (ApiGroup, Resource, ResourceName, Verb) rows `role` grants after
+    /// aggregation: clusterrole_rule joined with policy_rule_perm, the join
+    /// rules/rbac_roles.mg describes. One entry per joined row, so a
+    /// duplicate would show up twice.
+    fn clusterrole_perms(result: &crate::engine::EvalStore, role: &str) -> Vec<Vec<Value>> {
+        let role = Value::String(role.into());
+        let rules = result.scan("clusterrole_rule");
+        let perms = result.scan("policy_rule_perm");
+        rules
+            .iter()
+            .filter(|rule_row| rule_row[0] == role)
+            .flat_map(|rule_row| {
+                perms
+                    .iter()
+                    .filter(move |perm_row| perm_row[0] == rule_row[1])
+                    .map(|perm_row| perm_row[1..].to_vec())
+            })
+            .collect()
+    }
+
+    /// True if `role` grants `verb` on `resource` in `apigroup` for any object
+    /// name (ResourceName /any), after aggregation.
     fn has_clusterrole_perm(
         result: &crate::engine::EvalStore,
         role: &str,
@@ -731,14 +828,12 @@ mod tests {
         resource: &str,
         verb: &str,
     ) -> bool {
-        result.scan("clusterrole_perm").iter().any(|row| {
-            row == &vec![
-                Value::String(role.into()),
-                Value::String(apigroup.into()),
-                Value::String(resource.into()),
-                Value::String(verb.into()),
-            ]
-        })
+        clusterrole_perms(result, role).contains(&vec![
+            Value::String(apigroup.into()),
+            Value::String(resource.into()),
+            Value::Name("/any".into()),
+            Value::String(verb.into()),
+        ])
     }
 
     // AND semantics: all matchLabels within one selector must be satisfied.
@@ -951,18 +1046,267 @@ mod tests {
         let result = engine_from_store(store).evaluate().unwrap();
 
         // Datalog relations are sets: duplicate derivations collapse.
-        let count = result
-            .scan("clusterrole_perm")
+        let count = clusterrole_perms(&result, "my-agg")
             .iter()
-            .filter(|row| {
-                row.len() == 4
-                    && row[0] == Value::String("my-agg".into())
-                    && row[3] == Value::String("get".into())
-            })
+            .filter(|row| row[3] == Value::String("get".into()))
             .count();
         assert_eq!(
             count, 1,
             "duplicate derivation paths must collapse to a single fact"
+        );
+    }
+
+    // Replace semantics: when aggregation yields rules, they replace the
+    // aggregating role's own rules, as the aggregation controller does.
+    #[test]
+    fn aggregation_replaces_own_rules() {
+        let mut store = MemStore::new();
+
+        let obj: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": { "name": "my-agg" },
+            "aggregationRule": {
+                "clusterRoleSelectors": [{"matchLabels": {"agg-to-me": "true"}}]
+            },
+            "rules": [
+                {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}
+            ]
+        }))
+        .unwrap();
+        add_object(
+            &mut store,
+            &obj,
+            Some(("rbac.authorization.k8s.io/v1", "ClusterRole")),
+        );
+        add_clusterrole(
+            &mut store,
+            "src-cr",
+            json!({"agg-to-me": "true"}),
+            json!([
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+            ]),
+        );
+
+        let result = engine_from_store(store).evaluate().unwrap();
+
+        assert!(has_clusterrole_perm(&result, "my-agg", "", "pods", "get"));
+        assert!(
+            !has_clusterrole_perm(&result, "my-agg", "", "secrets", "get"),
+            "own rules are replaced when aggregation yields rules"
+        );
+    }
+
+    // When no matching role has rules, the aggregating role keeps its own.
+    #[test]
+    fn aggregation_without_source_rules_keeps_own_rules() {
+        let mut store = MemStore::new();
+
+        let obj: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": { "name": "my-agg" },
+            "aggregationRule": {
+                "clusterRoleSelectors": [{"matchLabels": {"agg-to-me": "true"}}]
+            },
+            "rules": [
+                {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}
+            ]
+        }))
+        .unwrap();
+        add_object(
+            &mut store,
+            &obj,
+            Some(("rbac.authorization.k8s.io/v1", "ClusterRole")),
+        );
+        add_clusterrole(
+            &mut store,
+            "empty-src",
+            json!({"agg-to-me": "true"}),
+            json!([]),
+        );
+
+        let result = engine_from_store(store).evaluate().unwrap();
+
+        assert!(has_clusterrole_perm(
+            &result, "my-agg", "", "secrets", "get"
+        ));
+    }
+
+    // Chained aggregation: a source that is itself aggregated contributes its
+    // aggregated rules, not its own.
+    #[test]
+    fn aggregation_chains_through_aggregated_sources() {
+        let mut store = MemStore::new();
+
+        add_aggregating_clusterrole(
+            &mut store,
+            "top",
+            json!([{"matchLabels": {"to-top": "true"}}]),
+        );
+        let middle: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": { "name": "middle", "labels": {"to-top": "true"} },
+            "aggregationRule": {
+                "clusterRoleSelectors": [{"matchLabels": {"to-middle": "true"}}]
+            },
+            "rules": [
+                {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}
+            ]
+        }))
+        .unwrap();
+        add_object(
+            &mut store,
+            &middle,
+            Some(("rbac.authorization.k8s.io/v1", "ClusterRole")),
+        );
+        add_clusterrole(
+            &mut store,
+            "leaf",
+            json!({"to-middle": "true"}),
+            json!([
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+            ]),
+        );
+
+        let result = engine_from_store(store).evaluate().unwrap();
+
+        assert!(has_clusterrole_perm(&result, "top", "", "pods", "get"));
+        assert!(!has_clusterrole_perm(&result, "top", "", "secrets", "get"));
+    }
+
+    // An empty selector, {} or {matchLabels: {}}, matches every ClusterRole
+    // except the aggregating role itself.
+    #[test]
+    fn aggregation_empty_selector_matches_every_clusterrole() {
+        for selector in [
+            json!({}),
+            json!({"matchLabels": {}}),
+            json!({"matchLabels": {}, "matchExpressions": []}),
+        ] {
+            let mut store = MemStore::new();
+
+            add_aggregating_clusterrole(&mut store, "everything", json!([selector]));
+            add_clusterrole(
+                &mut store,
+                "unlabelled",
+                json!({}),
+                json!([
+                    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+                ]),
+            );
+            add_clusterrole(
+                &mut store,
+                "labelled",
+                json!({"any": "label"}),
+                json!([
+                    {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["list"]}
+                ]),
+            );
+
+            let result = engine_from_store(store).evaluate().unwrap();
+
+            assert!(
+                has_clusterrole_perm(&result, "everything", "", "pods", "get"),
+                "{selector} should match an unlabelled ClusterRole"
+            );
+            assert!(
+                has_clusterrole_perm(&result, "everything", "apps", "deployments", "list"),
+                "{selector} should match a labelled ClusterRole"
+            );
+            let aggregates_itself = result.scan("clusterrole_aggregates").iter().any(|row| {
+                row[0] == Value::String("everything".into())
+                    && row[1] == Value::String("everything".into())
+            });
+            assert!(!aggregates_itself, "{selector} must not match its own role");
+        }
+    }
+
+    // A selector with a requirement edb.rs cannot encode matches no
+    // ClusterRole, even next to requirements it can encode. Emitting only
+    // the encodable ones would widen it, and emitting none would make it look
+    // empty, which matches every ClusterRole.
+    #[test]
+    fn aggregation_unencodable_selector_matches_nothing() {
+        for selector in [
+            json!({"matchExpressions": [{"key": "k", "operator": "Gt", "values": ["1"]}]}),
+            json!({"matchExpressions": [{"operator": "Exists"}]}),
+            json!({"matchExpressions": [{"key": "k", "operator": "In", "values": [1]}]}),
+            json!({"matchExpressions": [{"key": "k", "operator": "In"}]}),
+            json!({"matchLabels": {"k": true}}),
+            json!({
+                "matchLabels": {"any": "label"},
+                "matchExpressions": [{"key": "k", "operator": "Gt", "values": ["1"]}]
+            }),
+        ] {
+            let mut store = MemStore::new();
+            add_aggregating_clusterrole(&mut store, "aggregator", json!([selector]));
+            add_clusterrole(
+                &mut store,
+                "labelled",
+                json!({"any": "label", "k": "v"}),
+                json!([
+                    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}
+                ]),
+            );
+            add_clusterrole(
+                &mut store,
+                "cluster-admin",
+                json!({}),
+                json!([
+                    {"apiGroups": ["*"], "resources": ["*"], "verbs": ["*"]}
+                ]),
+            );
+
+            assert!(
+                store
+                    .get_facts("clusterrole_aggregation_empty_selector")
+                    .is_empty(),
+                "{selector} must not be marked empty"
+            );
+            let result = engine_from_store(store).evaluate().unwrap();
+            assert!(
+                result.scan("clusterrole_aggregates").is_empty(),
+                "{selector} must match no ClusterRole, got {:?}",
+                result.scan("clusterrole_aggregates")
+            );
+            assert!(
+                clusterrole_perms(&result, "aggregator").is_empty(),
+                "{selector} must grant nothing"
+            );
+        }
+    }
+
+    // Only a selector with no matchLabels entries and no matchExpressions
+    // is marked empty.
+    #[test]
+    fn selector_encoding_outcomes() {
+        let owner = vec![Value::String("o".into()); 4];
+        let outcome = |selector: serde_json::Value| {
+            emit_selector_requirements(&mut MemStore::new(), owner.clone(), &selector, "test")
+        };
+        assert_eq!(outcome(json!({})), SelectorFacts::Empty);
+        assert_eq!(outcome(json!({"matchLabels": {}})), SelectorFacts::Empty);
+        assert_eq!(
+            outcome(json!({"matchLabels": {}, "matchExpressions": []})),
+            SelectorFacts::Empty
+        );
+        assert_eq!(
+            outcome(json!({"matchLabels": {"k": "v"}})),
+            SelectorFacts::Requirements
+        );
+        assert_eq!(
+            outcome(json!({"matchExpressions": [{"key": "k", "operator": "Exists"}]})),
+            SelectorFacts::Requirements
+        );
+        assert_eq!(
+            outcome(json!({"matchExpressions": [{"key": "k", "operator": "Gt"}]})),
+            SelectorFacts::Unencodable
+        );
+        assert_eq!(
+            outcome(json!({"matchLabels": {"k": 1}})),
+            SelectorFacts::Unencodable
         );
     }
 

@@ -6,7 +6,7 @@
 # has cluster-admin. Exec access means alice can read the mounted token directly
 # from the pod filesystem and authenticate as kube-system:default.
 #
-# The escalation is driven by exec_reachable_sa (escalation.mg), which finds
+# The escalation is driven by subject_exec_reachable_sa (escalation.mg), which finds
 # the SA of any pod alice can exec into.
 #
 # Attack chain:
@@ -23,6 +23,6 @@
 #   \access-diff baseline
 #   \smt cluster-admin
 
-rolebinding_subject_user("kube-system", "rb-alice-exec", "alice").
-rolebinding_roleref("kube-system", "rb-alice-exec", "Role", "alice-exec").
-role_perm("kube-system", "alice-exec", "", "pods/exec", "create").
+binding_subject("kube-system", "rb-alice-exec", /user, "alice").
+binding_roleref("kube-system", "rb-alice-exec", "Role", "alice-exec").
+role_rule("kube-system", "alice-exec", {/apiGroups: [""], /resources: ["pods/exec"], /verbs: ["create"]}).
