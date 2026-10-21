@@ -692,6 +692,9 @@ fn execute_with_provenance<'a>(
 pub struct Engine {
     /// EDB facts collected at load time; replayed on each evaluate.
     edb: Vec<(String, Vec<Value>)>,
+    /// The same facts as `edb`, hashed so the duplicate check on insert is
+    /// constant time. Every write to `edb` keeps this in sync.
+    edb_index: HashSet<(String, Vec<Value>)>,
     /// Mangle source for each rule file, plus any REPL-defined rules.
     rule_sources: Vec<String>,
     backend: Box<dyn Backend>,
@@ -703,6 +706,10 @@ pub struct Engine {
     /// mutations are fed directly to the worker rather than waiting for a full
     /// recompute.
     session: Option<crate::dd::session::DdSession>,
+    /// How many times a fact insert rebuilt the live session. Lets tests
+    /// check that a batch insert rebuilds at most once.
+    #[cfg(test)]
+    rebuild_count: usize,
 }
 
 /// Load `fixtures/testdata/small/` manifests and `rules/*.mg` files into the raw
@@ -800,13 +807,17 @@ impl Engine {
         // mutations feed deltas to the worker rather than forcing a full
         // recompute. Rule changes still trigger a full worker rebuild.
         let session = backend.spawn_session(&edb, &rule_sources)?;
+        let edb_index = edb.iter().cloned().collect();
         Ok(Self {
             edb,
+            edb_index,
             rule_sources,
             backend,
             edb_base_len,
             rules_base_len,
             session,
+            #[cfg(test)]
+            rebuild_count: 0,
         })
     }
 
@@ -883,7 +894,7 @@ impl Engine {
     /// Insert a ground fact into the EDB. Returns true if inserted, false if already present.
     pub fn add_fact(&mut self, relation: String, tuple: Vec<Value>) -> bool {
         let entry = (relation, tuple);
-        if !self.edb.contains(&entry) {
+        if !self.edb_index.contains(&entry) {
             // The DD worker drops facts for relations it has no input handle
             // for, so a brand-new relation needs the session rebuilt.
             let known = self.session.as_ref().is_none_or(|s| s.has_input(&entry.0));
@@ -893,9 +904,9 @@ impl Engine {
                     s.insert(entry.0.clone(), row);
                     s.commit();
                 }
-                self.edb.push(entry);
+                self.push_fact(entry);
             } else {
-                self.edb.push(entry);
+                self.push_fact(entry);
                 self.rebuild_session();
             }
             true
@@ -904,8 +915,53 @@ impl Engine {
         }
     }
 
+    /// Insert many ground facts at once. Returns how many were new.
+    ///
+    /// Same result as calling [`Self::add_fact`] for each, but the live
+    /// session settles once (one commit) instead of once per fact, and is
+    /// rebuilt at most once even when the facts span many new relations.
+    pub fn add_facts(&mut self, facts: impl IntoIterator<Item = (String, Vec<Value>)>) -> usize {
+        let mut inserted = 0;
+        let mut needs_rebuild = false;
+        for entry in facts {
+            if self.edb_index.contains(&entry) {
+                continue;
+            }
+            if let Some(s) = &self.session {
+                if s.has_input(&entry.0) {
+                    let row = crate::dd::value::Row::from(entry.1.as_slice());
+                    s.insert(entry.0.clone(), row);
+                } else {
+                    // A rebuild hydrates the session from the whole EDB, so
+                    // facts for a new relation only need to land in `edb`.
+                    needs_rebuild = true;
+                }
+            }
+            self.push_fact(entry);
+            inserted += 1;
+        }
+        if needs_rebuild {
+            self.rebuild_session();
+        } else if let Some(s) = &self.session
+            && inserted > 0
+        {
+            s.commit();
+        }
+        inserted
+    }
+
+    /// Append a fact to the EDB and its index.
+    fn push_fact(&mut self, entry: (String, Vec<Value>)) {
+        self.edb_index.insert(entry.clone());
+        self.edb.push(entry);
+    }
+
     /// Re-spawn the live session from the current EDB and rules, if there is one.
     fn rebuild_session(&mut self) {
+        #[cfg(test)]
+        {
+            self.rebuild_count += 1;
+        }
         if let Some(s) = &mut self.session
             && let Err(e) = s.rebuild(&self.edb, &self.rule_sources)
         {
@@ -925,7 +981,12 @@ impl Engine {
                 s.retract(relation.to_string(), row);
                 s.commit();
             }
-            self.edb.remove(pos);
+            let entry = self.edb.remove(pos);
+            // `populate_from` does not deduplicate, so another copy may
+            // remain; the index keeps the fact until the last one goes.
+            if !self.edb.contains(&entry) {
+                self.edb_index.remove(&entry);
+            }
             true
         } else {
             false
@@ -936,7 +997,9 @@ impl Engine {
     pub fn populate_from(&mut self, source: &mut dyn crate::edb::FactSource) -> Result<()> {
         let mut tmp = mangle_interpreter::MemStore::new();
         crate::edb::populate(&mut tmp, source)?;
-        self.edb.extend(drain_store(tmp));
+        for entry in drain_store(tmp) {
+            self.push_fact(entry);
+        }
         if let Some(s) = &mut self.session {
             s.rebuild(&self.edb, &self.rule_sources)?;
         }
@@ -947,6 +1010,7 @@ impl Engine {
     /// to the state at initial load.
     pub fn reset_session(&mut self) {
         self.edb.truncate(self.edb_base_len);
+        self.edb_index = self.edb.iter().cloned().collect();
         self.rule_sources.truncate(self.rules_base_len);
         if let Some(s) = &mut self.session {
             let _ = s.rebuild(&self.edb, &self.rule_sources);
@@ -1181,6 +1245,104 @@ mod tests {
                 .to_string(),
         ];
         (edb, rules)
+    }
+
+    /// Facts for several brand-new relations, the shape of a `::snapshot`:
+    /// copies of `edge` and `path` under a `snap__` prefix, plus repeats that
+    /// must be skipped.
+    fn snapshot_style_facts() -> Vec<(String, Vec<Value>)> {
+        let mut facts = Vec::new();
+        for (src, dst) in [("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")] {
+            facts.push(("snap__edge".to_string(), vec![s(src), s(dst)]));
+            facts.push(("snap__path".to_string(), vec![s(src), s(dst)]));
+        }
+        facts.push(("snap__path".to_string(), vec![s("a"), s("d")]));
+        facts.push(("snap__edge".to_string(), vec![s("a"), s("b")]));
+        facts.push(("snap__node".to_string(), vec![s("a")]));
+        facts.push(("edge".to_string(), vec![s("d"), s("e")]));
+        facts
+    }
+
+    fn sorted_store(store: EvalStore) -> Vec<(String, Vec<Vec<Value>>)> {
+        let mut relations: Vec<_> = store
+            .facts
+            .into_iter()
+            .map(|(rel, mut tuples)| {
+                tuples.sort();
+                (rel, tuples)
+            })
+            .filter(|(_, tuples)| !tuples.is_empty())
+            .collect();
+        relations.sort();
+        relations
+    }
+
+    /// `add_facts` across several new relations gives the DD session the
+    /// same facts as the interpreter, and counts only the new ones.
+    #[test]
+    fn add_facts_dd_matches_interpreter() {
+        let (edb, rules) = diamond();
+        let mut interpreter =
+            Engine::from_parts(edb.clone(), rules.clone(), Box::new(InterpreterBackend)).unwrap();
+        let mut dd =
+            Engine::from_parts(edb, rules, Box::new(DdBackend { provenance: false })).unwrap();
+
+        assert_eq!(interpreter.add_facts(snapshot_style_facts()), 11);
+        assert_eq!(dd.add_facts(snapshot_style_facts()), 11);
+        assert_eq!(dd.add_facts(snapshot_style_facts()), 0, "all duplicates");
+
+        let expected = sorted_store(interpreter.evaluate().unwrap());
+        let actual = sorted_store(dd.evaluate().unwrap());
+        assert_eq!(actual, expected);
+        let derived = actual.iter().find(|(rel, _)| rel == "path").unwrap();
+        assert!(
+            derived.1.contains(&vec![s("a"), s("e")]),
+            "the new edge(d, e) reached the existing rules"
+        );
+    }
+
+    /// A batch spanning many new relations rebuilds the DD session once,
+    /// where one `add_fact` per fact rebuilds once per new relation.
+    #[test]
+    fn add_facts_rebuilds_session_at_most_once() {
+        let (edb, rules) = diamond();
+        let mut engine =
+            Engine::from_parts(edb, rules, Box::new(DdBackend { provenance: false })).unwrap();
+        let facts: Vec<(String, Vec<Value>)> = (0..20)
+            .map(|i| (format!("snap__relation_{i}"), vec![Value::Number(i)]))
+            .collect();
+        engine.add_facts(facts);
+        assert_eq!(engine.rebuild_count, 1);
+
+        // Facts for relations the session already has inputs for commit
+        // without a rebuild.
+        engine.add_facts(vec![
+            ("edge".to_string(), vec![s("d"), s("e")]),
+            ("snap__relation_0".to_string(), vec![Value::Number(100)]),
+        ]);
+        assert_eq!(engine.rebuild_count, 1);
+
+        for i in 0..3 {
+            engine.add_fact(format!("single_{i}"), vec![Value::Number(i)]);
+        }
+        assert_eq!(engine.rebuild_count, 4);
+    }
+
+    /// Retracting one of two copies of a fact keeps it in the duplicate
+    /// index, so re-adding it is still a no-op until the last copy goes.
+    #[test]
+    fn retract_keeps_index_in_sync() {
+        let (mut edb, rules) = diamond();
+        edb.push(edb[0].clone());
+        let mut engine = Engine::from_parts(edb, rules, Box::new(InterpreterBackend)).unwrap();
+        let ab = vec![s("a"), s("b")];
+        assert!(engine.retract_fact("edge", &ab));
+        assert!(!engine.add_fact("edge".to_string(), ab.clone()));
+        assert!(engine.retract_fact("edge", &ab));
+        assert!(engine.add_fact("edge".to_string(), ab.clone()));
+
+        engine.reset_session();
+        assert!(!engine.add_fact("edge".to_string(), ab));
     }
 
     /// `--provenance` gives `Engine` a live lazy session, and backward-chaining

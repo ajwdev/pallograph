@@ -291,9 +291,7 @@ fn run_match(
             facts.push((rel.to_string(), args));
         }
     }
-    for (rel, args) in &facts {
-        engine.add_fact(rel.clone(), args.clone());
-    }
+    engine.add_facts(facts.iter().cloned());
 
     // Evaluate, then immediately retract the synthetic facts so the EDB is left
     // exactly as it was (we never touch `current_store`).
@@ -649,16 +647,18 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 if line == "::reset" {
                     engine.reset_session();
                     // Re-materialize named snapshots — they survive ::reset.
+                    let mut snapshot_facts = Vec::new();
                     for (snap_name, version) in &snapshot_names {
                         if let Some(snap) = snapshot_data.get(version) {
                             for (rel, tuples) in snap.iter() {
                                 let namespaced = format!("{snap_name}__{rel}");
                                 for tuple in tuples {
-                                    engine.add_fact(namespaced.clone(), tuple.clone());
+                                    snapshot_facts.push((namespaced.clone(), tuple.clone()));
                                 }
                             }
                         }
                     }
+                    engine.add_facts(snapshot_facts);
                     query_counter = 0;
                     match engine.evaluate() {
                         Ok(new_store) => {
@@ -754,12 +754,14 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     let snap = Snapshot::from_eval(&current_store, Scope::All);
                     let rc = snap.relation_count();
                     let fc = snap.fact_count();
+                    let mut snapshot_facts = Vec::with_capacity(fc);
                     for (rel, tuples) in snap.iter() {
                         let namespaced = format!("{name}__{rel}");
                         for tuple in tuples {
-                            engine.add_fact(namespaced.clone(), tuple.clone());
+                            snapshot_facts.push((namespaced.clone(), tuple.clone()));
                         }
                     }
+                    engine.add_facts(snapshot_facts);
                     snapshot_counter += 1;
                     let version = snapshot_counter;
                     snapshot_names.insert(name.clone(), version);
