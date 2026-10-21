@@ -62,9 +62,10 @@ you can see the chain of bindings and rules that produced a fact rather than
 just trust it.
 
 **Play what-if.** `+fact.` and `-fact.` add or retract facts, `\define` adds a
-rule, and `\source` loads a whole `.mg` file. Take a `\snapshot` first, then
-use `\diff` or `\access-diff` to see exactly which facts or RBAC permissions
-moved.
+rule, and `\source` loads a whole `.mg` file (its ground facts go in as
+facts, so `-` can retract them, and the rest as rules). Take a `\snapshot`
+first, then use `\diff` or `\access-diff` to see exactly which facts or RBAC
+permissions moved.
 
 **Check access and scheduling.** The RBAC `\smt` commands (`check_access`,
 `reaches`, `cluster-admin`) scan the grants the rules derive; the scheduling ones
