@@ -2125,22 +2125,67 @@ fn split_two_atoms(s: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Parse a ground atom like `pred("a", "b", 42)` into `(relation, Vec<Value>)`.
-/// Rejects any variable (`_` or uppercase-initial) — only ground terms allowed.
-fn parse_ground_tuple(input: &str) -> anyhow::Result<(String, Vec<mangle_common::Value>)> {
-    let q = query::parse_query(input)?;
-    let mut tuple = Vec::with_capacity(q.args.len());
-    for arg in &q.args {
-        match arg {
-            query::QueryArg::Variable => {
-                anyhow::bail!("all arguments must be ground constants (no variables or `_`)");
+/// Parse a ground atom like `pred("a", /b, 42, {/k: ["v"]})` into
+/// `(relation, Vec<Value>)`. Rejects any variable (`_` or uppercase-initial),
+/// including one nested inside a struct or list.
+fn parse_ground_tuple(input: &str) -> anyhow::Result<(String, Vec<Value>)> {
+    let arena = mangle_ast::Arena::new_with_global_interner();
+    let mut parser = mangle_parse::Parser::new(&arena, input.as_bytes(), "fact");
+    parser.next_token().map_err(|e| anyhow::anyhow!(e))?;
+    let atom = parser.parse_atom()?;
+    let predicate = arena
+        .predicate_name(atom.sym)
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve predicate name"))?
+        .to_string();
+    let mut tuple = Vec::with_capacity(atom.args.len());
+    for (i, arg) in atom.args.iter().enumerate() {
+        let value =
+            ground_value(&arena, arg).map_err(|e| anyhow::anyhow!("argument {}: {e}", i + 1))?;
+        tuple.push(value);
+    }
+    Ok((predicate, tuple))
+}
+
+/// Convert a ground term to the `Value` the interpreter stores for it.
+/// Struct, list, map and pair literals parse as `fn:struct(...)` and friends;
+/// they are built with the interpreter's own `eval_function`, so a fact added
+/// with `+` equals the same fact loaded with `\source`.
+fn ground_value(arena: &mangle_ast::Arena, term: &mangle_ast::BaseTerm) -> anyhow::Result<Value> {
+    use mangle_ast::{BaseTerm, Const};
+    match term {
+        BaseTerm::Variable(_) => {
+            anyhow::bail!("not ground: variables and `_` are not allowed in a fact")
+        }
+        BaseTerm::Const(Const::String(s)) => Ok(Value::String(s.to_string())),
+        BaseTerm::Const(Const::Name(n)) => {
+            let name = arena
+                .lookup_name(*n)
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve name constant"))?;
+            Ok(Value::Name(name.to_string()))
+        }
+        BaseTerm::Const(Const::Number(n)) => Ok(Value::Number(*n)),
+        BaseTerm::Const(Const::Float(f)) => Ok(Value::Float(*f)),
+        BaseTerm::Const(Const::Time(t)) => Ok(Value::Time(*t)),
+        BaseTerm::Const(Const::Duration(d)) => Ok(Value::Duration(*d)),
+        BaseTerm::ApplyFn(function, args) => {
+            let name = arena
+                .function_name(*function)
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve function name"))?;
+            if !matches!(name, "fn:list" | "fn:struct" | "fn:map" | "fn:pair") {
+                anyhow::bail!(
+                    "unsupported term `{name}(...)`: only constants and struct, list, map or pair literals are allowed in a fact"
+                );
             }
-            query::QueryArg::StringConst(s) => tuple.push(mangle_common::Value::String(s.clone())),
-            query::QueryArg::NameConst(s) => tuple.push(mangle_common::Value::Name(s.clone())),
-            query::QueryArg::NumberConst(n) => tuple.push(mangle_common::Value::Number(*n)),
+            let values = args
+                .iter()
+                .map(|arg| ground_value(arena, arg))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            mangle_interpreter::eval_function(name, &values)
+        }
+        BaseTerm::Const(other) => {
+            anyhow::bail!("unsupported constant {other:?} in a fact")
         }
     }
-    Ok((q.predicate, tuple))
 }
 
 /// Rewrite `snapshot->relation` to the internal `snapshot__relation` form,
@@ -2580,5 +2625,143 @@ mod format_tests {
         let tuple = vec![Value::String("a".into()), Value::String("b".into())];
         let line = ndjson_row(&tuple, |_| None);
         assert!(!line.contains('\n'));
+    }
+}
+
+#[cfg(test)]
+mod ground_fact_tests {
+    use super::parse_ground_tuple;
+    use crate::engine::{Backend, DdBackend, Engine, InterpreterBackend};
+    use mangle_common::Value;
+
+    const EXEC_RULE: &str = r#"role_rule("ns", "r", {/apiGroups: [""], /resources: ["pods/exec"], /verbs: ["create"]})"#;
+    const LOG_RULE: &str =
+        r#"role_rule("ns", "r", {/apiGroups: [""], /resources: ["pods/log"], /verbs: ["get"]})"#;
+
+    fn backends() -> Vec<(&'static str, fn() -> Box<dyn Backend>)> {
+        vec![
+            ("interpreter", || Box::new(InterpreterBackend)),
+            ("dd", || Box::new(DdBackend { provenance: false })),
+        ]
+    }
+
+    /// An engine with the shipped rules and no facts loaded from a cluster.
+    fn engine(backend: Box<dyn Backend>) -> Engine {
+        let mut rules: Vec<String> = glob::glob("rules/*.mg")
+            .unwrap()
+            .map(|p| std::fs::read_to_string(p.unwrap()).unwrap())
+            .collect();
+        rules.sort();
+        Engine::from_parts(vec![], rules, backend).unwrap()
+    }
+
+    fn sorted_scan(engine: &Engine, relation: &str) -> Vec<Vec<Value>> {
+        let mut rows = engine.evaluate().unwrap().scan(relation).to_vec();
+        rows.sort();
+        rows
+    }
+
+    /// policy_rule_perm rows derived from the rule role "r" holds.
+    fn perms(engine: &Engine) -> Vec<Vec<Value>> {
+        let held: Vec<Value> = sorted_scan(engine, "role_rule")
+            .into_iter()
+            .filter(|t| t[1] == Value::String("r".into()))
+            .map(|t| t[2].clone())
+            .collect();
+        sorted_scan(engine, "policy_rule_perm")
+            .into_iter()
+            .filter(|t| held.contains(&t[0]))
+            .collect()
+    }
+
+    fn perm(resource: &str, verb: &str) -> Vec<Value> {
+        vec![
+            Value::String(String::new()),
+            Value::String(resource.into()),
+            Value::Name("/any".into()),
+            Value::String(verb.into()),
+        ]
+    }
+
+    #[test]
+    fn struct_fact_round_trips_on_both_backends() {
+        for (name, backend) in backends() {
+            let mut engine = engine(backend());
+            let (relation, tuple) = parse_ground_tuple(EXEC_RULE).unwrap();
+            assert!(engine.add_fact(relation.clone(), tuple.clone()), "{name}");
+            let rows: Vec<Vec<Value>> = perms(&engine)
+                .into_iter()
+                .map(|t| t[1..].to_vec())
+                .collect();
+            assert_eq!(rows, vec![perm("pods/exec", "create")], "{name}");
+
+            let (relation, tuple) = parse_ground_tuple(EXEC_RULE).unwrap();
+            assert!(engine.retract_fact(&relation, &tuple), "{name}");
+            assert!(perms(&engine).is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn struct_fact_replace_on_both_backends() {
+        for (name, backend) in backends() {
+            let mut engine = engine(backend());
+            let (relation, tuple) = parse_ground_tuple(EXEC_RULE).unwrap();
+            engine.add_fact(relation, tuple);
+            // What `~old. new.` does: retract the old fact, insert the new one.
+            let line = format!("{EXEC_RULE}. {LOG_RULE}.");
+            let (old_atom, new_atom) = super::split_two_atoms(&line).unwrap();
+            let (old_relation, old_tuple) = parse_ground_tuple(old_atom).unwrap();
+            let (new_relation, new_tuple) = parse_ground_tuple(new_atom).unwrap();
+            assert!(engine.retract_fact(&old_relation, &old_tuple), "{name}");
+            engine.add_fact(new_relation, new_tuple);
+            let rows: Vec<Vec<Value>> = perms(&engine)
+                .into_iter()
+                .map(|t| t[1..].to_vec())
+                .collect();
+            assert_eq!(rows, vec![perm("pods/log", "get")], "{name}");
+        }
+    }
+
+    /// A struct added with `+` must be the same Value the interpreter builds
+    /// for the literal in a `\source`d fact, or joins and `:match_field` on
+    /// it would miss. The DD backend cannot yet evaluate a sourced struct fact
+    /// ("Let before Scan"), so both backends compare against the interpreter.
+    #[test]
+    fn parsed_struct_equals_sourced_struct() {
+        let literal = r#"role_rule("ns", "r", {/apiGroups: [""], /resources: ["pods", "pods/exec"], /verbs: ["get", "create"], /resourceNames: [], /n: 3, /nested: {/k: [/v, 1.5]}})"#;
+        let mut sourced = engine(Box::new(InterpreterBackend));
+        sourced.add_rule(format!("{literal}.")).unwrap();
+        assert_eq!(perms(&sourced).len(), 4);
+        for (name, backend) in backends() {
+            let mut added = engine(backend());
+            let (relation, tuple) = parse_ground_tuple(literal).unwrap();
+            added.add_fact(relation, tuple);
+            assert_eq!(
+                sorted_scan(&added, "role_rule"),
+                sorted_scan(&sourced, "role_rule"),
+                "{name}"
+            );
+            assert_eq!(perms(&added), perms(&sourced), "{name}");
+        }
+    }
+
+    #[test]
+    fn variables_are_rejected_at_any_depth() {
+        for input in ["foo(_)", "foo(X)", "foo({/k: X})", r#"foo("a", [1, _])"#] {
+            let error = parse_ground_tuple(input).unwrap_err().to_string();
+            assert!(error.contains("not ground"), "{input}: {error}");
+        }
+        let error = parse_ground_tuple(r#"foo("a", [1, _])"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("argument 2:"), "{error}");
+    }
+
+    #[test]
+    fn function_calls_are_unsupported() {
+        let error = parse_ground_tuple("foo(fn:plus(1, 2))")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unsupported term `fn:plus(...)`"), "{error}");
     }
 }
