@@ -377,6 +377,10 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
     let _ = rl.load_history(&history_path);
 
     let mut current_store = store;
+    // With a live session, `+`, `-` and `~` skip re-evaluating so a run of
+    // them stays fast, and mark `current_store` stale instead. The next
+    // other command refreshes it once from the session.
+    let mut current_store_stale = false;
     let mut format = format;
     let mut had_failure = false;
     let mut query_counter: u32 = 0;
@@ -423,6 +427,17 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 rl.add_history_entry(&line)?;
                 // Rewrite snapshot->relation references to snapshot__relation before parsing.
                 let line = rewrite_snapshot_refs(&line);
+
+                let is_mutator = line.starts_with(['+', '-', '~']);
+                if current_store_stale && !is_mutator {
+                    match engine.evaluate() {
+                        Ok(new_store) => {
+                            current_store = new_store;
+                            current_store_stale = false;
+                        }
+                        Err(e) => eprintln!("Error: {e:#}"),
+                    }
+                }
 
                 if let Some(cmd) = line.strip_prefix('!') {
                     let cmd = cmd.trim();
@@ -980,6 +995,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                     let removed = engine.retract_fact(&old_rel, &old_tuple);
                                     engine.add_fact(new_rel, new_tuple);
                                     if engine.has_session() {
+                                        current_store_stale = true;
                                         if removed {
                                             println!("Replaced.");
                                         } else {
@@ -1027,6 +1043,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             }
                             if engine.add_fact(rel, tuple) {
                                 if engine.has_session() {
+                                    current_store_stale = true;
                                     eprintln!("Asserted.");
                                 } else {
                                     match engine.evaluate() {
@@ -1053,6 +1070,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         Ok((rel, tuple)) => {
                             if engine.retract_fact(&rel, &tuple) {
                                 if engine.has_session() {
+                                    current_store_stale = true;
                                     eprintln!("Retracted.");
                                 } else {
                                     match engine.evaluate() {
