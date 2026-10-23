@@ -311,6 +311,14 @@ when a later rebuild runs does get provenance.
 
 ## 5. Possible next steps
 
+- **Snapshot memory.** `\snapshot` under `--provenance` calls
+  `DdSession::freeze_provenance`, which copies every relation's rows and
+  annotations into a `FrozenLazyProvenance` (§3.1) so the snapshot keeps
+  answering `::why` after the live session changes or is torn down. Rows and
+  rule bodies are `Arc`-shared with the live session, so a snapshot costs
+  pointers and hash-table overhead rather than a deep copy, but that cost is
+  still paid once per snapshot: a session with many snapshots holds that many
+  extra copies of its annotation tables.
 - **Cheaper annotation evaluation** (§2.6), cheapest first:
   1. Measure at realistic scale (e.g. a synthetic cluster 100x the fixture)
      to see whether the 2.2x holds.
