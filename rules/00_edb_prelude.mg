@@ -14,7 +14,7 @@ Decl k8s(ApiVersion, Kind, Namespace, Name, Data)
     arg(Kind, "object kind, e.g. Pod"),
     arg(Namespace, "namespace; empty for cluster-scoped objects"),
     arg(Name, "object name"),
-    arg(Data, "spec/status blob; access via :match_field(Data, /spec, ...)")
+    arg(Data, "object body (spec, status, ...) plus metadata, minus managedFields and the last-applied-configuration annotation; access via :match_field(Data, /spec, ...)")
   ]
   bound [/string, /string, /string, /string, /any].
 

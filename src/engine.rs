@@ -829,7 +829,7 @@ impl Engine {
             rule_sources.push(src);
         }
 
-        Self::from_parts(drain_store(edb_store), rule_sources, backend)
+        Self::from_parts(crate::edb::drain_store(edb_store), rule_sources, backend)
     }
 
     /// Construct an Engine directly from pre-loaded data, bypassing all file I/O.
@@ -1038,7 +1038,7 @@ impl Engine {
     pub fn populate_from(&mut self, source: &mut dyn crate::edb::FactSource) -> Result<()> {
         let mut tmp = mangle_interpreter::MemStore::new();
         crate::edb::populate(&mut tmp, source)?;
-        for entry in drain_store(tmp) {
+        for entry in crate::edb::drain_store(tmp) {
             self.push_fact(entry);
         }
         if let Some(s) = &mut self.session {
@@ -1159,18 +1159,6 @@ fn extract_head_pred(rule_src: &str) -> Option<String> {
     None
 }
 
-/// Drain all facts from a MemStore into a Vec for later replay.
-fn drain_store(store: MemStore) -> Vec<(String, Vec<Value>)> {
-    let mut out = Vec::new();
-    for rel in store.relation_names() {
-        let rel: String = rel;
-        for tuple in store.get_facts(&rel) {
-            out.push((rel.clone(), tuple));
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1184,7 +1172,7 @@ mod tests {
             vec!["fixtures/testdata/small".to_string()],
         )
         .context("load testdata")?;
-        let edb = drain_store(edb_store);
+        let edb = crate::edb::drain_store(edb_store);
 
         let rule_files = glob::glob("rules/*.mg")
             .context("glob rules")?

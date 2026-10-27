@@ -5,15 +5,16 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use kube::api::{ApiResource, DynamicObject, ListParams};
+use kube::core::ObjectMeta;
 use kube::core::labels::Expression;
 use kube::{Api, Client, ResourceExt};
-use mangle_common::Value;
+use mangle_common::{Store, Value};
 use mangle_interpreter::MemStore;
 use serde_json::Value as Json;
 
 use serde::Deserialize;
 
-use crate::value::json_to_value;
+use crate::value::{data_to_json, json_to_value};
 
 // TODO: consider switching to concrete k8s-openapi types (Pod, ServiceAccount, etc.)
 // for the cluster path once the loading pipeline is stable. DynamicObject avoids the
@@ -238,6 +239,68 @@ pub fn load_k8s_from_command(store: &mut MemStore, command: &str) -> Result<()> 
     )
 }
 
+/// One EDB fact: (relation, tuple).
+pub type Fact = (String, Vec<Value>);
+
+/// Rebuild the object behind a `k8s/5` tuple from its Data (body plus
+/// metadata) and run it through the projection pipeline again, returning
+/// the facts it emits. For a tuple `add_object` produced, these are exactly
+/// the facts it emitted then, `k8s/5` row included. A hand-written tuple
+/// whose Data has no metadata is given just its name and namespace.
+pub fn regenerate_facts(tuple: &[Value]) -> Vec<Fact> {
+    let [
+        Value::String(api_version),
+        Value::String(kind),
+        Value::String(namespace),
+        Value::String(name),
+        data,
+    ] = tuple
+    else {
+        return Vec::new();
+    };
+    let mut body = match data_to_json(data) {
+        Json::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    let metadata = body
+        .shift_remove("metadata")
+        .and_then(|m| serde_json::from_value(m).ok())
+        .unwrap_or_else(|| ObjectMeta {
+            name: Some(name.clone()),
+            namespace: (!namespace.is_empty()).then(|| namespace.clone()),
+            ..ObjectMeta::default()
+        });
+    let obj = DynamicObject {
+        types: None,
+        metadata,
+        data: Json::Object(body),
+    };
+    emitted_facts(&obj, Some((api_version, kind)))
+}
+
+/// The facts loading `obj` emits: its `k8s/5` row plus the label, selector
+/// and per-kind facts.
+pub(crate) fn emitted_facts(obj: &DynamicObject, type_hint: Option<(&str, &str)>) -> Vec<Fact> {
+    let mut store = MemStore::new();
+    add_object(&mut store, obj, type_hint);
+    drain_store(store)
+}
+
+/// Drain all facts from a MemStore into a Vec for later replay.
+pub fn drain_store(store: MemStore) -> Vec<Fact> {
+    let mut out = Vec::new();
+    for rel in store.relation_names() {
+        let rel: String = rel;
+        for tuple in store.get_facts(&rel) {
+            out.push((rel.clone(), tuple));
+        }
+    }
+    out
+}
+
+/// Written by `kubectl apply`: a copy of the applied manifest.
+const LAST_APPLIED_ANNOTATION: &str = "kubectl.kubernetes.io/last-applied-configuration";
+
 fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str, &str)>) {
     let (api_version, kind) = type_hint.unwrap_or_else(|| {
         obj.types
@@ -248,11 +311,34 @@ fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str
     let namespace = obj.namespace().unwrap_or_default();
     let name = obj.name_any();
 
-    // Store spec/status blob as the Data argument of k8s/5. Mangle rules access it
-    // via :match_field(Data, /spec, ...). Metadata fields are in the typed fields above
-    // and extracted into separate EDB relations below.
-    let data = json_to_value(&obj.data)
+    // Store the object's body (spec, status, rules, ...) plus its metadata
+    // as the Data argument of k8s/5. Mangle rules access it via
+    // :match_field(Data, /spec, ...), and `regenerate_facts` rebuilds the
+    // object from it. managedFields and the last-applied-configuration
+    // annotation are left out: both are large, the annotation repeats the
+    // body, and nothing reads them.
+    let mut data = json_to_value(&obj.data)
         .unwrap_or(Value::Compound(mangle_common::CompoundKind::Struct, vec![]));
+    // The extractors below read the body as Data encodes it (no nulls, bools
+    // as bools), so rebuilding the object from Data emits the same facts.
+    let body = data_to_json(&data);
+    let mut metadata = obj.metadata.clone();
+    metadata.managed_fields = None;
+    if let Some(annotations) = &mut metadata.annotations {
+        annotations.remove(LAST_APPLIED_ANNOTATION);
+        if annotations.is_empty() {
+            metadata.annotations = None;
+        }
+    }
+    if let Value::Compound(_, pairs) = &mut data
+        && let Some(metadata) = serde_json::to_value(&metadata)
+            .ok()
+            .as_ref()
+            .and_then(json_to_value)
+    {
+        pairs.push(Value::Name("/metadata".into()));
+        pairs.push(metadata);
+    }
 
     store.add_fact(
         "k8s",
@@ -272,21 +358,21 @@ fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str
         &namespace,
         &name,
         obj.metadata.labels.as_ref(),
-        &obj.data,
+        &body,
     );
 
     if kind == "Node" {
-        extract_node_data(store, &name, &obj.data);
+        extract_node_data(store, &name, &body);
     }
     if kind == "Pod" {
-        extract_pod_scheduling(store, &namespace, &name, &obj.data);
-        extract_pod_anti_affinity(store, &namespace, &name, &obj.data);
+        extract_pod_scheduling(store, &namespace, &name, &body);
+        extract_pod_anti_affinity(store, &namespace, &name, &body);
     }
     if kind == "ClusterRole" {
-        extract_clusterrole_agg_selectors(store, &name, &obj.data);
+        extract_clusterrole_agg_selectors(store, &name, &body);
     }
     if kind == "NodePool" {
-        extract_nodepool_data(store, &name, &obj.data);
+        extract_nodepool_data(store, &name, &body);
     }
 }
 
@@ -754,6 +840,92 @@ mod tests {
 
     fn engine_from_store(store: MemStore) -> Engine {
         Engine::new(store, Path::new("rules"), Box::new(InterpreterBackend)).expect("engine")
+    }
+
+    /// Data carries the object's metadata (labels included, managedFields
+    /// left out), and rebuilding each small-fixture object from its `k8s/5`
+    /// row emits exactly the facts loading it did.
+    #[test]
+    fn regenerate_facts_round_trips_fixture_objects() {
+        let mut source = K8sManifestsSource {
+            paths: vec!["fixtures/testdata/small".to_string()],
+        };
+        let objects = source.k8s_objects().expect("load fixture");
+        assert!(objects.len() > 50, "only {} objects", objects.len());
+        let mut labelled = 0;
+        for (obj, _) in &objects {
+            let key = (obj.types.as_ref().map(|t| &t.kind), obj.name_any());
+            let mut original = emitted_facts(obj, None);
+            original.sort();
+            let k8s: Vec<_> = original.iter().filter(|(r, _)| r == "k8s").collect();
+            assert_eq!(k8s.len(), 1, "{key:?}");
+            let tuple = &k8s[0].1;
+
+            let metadata = crate::value::struct_get(&tuple[4], "metadata")
+                .unwrap_or_else(|| panic!("{key:?}: no metadata in Data"));
+            assert!(crate::value::struct_get(metadata, "managedFields").is_none());
+            if let Some(labels) = crate::value::struct_get(metadata, "labels") {
+                labelled += 1;
+                let Value::Compound(_, pairs) = labels else {
+                    panic!("labels not a struct")
+                };
+                for pair in pairs.as_chunks::<2>().0 {
+                    let (Value::Name(k), v) = (&pair[0], &pair[1]) else {
+                        panic!("label key not a name")
+                    };
+                    let label = vec![
+                        tuple[0].clone(),
+                        tuple[1].clone(),
+                        tuple[2].clone(),
+                        tuple[3].clone(),
+                        Value::String(k.trim_start_matches('/').to_string()),
+                        v.clone(),
+                    ];
+                    assert!(
+                        original.contains(&("object_label".to_string(), label)),
+                        "{key:?}: Data label {k} has no object_label fact"
+                    );
+                }
+            }
+
+            let mut regenerated = regenerate_facts(tuple);
+            regenerated.sort();
+            assert_eq!(regenerated, original, "{key:?}");
+        }
+        assert!(labelled > 0, "no fixture object has labels");
+    }
+
+    /// The metadata stored in Data loses managedFields and the
+    /// last-applied-configuration annotation, and keeps everything else
+    /// (other annotations, resourceVersion). Rebuilding from the stripped
+    /// metadata still emits the same facts.
+    #[test]
+    fn data_drops_managed_fields_and_last_applied() {
+        let mut source = ShellSource {
+            command: r#"printf '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"m","resourceVersion":"42","labels":{"app":"web"},"annotations":{"kubectl.kubernetes.io/last-applied-configuration":"{}","team":"infra"},"managedFields":[{"manager":"kubectl"}]}}'"#.into(),
+        };
+        let objects = source.k8s_objects().expect("load");
+        let mut original = emitted_facts(&objects[0].0, None);
+        original.sort();
+        let (_, tuple) = original.iter().find(|(r, _)| r == "k8s").unwrap();
+        let metadata = crate::value::struct_get(&tuple[4], "metadata").unwrap();
+        let get = |field| crate::value::struct_get(metadata, field);
+        assert_eq!(get("name"), Some(&Value::String("m".into())));
+        assert_eq!(get("resourceVersion"), Some(&Value::String("42".into())));
+        assert!(get("managedFields").is_none());
+        let annotations = get("annotations").expect("other annotations kept");
+        assert_eq!(
+            crate::value::struct_get(annotations, "team"),
+            Some(&Value::String("infra".into()))
+        );
+        assert!(
+            crate::value::struct_get(annotations, LAST_APPLIED_ANNOTATION).is_none(),
+            "{annotations}"
+        );
+
+        let mut regenerated = regenerate_facts(tuple);
+        regenerated.sort();
+        assert_eq!(regenerated, original);
     }
 
     /// Construct and add a ClusterRole with explicit rules.
