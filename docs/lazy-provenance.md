@@ -318,7 +318,9 @@ when a later rebuild runs does get provenance.
   rule bodies are `Arc`-shared with the live session, so a snapshot costs
   pointers and hash-table overhead rather than a deep copy, but that cost is
   still paid once per snapshot: a session with many snapshots holds that many
-  extra copies of its annotation tables.
+  extra copies of its annotation tables. Each snapshot also deep-copies the
+  engine's input facts (EDB) and rule sources so `\rollback` can restore
+  them.
 - **Cheaper annotation evaluation** (§2.6), cheapest first:
   1. Measure at realistic scale (e.g. a synthetic cluster 100x the fixture)
      to see whether the 2.2x holds.

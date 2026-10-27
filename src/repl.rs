@@ -196,7 +196,10 @@ fn print_help() {
     println!();
     println!("Snapshots");
     println!(
-        "  \\snapshot <name>                       — save current eval state as a named snapshot"
+        "  \\snapshot <name>                       — save current eval state, and the facts and rules it came from, as a named snapshot"
+    );
+    println!(
+        "  \\rollback <name>                       — restore the facts and rules saved by \\snapshot <name>, re-evaluate, drop all _N results (the snapshot stays; each one holds a copy of the facts)"
     );
     println!(
         "  \\diff <name>                           — diff the state in use (live, unless \\use points elsewhere) against a named snapshot"
@@ -413,7 +416,8 @@ fn known_relations_in_use(
 }
 
 /// Return `true` and refuse a state-changing command (`+`, `-`, `~`,
-/// `\define`, `\load`, `\load-k8s`, `\source`, `\reset`, `\snapshot`) while a
+/// `\define`, `\load`, `\load-k8s`, `\source`, `\reset`, `\snapshot`,
+/// `\rollback`) while a
 /// snapshot is in use: a frozen state never changes, so there is nothing for
 /// the command to act on. `\match` and `\match_all` are refused for the same
 /// reason even though they leave the EDB untouched: they re-evaluate the
@@ -1101,8 +1105,41 @@ fn session(
                         FrozenState {
                             store: frozen_store,
                             lazy_provenance,
+                            inputs: engine.save_inputs(),
                         },
                     );
+                    continue;
+                }
+
+                if line == "::rollback" || line.starts_with("::rollback ") {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
+                        continue;
+                    }
+                    let name = line.strip_prefix("::rollback").unwrap_or("").trim();
+                    if name.is_empty() {
+                        command_error!("Usage: ::rollback <name>");
+                        continue;
+                    }
+                    let Some(frozen) = snapshots.get(name) else {
+                        command_error!("No snapshot named '{name}'.");
+                        continue;
+                    };
+                    // A snapshot saves no `?-` result rules (`_N`), so this
+                    // drops every one, including those from before the
+                    // snapshot. With none left to collide with, numbering
+                    // starts over at `_0`.
+                    if let Err(e) = engine.restore_inputs(&frozen.inputs) {
+                        command_error!("Error: {e:#}");
+                        continue;
+                    }
+                    query_counter = 0;
+                    match engine.evaluate() {
+                        Ok(new_store) => {
+                            current_store = new_store;
+                            println!("Rolled back to snapshot '{name}'.");
+                        }
+                        Err(e) => command_error!("Error: {e:#}"),
+                    }
                     continue;
                 }
 
