@@ -88,8 +88,21 @@ Built-in Kubernetes and EKS principals are hidden from SMT output by default
 (`--all` shows them). The list lives in `src/builtins.txt`.
 
 **Script it.** `--format ndjson` emits one JSON object per row, which pipes
-nicely into `jq` or DuckDB. The process exits 1 if any `\smt` check fails, so
-it can gate CI.
+nicely into `jq` or DuckDB. `--script <file>` (`-` for stdin) runs one
+command per line without the REPL and stops at the first line that is not a
+command or whose command fails, so a typo'd path or command can't pass
+silently. It exits 0 when clean, 1 on findings (a failed `\smt` check, or
+`\access-diff` finding new permissions) and 2 on an error, so it can gate CI:
+
+```sh
+cat > check.pg <<'EOF'
+# The cluster is loaded at startup from the profile.
+\snapshot base
+\load-k8s rendered/head/
+\access-diff base
+EOF
+pallograph --profile prod --script check.pg
+```
 
 ## Worked examples
 
@@ -130,6 +143,8 @@ Other flags worth knowing:
 - `--backend interpreter|dd`: evaluation engine, see below.
 - `--provenance`: enable `\why` on the DD backend.
 - `--format default|compact|table|ndjson`: output format.
+- `--script <file>`: run commands from a file (`-` for stdin) instead of the
+  REPL; see "Script it" above.
 
 ## How it works
 
