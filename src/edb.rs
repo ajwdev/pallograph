@@ -225,22 +225,49 @@ pub fn load_from_manifests(store: &mut MemStore, paths: Vec<String>) -> Result<(
     populate(store, &mut K8sManifestsSource { paths })
 }
 
-pub async fn load_from_cluster(store: &mut MemStore, client: Client) -> Result<()> {
-    let mut source = ClusterSource::fetch(client).await?;
-    populate(store, &mut source)
-}
-
-pub fn load_k8s_from_command(store: &mut MemStore, command: &str) -> Result<()> {
-    populate(
-        store,
-        &mut ShellSource {
-            command: command.to_string(),
-        },
-    )
-}
-
 /// One EDB fact: (relation, tuple).
 pub type Fact = (String, Vec<Value>);
+
+/// Which k8s object a set of facts came from: (API group, kind, namespace,
+/// name). The group rather than the full apiVersion, so loading
+/// `apps/v1beta1` over `apps/v1` replaces the object instead of adding a
+/// second one, as the API server serves both versions as one object.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ObjectKey {
+    pub group: String,
+    pub kind: String,
+    pub namespace: String,
+    pub name: String,
+}
+
+impl ObjectKey {
+    pub fn new(api_version: &str, kind: &str, namespace: &str, name: &str) -> Self {
+        ObjectKey {
+            group: api_version
+                .split_once('/')
+                .map(|(group, _)| group)
+                .unwrap_or_default()
+                .to_string(),
+            kind: kind.to_string(),
+            namespace: namespace.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// The key of a `k8s/5` tuple, or None if it is not shaped like one.
+    pub fn of_k8s_tuple(tuple: &[Value]) -> Option<Self> {
+        match tuple {
+            [
+                Value::String(api_version),
+                Value::String(kind),
+                Value::String(namespace),
+                Value::String(name),
+                _,
+            ] => Some(Self::new(api_version, kind, namespace, name)),
+            _ => None,
+        }
+    }
+}
 
 /// Rebuild the object behind a `k8s/5` tuple from its Data (body plus
 /// metadata) and run it through the projection pipeline again, returning
@@ -286,6 +313,35 @@ pub(crate) fn emitted_facts(obj: &DynamicObject, type_hint: Option<(&str, &str)>
     drain_store(store)
 }
 
+/// A k8s object run through the projection pipeline: its key and every fact
+/// it emitted (its `k8s/5` row plus the label, selector and per-kind facts).
+#[derive(Clone)]
+pub struct ObjectFacts {
+    pub key: ObjectKey,
+    pub facts: Vec<Fact>,
+}
+
+/// Like [`populate`], but keeps each object's facts apart (in source order)
+/// so the engine can replace them when the same object is loaded again.
+pub fn object_facts(source: &mut dyn FactSource) -> Result<Vec<ObjectFacts>> {
+    let mut objects = Vec::new();
+    for (obj, type_hint) in source.k8s_objects()? {
+        let type_hint = type_hint.as_ref().map(|(av, k)| (av.as_str(), k.as_str()));
+        let (api_version, kind) = resolve_type(&obj, type_hint);
+        let key = ObjectKey::new(
+            api_version,
+            kind,
+            &obj.namespace().unwrap_or_default(),
+            &obj.name_any(),
+        );
+        objects.push(ObjectFacts {
+            key,
+            facts: emitted_facts(&obj, type_hint),
+        });
+    }
+    Ok(objects)
+}
+
 /// Drain all facts from a MemStore into a Vec for later replay.
 pub fn drain_store(store: MemStore) -> Vec<Fact> {
     let mut out = Vec::new();
@@ -298,16 +354,25 @@ pub fn drain_store(store: MemStore) -> Vec<Fact> {
     out
 }
 
-/// Written by `kubectl apply`: a copy of the applied manifest.
-const LAST_APPLIED_ANNOTATION: &str = "kubectl.kubernetes.io/last-applied-configuration";
-
-fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str, &str)>) {
-    let (api_version, kind) = type_hint.unwrap_or_else(|| {
+/// The object's (apiVersion, kind): the type hint when the source gave one
+/// (cluster lists leave them off each item), otherwise the object's own.
+fn resolve_type<'a>(
+    obj: &'a DynamicObject,
+    type_hint: Option<(&'a str, &'a str)>,
+) -> (&'a str, &'a str) {
+    type_hint.unwrap_or_else(|| {
         obj.types
             .as_ref()
             .map(|t| (t.api_version.as_str(), t.kind.as_str()))
             .unwrap_or_default()
-    });
+    })
+}
+
+/// Written by `kubectl apply`: a copy of the applied manifest.
+const LAST_APPLIED_ANNOTATION: &str = "kubectl.kubernetes.io/last-applied-configuration";
+
+fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str, &str)>) {
+    let (api_version, kind) = resolve_type(obj, type_hint);
     let namespace = obj.namespace().unwrap_or_default();
     let name = obj.name_any();
 

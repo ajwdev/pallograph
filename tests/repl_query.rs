@@ -7,6 +7,7 @@
 //! example scenarios on both backends.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -19,20 +20,30 @@ fn run_session(commands: &str) -> (String, String) {
 
 /// Like [`run_session`], with extra command-line arguments.
 fn run_session_with(args: &[&str], commands: &str) -> (String, String) {
+    run_session_loading(&[], args, commands)
+}
+
+/// Like [`run_session_with`], with `extra_paths` loaded at startup as k8s
+/// manifests after the small fixture.
+fn run_session_loading(extra_paths: &[&Path], args: &[&str], commands: &str) -> (String, String) {
     // Unique per call: tests run in parallel threads of one process.
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir =
         std::env::temp_dir().join(format!("pallograph-repl-query-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let config = dir.join("pallograph.toml");
-    let testdata = format!("{}/fixtures/testdata/small", env!("CARGO_MANIFEST_DIR"));
+    let mut paths = vec![format!(
+        "{}/fixtures/testdata/small",
+        env!("CARGO_MANIFEST_DIR")
+    )];
+    paths.extend(extra_paths.iter().map(|p| p.to_string_lossy().into_owned()));
     std::fs::write(
         &config,
         format!(
             "default_profile = \"dev\"\n\
              [datasources.local]\n\
              source = \"file\"\n\
-             paths = [{testdata:?}]\n\
+             paths = {paths:?}\n\
              content = \"k8s-manifests\"\n\
              [profiles.dev]\n\
              sources = [\"local\"]\n"
@@ -561,5 +572,134 @@ fn why_on_snapshot_survives_retraction() {
             !stdout.contains("no provenance captured"),
             "{args:?}: {stdout}"
         );
+    }
+}
+
+// -----------------------------------------------------------------------
+// `\load-k8s` replacing objects already loaded
+// -----------------------------------------------------------------------
+
+/// A ClusterRole `demo` granting `get` on `resources` (comma-separated),
+/// bound to `demo@example.com`.
+fn demo_role(resources: &str) -> String {
+    let resources = resources
+        .split(',')
+        .map(|r| format!("{r:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "apiVersion: rbac.authorization.k8s.io/v1\n\
+         kind: ClusterRole\n\
+         metadata: {{name: demo}}\n\
+         rules:\n\
+         - {{apiGroups: [\"\"], resources: [{resources}], verbs: [\"get\"]}}\n\
+         ---\n\
+         apiVersion: rbac.authorization.k8s.io/v1\n\
+         kind: ClusterRoleBinding\n\
+         metadata: {{name: demo}}\n\
+         roleRef: {{apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: demo}}\n\
+         subjects:\n\
+         - {{apiGroup: rbac.authorization.k8s.io, kind: User, name: demo@example.com}}\n"
+    )
+}
+
+/// Write `demo_role(resources)` into its own fresh temp dir, so a
+/// datasource can load it alone. Returns the file's path.
+fn write_demo_role(resources: &str) -> PathBuf {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("pallograph-repl-upsert-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("demo.yaml");
+    std::fs::write(&path, demo_role(resources)).expect("write manifest");
+    path
+}
+
+/// Rows of `?- clusterrole_rule("demo", R)`, sorted (the backends list rows
+/// in different orders).
+fn demo_rules(stdout: &str) -> Vec<String> {
+    let mut rows: Vec<String> = stdout
+        .lines()
+        .filter(|line| line.starts_with("  R = "))
+        .map(str::to_string)
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Loading a changed version of an object replaces it: rules see only the
+/// new version, not both.
+#[test]
+fn load_k8s_replaces_object_across_backends() {
+    let v1 = write_demo_role("secrets");
+    let v2 = write_demo_role("configmaps");
+    let commands = format!(
+        "\\load-k8s {}\n\\load-k8s {}\n?- clusterrole_rule(\"demo\", R)\n::quit\n",
+        v1.display(),
+        v2.display()
+    );
+    for backend in ["interpreter", "dd"] {
+        let (stdout, stderr) = run_session_with(&["--backend", backend], &commands);
+        assert!(
+            stderr.contains("Loaded 2 object(s) (2 replaced) and evaluated."),
+            "{backend}: {stderr}"
+        );
+        assert_eq!(
+            demo_rules(&stdout),
+            [r#"  R = {/apiGroups: [""], /resources: ["configmaps"], /verbs: ["get"]}"#],
+            "{backend}: {stdout}"
+        );
+    }
+    for path in [v1, v2] {
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+}
+
+/// An object loaded at startup, then replaced by `\load-k8s` with a
+/// narrower version: `\access-diff` reports the permission it lost and
+/// none gained.
+#[test]
+fn load_k8s_over_startup_object_contracts_access() {
+    let startup = write_demo_role("secrets,configmaps");
+    let narrower = write_demo_role("configmaps");
+    let commands = format!(
+        "\\snapshot before\n\
+         \\load-k8s {}\n\
+         \\access-diff before\n\
+         ?- clusterrole_rule(\"demo\", R)\n\
+         ::quit\n",
+        narrower.display()
+    );
+    for backend in ["interpreter", "dd"] {
+        let (stdout, stderr) = run_session_loading(&[&startup], &["--backend", backend], &commands);
+        assert!(
+            stderr.contains("Loaded 2 object(s) (2 replaced) and evaluated."),
+            "{backend}: {stderr}"
+        );
+        assert!(
+            stdout.contains("PASS  2 permission(s) removed, none added"),
+            "{backend}: {stdout}"
+        );
+        let lost = stdout
+            .lines()
+            .skip_while(|line| !line.starts_with("  CAN LOST"))
+            .take_while(|line| !line.starts_with("  EFFECTIVE"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            lost.contains(
+                r#"demo@example.com  ns=""  apigroup=""  resource="secrets"  verb="get""#
+            ),
+            "{backend}: {stdout}"
+        );
+        assert!(!stdout.contains("CAN GAINED"), "{backend}: {stdout}");
+        assert_eq!(
+            demo_rules(&stdout),
+            [r#"  R = {/apiGroups: [""], /resources: ["configmaps"], /verbs: ["get"]}"#],
+            "{backend}: {stdout}"
+        );
+    }
+    for path in [startup, narrower] {
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

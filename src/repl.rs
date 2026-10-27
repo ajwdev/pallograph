@@ -191,7 +191,7 @@ fn print_help() {
         "  \\load <rel> <src>                      — load flat JSON tuples into <rel>; src is a file or ! <cmd>"
     );
     println!(
-        "  \\load-k8s <src>                        — load k8s objects through the projection pipeline; src is a dir, .json file, or ! <kubectl args>"
+        "  \\load-k8s <src>                        — load k8s objects through the projection pipeline, replacing any already loaded with the same group, kind, namespace and name; src is a dir, .json file, or ! <kubectl args>"
     );
     println!();
     println!("Snapshots");
@@ -1131,10 +1131,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             }))
                         };
                     match source_result.and_then(|mut src| engine.populate_from(src.as_mut())) {
-                        Ok(()) => match engine.evaluate() {
+                        Ok(summary) => match engine.evaluate() {
                             Ok(new_store) => {
                                 current_store = new_store;
-                                eprintln!("Loaded and evaluated.");
+                                eprintln!(
+                                    "Loaded {} object(s) ({} replaced) and evaluated.",
+                                    summary.objects, summary.replaced
+                                );
                             }
                             Err(e) => eprintln!("Error: {e:#}"),
                         },
