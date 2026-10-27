@@ -1275,7 +1275,8 @@ fn session(
                                 current_store = new_store;
                                 eprintln!(
                                     "Loaded {} object(s) ({} replaced) and evaluated.",
-                                    summary.objects, summary.replaced
+                                    summary.added + summary.updated,
+                                    summary.updated
                                 );
                             }
                             Err(e) => command_error!("Error: {e:#}"),

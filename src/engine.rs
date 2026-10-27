@@ -732,12 +732,27 @@ fn execute_with_provenance<'a>(
     Ok(interpreter)
 }
 
-/// What [`Engine::upsert_objects`] did: how many objects it loaded, and how
-/// many of those replaced an object already loaded under the same key.
+/// One change to apply to the live EDB. Add and update are the same engine
+/// operation (retract the old facts for the key if present, insert the new
+/// ones), so both are an [`Change::Upsert`]; the summary tells them apart by
+/// whether the key already existed. [`Change::Retract`] drops the object
+/// loaded under a key, used when a delta removes it.
+pub enum Change {
+    Upsert(ObjectFacts),
+    Retract(ObjectKey),
+}
+
+/// What [`Engine::apply_changes`] did, by outcome. `added` and `updated`
+/// count [`Change::Upsert`]s whose key was absent or already present;
+/// `retracted` counts [`Change::Retract`]s that hit a loaded object, and
+/// `removed_absent` the ones whose key was already gone (not an error: the
+/// cluster may have dropped it before the delta did).
 #[derive(Debug, Default, PartialEq, Eq)]
-pub struct UpsertSummary {
-    pub objects: usize,
-    pub replaced: usize,
+pub struct ApplySummary {
+    pub added: usize,
+    pub updated: usize,
+    pub retracted: usize,
+    pub removed_absent: usize,
 }
 
 /// A copy of what the engine evaluates: the facts loaded from the cluster
@@ -1129,7 +1144,7 @@ impl Engine {
     pub fn populate_from(
         &mut self,
         source: &mut dyn crate::edb::FactSource,
-    ) -> Result<UpsertSummary> {
+    ) -> Result<ApplySummary> {
         let objects = crate::edb::object_facts(source)?;
         Ok(self.upsert_objects(objects))
     }
@@ -1147,23 +1162,56 @@ impl Engine {
     ///
     /// A fact both versions emit is retracted and re-added, which nets out.
     /// A fact another object also emits survives, as each object added its
-    /// own copy. Objects absent from `objects` are left alone: there is no
-    /// way to delete one yet.
-    pub fn upsert_objects(&mut self, objects: Vec<ObjectFacts>) -> UpsertSummary {
-        let total = objects.len();
-        let (objects, collapsed) = last_per_key(objects);
-        let keys: HashSet<&ObjectKey> = objects.iter().map(|object| &object.key).collect();
-        let mut replaced: HashSet<ObjectKey> = HashSet::new();
+    /// own copy.
+    pub fn upsert_objects(&mut self, objects: Vec<ObjectFacts>) -> ApplySummary {
+        self.apply_changes(objects.into_iter().map(Change::Upsert).collect())
+    }
+
+    /// Apply a batch of adds, updates and retracts to the live EDB in one
+    /// pass: find the `k8s/5` rows the batch touches with a single EDB scan,
+    /// retract each along with the facts it emitted (via
+    /// [`crate::edb::regenerate_facts`]), then insert the upserts' facts.
+    /// The whole batch shares one session commit (or one rebuild), so a delta
+    /// of many changes settles the dataflow once.
+    ///
+    /// Objects not named in `changes` are left alone. A key named by both an
+    /// upsert and a retract is not expected from a 3-way delta; the upsert
+    /// wins, since its facts are inserted after the shared retract pass.
+    pub fn apply_changes(&mut self, changes: Vec<Change>) -> ApplySummary {
+        let mut upserts: Vec<ObjectFacts> = Vec::new();
+        let mut retract_keys: HashSet<ObjectKey> = HashSet::new();
+        for change in changes {
+            match change {
+                Change::Upsert(object) => upserts.push(object),
+                Change::Retract(key) => {
+                    retract_keys.insert(key);
+                }
+            }
+        }
+        // Later copies of a key win, matching a single object re-listed in
+        // one batch. The collapsed count is not reported: nothing was
+        // replaced in the EDB, the batch just named the object twice.
+        let (upserts, _collapsed) = last_per_key(upserts);
+        let upsert_keys: HashSet<&ObjectKey> = upserts.iter().map(|object| &object.key).collect();
+        let upsert_count = upsert_keys.len();
+
+        let mut present_upsert: HashSet<ObjectKey> = HashSet::new();
+        let mut present_retract: HashSet<ObjectKey> = HashSet::new();
         let previous: Vec<Vec<Value>> = self
             .edb
             .iter()
             .filter(|(relation, _)| relation == "k8s")
             .filter_map(|(_, tuple)| {
                 let key = ObjectKey::of_k8s_tuple(tuple)?;
-                keys.contains(&key).then(|| {
-                    replaced.insert(key);
-                    tuple.clone()
-                })
+                if upsert_keys.contains(&key) {
+                    present_upsert.insert(key);
+                    Some(tuple.clone())
+                } else if retract_keys.contains(&key) {
+                    present_retract.insert(key);
+                    Some(tuple.clone())
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -1179,7 +1227,7 @@ impl Engine {
                 }
             }
         }
-        for entry in objects.into_iter().flat_map(|object| object.facts) {
+        for entry in upserts.into_iter().flat_map(|object| object.facts) {
             if let Some(s) = &self.session {
                 if s.has_input(&entry.0) {
                     s.insert(
@@ -1201,9 +1249,11 @@ impl Engine {
         {
             s.commit();
         }
-        UpsertSummary {
-            objects: total,
-            replaced: replaced.len() + collapsed,
+        ApplySummary {
+            added: upsert_count - present_upsert.len(),
+            updated: present_upsert.len(),
+            retracted: present_retract.len(),
+            removed_absent: retract_keys.len() - present_retract.len(),
         }
     }
 
@@ -1715,9 +1765,9 @@ mod tests {
             let summary = engine.upsert_objects(objects(vec![config_map("x", "api")]));
             assert_eq!(
                 summary,
-                UpsertSummary {
-                    objects: 1,
-                    replaced: 1
+                ApplySummary {
+                    updated: 1,
+                    ..Default::default()
                 }
             );
             assert_eq!(
@@ -1731,6 +1781,64 @@ mod tests {
             assert_eq!(tiers(&engine), [(s("x"), s("cache")), (s("y"), s("db"))]);
             assert_eq!(rows(&engine, "k8s").len(), 2);
             assert_eq!(rows(&engine, "edge").len(), 4);
+        }
+    }
+
+    /// One upsert object by hand, for building a `Change::Upsert`.
+    fn one(json: serde_json::Value) -> ObjectFacts {
+        objects(vec![json]).pop().unwrap()
+    }
+
+    /// A retract drops one object's facts, keeps the rest, and reports it;
+    /// a retract of a key that is not loaded changes nothing and counts as
+    /// removed-but-absent (the cluster may have dropped it before the delta).
+    #[test]
+    fn apply_changes_retracts_by_key() {
+        let startup = objects(vec![config_map("x", "web"), config_map("y", "db")]);
+        for mut engine in object_engines(startup) {
+            let summary = engine.apply_changes(vec![
+                Change::Retract(ObjectKey::new("v1", "ConfigMap", "default", "x")),
+                Change::Retract(ObjectKey::new("v1", "ConfigMap", "default", "gone")),
+            ]);
+            assert_eq!(
+                summary,
+                ApplySummary {
+                    retracted: 1,
+                    removed_absent: 1,
+                    ..Default::default()
+                }
+            );
+            assert_eq!(tiers(&engine), [(s("y"), s("db"))], "x retracted, y kept");
+            assert_eq!(rows(&engine, "k8s").len(), 1);
+        }
+    }
+
+    /// One batch of an add, an update and a retract settles once and reports
+    /// each outcome, matching a 3-way delta applied to the live cluster.
+    #[test]
+    fn apply_changes_mixes_add_update_retract() {
+        let startup = objects(vec![config_map("x", "web"), config_map("y", "db")]);
+        for mut engine in object_engines(startup) {
+            let summary = engine.apply_changes(vec![
+                Change::Upsert(one(config_map("z", "cache"))),
+                Change::Upsert(one(config_map("x", "api"))),
+                Change::Retract(ObjectKey::new("v1", "ConfigMap", "default", "y")),
+            ]);
+            assert_eq!(
+                summary,
+                ApplySummary {
+                    added: 1,
+                    updated: 1,
+                    retracted: 1,
+                    removed_absent: 0,
+                }
+            );
+            assert_eq!(
+                tiers(&engine),
+                [(s("x"), s("api")), (s("z"), s("cache"))],
+                "z added, x updated, y retracted"
+            );
+            assert_eq!(rows(&engine, "k8s").len(), 2);
         }
     }
 
@@ -1758,7 +1866,7 @@ mod tests {
         let startup = objects(vec![node_pool("karpenter.sh/v1beta1", "a")]);
         for mut engine in object_engines(startup) {
             let summary = engine.upsert_objects(objects(vec![node_pool("karpenter.sh/v1", "b")]));
-            assert_eq!(summary.replaced, 1);
+            assert_eq!(summary.updated, 1);
             let k8s = rows(&engine, "k8s");
             assert_eq!(k8s.len(), 1);
             assert_eq!(k8s[0][0], s("karpenter.sh/v1"));
@@ -1777,11 +1885,13 @@ mod tests {
                 config_map("x", "web"),
                 config_map("x", "api"),
             ]));
+            // Two copies of one key collapse to a single new object: an add,
+            // with nothing replaced in the EDB.
             assert_eq!(
                 summary,
-                UpsertSummary {
-                    objects: 2,
-                    replaced: 1
+                ApplySummary {
+                    added: 1,
+                    ..Default::default()
                 }
             );
             assert_eq!(tiers(&engine), [(s("x"), s("api"))]);
