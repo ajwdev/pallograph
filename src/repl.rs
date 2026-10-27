@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::IsTerminal;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use mangle_common::Value;
 use mangle_interpreter::ProvenanceEntry;
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
@@ -251,6 +251,9 @@ fn print_help() {
         "  \\reset                                 — clear session state (_N results, \\define rules, + facts), re-evaluate"
     );
     println!("  !<cmd>                                 — run a shell command");
+    println!(
+        "  # <text>                               - comment, ignored (handy in --script files)"
+    );
     println!("  \\help                                  — show this help");
     println!("  \\quit                                  — exit");
     println!();
@@ -264,19 +267,20 @@ fn print_help() {
 /// retracted so the engine's EDB is left untouched (the same assert→query→retract
 /// path the `+`/`?-`/`-` commands expose). `kind = Some(k)` scopes to one Kind
 /// (`::match`); `None` matches any Kind (`::match_all`). `namespace` scopes the
-/// owner; "" targets cluster-scoped objects.
+/// owner; "" targets cluster-scoped objects. Returns `false` if the selector
+/// did not parse or evaluation failed.
 fn run_match(
     engine: &mut Engine,
     kind: Option<&str>,
     namespace: &str,
     selector_str: &str,
     format: OutputFormat,
-) {
+) -> bool {
     let exprs = match crate::selector::parse_selector(selector_str) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("Selector parse error: {e:#}");
-            return;
+            return false;
         }
     };
 
@@ -310,7 +314,7 @@ fn run_match(
         Ok(s) => s,
         Err(e) => {
             eprintln!("Error: {e:#}");
-            return;
+            return false;
         }
     };
 
@@ -334,7 +338,7 @@ fn run_match(
 
     if matched.is_empty() {
         eprintln!("No matches.");
-        return;
+        return true;
     }
     for row in &matched {
         let obj = &row[4..8]; // ApiVersion, Kind, Namespace, Name
@@ -359,6 +363,7 @@ fn run_match(
         }
     }
     eprintln!("Found {} match(es).", matched.len());
+    true
 }
 
 /// The interactive prompt, red like the rest of the REPL's chrome. `\use`
@@ -407,15 +412,17 @@ fn known_relations_in_use(
     known
 }
 
-/// Print `true` and refuse a state-changing command (`+`, `-`, `~`,
+/// Return `true` and refuse a state-changing command (`+`, `-`, `~`,
 /// `\define`, `\load`, `\load-k8s`, `\source`, `\reset`, `\snapshot`) while a
 /// snapshot is in use: a frozen state never changes, so there is nothing for
 /// the command to act on. `\match` and `\match_all` are refused for the same
 /// reason even though they leave the EDB untouched: they re-evaluate the
-/// live engine, which a frozen snapshot has none of.
-fn refuse_if_in_use(in_use: &Option<String>) -> bool {
+/// live engine, which a frozen snapshot has none of. A refusal marks the
+/// line as failed.
+fn refuse_if_in_use(in_use: &Option<String>, command_failed: &mut bool) -> bool {
     if let Some(name) = in_use {
         eprintln!("Snapshot '{name}' is in use; \\use to return to the live state.");
+        *command_failed = true;
         true
     } else {
         false
@@ -447,9 +454,70 @@ fn print_query_rows(format: OutputFormat, vars: &[String], tuples: &[Vec<Value>]
     }
 }
 
-/// Run the REPL until EOF or `::quit`. Returns `false` if any `::smt` check
-/// reported a failure during the session (the binary then exits with status 1).
-pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Result<bool> {
+/// How a session ended, which the binary turns into its exit status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionStatus {
+    /// Every command ran and no check failed: exit 0.
+    Clean,
+    /// An `::smt` check failed or `::access-diff` found new permissions: exit 1.
+    Findings,
+    /// A `--script` line was not a command, or its command failed: exit 2.
+    Error,
+}
+
+impl SessionStatus {
+    pub fn exit_code(self) -> u8 {
+        match self {
+            SessionStatus::Clean => 0,
+            SessionStatus::Findings => 1,
+            SessionStatus::Error => 2,
+        }
+    }
+}
+
+/// Where a session reads its lines from.
+enum Input {
+    /// The REPL: rustyline, with completion and `~/.pallograph_history`.
+    Editor {
+        rl: Box<rustyline::Editor<ReplHelper, rustyline::history::DefaultHistory>>,
+        history_path: std::path::PathBuf,
+    },
+    /// `--script`: one command per line from a file or stdin, no history.
+    Script(Box<dyn std::io::BufRead>),
+}
+
+impl Input {
+    fn readline(&mut self, prompt: &str) -> rustyline::Result<String> {
+        match self {
+            Input::Editor { rl, .. } => rl.readline(prompt),
+            Input::Script(reader) => {
+                let mut line = String::new();
+                match reader.read_line(&mut line)? {
+                    0 => Err(ReadlineError::Eof),
+                    _ => Ok(line),
+                }
+            }
+        }
+    }
+
+    fn add_history_entry(&mut self, line: &str) -> rustyline::Result<()> {
+        if let Input::Editor { rl, .. } = self {
+            rl.add_history_entry(line)?;
+        }
+        Ok(())
+    }
+
+    fn save_history(&mut self) {
+        if let Input::Editor { rl, history_path } = self {
+            let _ = rl.save_history(history_path);
+        }
+    }
+}
+
+/// Run the REPL until EOF or `::quit`. A command that fails prints an error
+/// and the session carries on, so this returns `Findings` if any `::smt`
+/// check failed or `::access-diff` found new permissions, else `Clean`.
+pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Result<SessionStatus> {
     // Banner is interactive chrome: skip it when stdout is redirected so a
     // piped session (e.g. `... | pallograph --format ndjson > out.json`) yields
     // clean data. Status/diagnostic lines go to stderr for the same reason.
@@ -468,6 +536,45 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
         path_completer: FilenameCompleter::new(),
     }));
     let _ = rl.load_history(&history_path);
+    let rl = Box::new(rl);
+    session(engine, store, format, Input::Editor { rl, history_path })
+}
+
+/// Run the commands in `path` (`-` for stdin), one per line, through the
+/// same dispatcher as the REPL. Stops with `Error` at the first line that is
+/// not a command or whose command fails; otherwise like [`run`].
+pub fn run_script(
+    engine: &mut Engine,
+    store: EvalStore,
+    format: OutputFormat,
+    path: &std::path::Path,
+) -> Result<SessionStatus> {
+    let reader: Box<dyn std::io::BufRead> = if path == std::path::Path::new("-") {
+        Box::new(std::io::stdin().lock())
+    } else {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("opening script {}", path.display()))?;
+        Box::new(std::io::BufReader::new(file))
+    };
+    session(engine, store, format, Input::Script(reader))
+}
+
+fn session(
+    engine: &mut Engine,
+    store: EvalStore,
+    format: OutputFormat,
+    mut input: Input,
+) -> Result<SessionStatus> {
+    // A script stops at its first failed line; the REPL carries on.
+    let stop_on_error = matches!(input, Input::Script(_));
+    let mut command_failed = false;
+    // Print a command's error and mark the line as failed.
+    macro_rules! command_error {
+        ($($arg:tt)*) => {{
+            eprintln!($($arg)*);
+            command_failed = true;
+        }};
+    }
 
     let mut current_store = store;
     // With a live session, `+`, `-` and `~` skip re-evaluating so a run of
@@ -494,10 +601,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
     const USE_RESTORE_PREFIX: &str = "\0use-restore:";
 
     loop {
+        if stop_on_error && command_failed {
+            break;
+        }
         let (raw, to_history) = if let Some((queued, to_history)) = pending.pop_front() {
             (Ok(queued), to_history)
         } else {
-            (rl.readline(&prompt(in_use.as_deref())), true)
+            (input.readline(&prompt(in_use.as_deref())), true)
         };
         match raw {
             Ok(line) => {
@@ -506,7 +616,8 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     continue;
                 }
                 let line = line.trim().to_string();
-                if line.is_empty() {
+                // `#` starts a comment line, as in Mangle files.
+                if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
                 // Normalize \ meta-prefix to :: so all existing dispatch keeps working.
@@ -533,7 +644,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
                 let line = collapse_string_newlines(&line);
                 if to_history {
-                    rl.add_history_entry(&line)?;
+                    input.add_history_entry(&line)?;
                 }
 
                 let is_mutator = line.starts_with(['+', '-', '~']);
@@ -543,7 +654,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             current_store = new_store;
                             current_store_stale = false;
                         }
-                        Err(e) => eprintln!("Error: {e:#}"),
+                        Err(e) => command_error!("Error: {e:#}"),
                     }
                 }
 
@@ -564,8 +675,12 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             .args(["-ic", cmd])
                             .status()
                     };
-                    if let Err(e) = status {
-                        eprintln!("Shell error: {e}");
+                    match status {
+                        Ok(status) if !status.success() => {
+                            command_error!("Shell command failed: {status}")
+                        }
+                        Ok(_) => {}
+                        Err(e) => command_error!("Shell error: {e}"),
                     }
                     continue;
                 }
@@ -597,7 +712,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         "ndjson" => format = OutputFormat::Ndjson,
                         "" => {} // no arg: just report the current format
                         other => {
-                            eprintln!(
+                            command_error!(
                                 "Unknown format '{other}'. Use: default | compact | pretty | table | ndjson."
                             );
                             continue;
@@ -683,8 +798,8 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     if !unknown.is_empty() {
                         for r in &unknown {
                             match suggest(r, &known) {
-                                s if s.is_empty() => eprintln!("Unknown relation '{r}'."),
-                                s => eprintln!(
+                                s if s.is_empty() => command_error!("Unknown relation '{r}'."),
+                                s => command_error!(
                                     "Unknown relation '{r}'. Did you mean: {}?",
                                     s.join(", ")
                                 ),
@@ -701,12 +816,12 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         if let Some(arity) = relation_arity(active, rel, &cols)
                             && given > arity
                         {
-                            eprintln!("{rel} has {arity} columns, got {given} arguments.");
+                            command_error!("{rel} has {arity} columns, got {given} arguments.");
                             continue;
                         }
                         // No named variables: list whole tuples, not bindings.
                         if existing.is_empty() {
-                            list_tuples(
+                            if !list_tuples(
                                 engine,
                                 active,
                                 format,
@@ -714,11 +829,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 raw_body,
                                 &cols,
                                 in_use.is_none(),
-                            );
+                            ) {
+                                command_failed = true;
+                            }
                             continue;
                         }
                     } else if existing.is_empty() {
-                        eprintln!("No variables to bind. Name one (e.g. X).");
+                        command_error!("No variables to bind. Name one (e.g. X).");
                         continue;
                     }
                     let (body, vars) = match auto_complete_partial(raw_body, active, &cols) {
@@ -752,7 +869,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                     eprintln!("Found {} result(s).", tuples.len());
                                 }
                             }
-                            Err(e) => eprintln!("Error: {e:#}"),
+                            Err(e) => command_error!("Error: {e:#}"),
                         }
                         continue;
                     }
@@ -760,7 +877,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     let result_name = format!("_{query_counter}");
                     let rule = format!("{result_name}({}) :- {body}.", vars.join(", "));
                     if let Err(e) = engine.add_query_rule(rule) {
-                        eprintln!("Error: {e:#}");
+                        command_error!("Error: {e:#}");
                         engine.remove_rules_for(&result_name);
                         continue;
                     }
@@ -778,7 +895,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             }
                         }
                         Err(e) => {
-                            eprintln!("Error: {e:#}");
+                            command_error!("Error: {e:#}");
                             engine.remove_rules_for(&result_name);
                         }
                     }
@@ -786,7 +903,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
 
                 if line == "::reset" {
-                    if refuse_if_in_use(&in_use) {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
                     engine.reset_session();
@@ -798,7 +915,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             current_store = new_store;
                             println!("Session reset.");
                         }
-                        Err(e) => eprintln!("Error: {e:#}"),
+                        Err(e) => command_error!("Error: {e:#}"),
                     }
                     continue;
                 }
@@ -815,7 +932,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         None => (rest.to_string(), None),
                     };
                     if !snapshots.contains_key(&name) {
-                        eprintln!("No snapshot named '{name}'.");
+                        command_error!("No snapshot named '{name}'.");
                         continue;
                     }
                     match command {
@@ -839,7 +956,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
                 if let Some(rest) = line.strip_prefix("::why ") {
                     if !engine.supports_provenance() {
-                        eprintln!(
+                        command_error!(
                             "::why needs provenance, which is off for this session. \
                              Re-run with `--backend dd --provenance`, or use \
                              `--backend interpreter`."
@@ -859,7 +976,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 live = match engine.query_live(&q.predicate) {
                                     Ok(rows) => rows,
                                     Err(e) => {
-                                        eprintln!("Error: {e:#}");
+                                        command_error!("Error: {e:#}");
                                         continue;
                                     }
                                 };
@@ -915,7 +1032,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 }
                             }
                         }
-                        Err(e) => eprintln!("Parse error: {e}"),
+                        Err(e) => command_error!("Parse error: {e}"),
                     }
                     continue;
                 }
@@ -923,7 +1040,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 if let Some(rest) = line.strip_prefix("::smtlib ") {
                     let relations: Vec<&str> = rest.split_whitespace().collect();
                     if relations.is_empty() {
-                        eprintln!("Usage: ::smtlib <relation> [relation ...]");
+                        command_error!("Usage: ::smtlib <relation> [relation ...]");
                     } else {
                         let active = active_store(&current_store, &snapshots, &in_use);
                         let cfg = z3::Config::new();
@@ -937,23 +1054,25 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
                 if let Some(rest) = line.strip_prefix("::smt ") {
                     let active = active_store(&current_store, &snapshots, &in_use);
-                    if !smt_command(rest.trim(), active, format) {
-                        had_failure = true;
+                    match smt_command(rest.trim(), active, format) {
+                        CheckResult::Pass => {}
+                        CheckResult::Fail => had_failure = true,
+                        CheckResult::Error => command_failed = true,
                     }
                     continue;
                 }
 
                 if let Some(name) = line.strip_prefix("::snapshot ") {
-                    if refuse_if_in_use(&in_use) {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
                     let name = name.trim().to_string();
                     if name.is_empty() || name.contains(char::is_whitespace) {
-                        eprintln!("Snapshot names cannot be empty or contain spaces.");
+                        command_error!("Snapshot names cannot be empty or contain spaces.");
                         continue;
                     }
                     if snapshots.contains_key(&name) {
-                        eprintln!("Snapshot '{name}' already exists.");
+                        command_error!("Snapshot '{name}' already exists.");
                         continue;
                     }
                     let lazy_provenance = match engine
@@ -963,7 +1082,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     {
                         Ok(p) => p,
                         Err(e) => {
-                            eprintln!("Error: {e:#}");
+                            command_error!("Error: {e:#}");
                             continue;
                         }
                     };
@@ -994,7 +1113,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         [name] => match lookup(name) {
                             Some(s) => (s, None),
                             None => {
-                                eprintln!("No snapshot named '{}'.", name);
+                                command_error!("No snapshot named '{}'.", name);
                                 continue;
                             }
                         },
@@ -1002,21 +1121,21 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             let s1 = match lookup(name1) {
                                 Some(s) => s,
                                 None => {
-                                    eprintln!("No snapshot named '{}'.", name1);
+                                    command_error!("No snapshot named '{}'.", name1);
                                     continue;
                                 }
                             };
                             let s2 = match lookup(name2) {
                                 Some(s) => s,
                                 None => {
-                                    eprintln!("No snapshot named '{}'.", name2);
+                                    command_error!("No snapshot named '{}'.", name2);
                                     continue;
                                 }
                             };
                             (s1, Some(s2))
                         }
                         _ => {
-                            eprintln!("Usage: ::diff <name>  or  ::diff <name1> <name2>");
+                            command_error!("Usage: ::diff <name>  or  ::diff <name1> <name2>");
                             continue;
                         }
                     };
@@ -1039,7 +1158,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     match parts.as_slice() {
                         [name] => {
                             let Some(before_snap) = lookup(name) else {
-                                eprintln!("No snapshot named '{}'.", name);
+                                command_error!("No snapshot named '{}'.", name);
                                 continue;
                             };
                             // The implicit "current" side is whatever is in
@@ -1048,22 +1167,27 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             let after_label = in_use.as_deref().unwrap_or("current");
                             let before_tables = tables_of(&before_snap.store);
                             let after_tables = tables_of(after);
-                            print_access_diff(&before_tables, &after_tables, name, after_label);
+                            if !print_access_diff(&before_tables, &after_tables, name, after_label)
+                            {
+                                had_failure = true;
+                            }
                         }
                         [name1, name2] => {
                             let Some(s1) = lookup(name1) else {
-                                eprintln!("No snapshot named '{}'.", name1);
+                                command_error!("No snapshot named '{}'.", name1);
                                 continue;
                             };
                             let Some(s2) = lookup(name2) else {
-                                eprintln!("No snapshot named '{}'.", name2);
+                                command_error!("No snapshot named '{}'.", name2);
                                 continue;
                             };
                             let t1 = tables_of(&s1.store);
                             let t2 = tables_of(&s2.store);
-                            print_access_diff(&t1, &t2, name1, name2);
+                            if !print_access_diff(&t1, &t2, name1, name2) {
+                                had_failure = true;
+                            }
                         }
-                        _ => eprintln!(
+                        _ => command_error!(
                             "Usage: ::access-diff <snap>  or  ::access-diff <snap1> <snap2>"
                         ),
                     }
@@ -1071,7 +1195,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                 }
 
                 if let Some(rule) = line.strip_prefix("::define ") {
-                    if refuse_if_in_use(&in_use) {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
                     let checkpoint = engine.rules_len();
@@ -1079,7 +1203,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         engine.add_rule(format!("{}.", rule.trim_end_matches('.').trim()))
                     {
                         engine.truncate_rules(checkpoint);
-                        eprintln!("Error: {e:#}");
+                        command_error!("Error: {e:#}");
                         continue;
                     }
                     match engine.evaluate() {
@@ -1089,14 +1213,14 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                         }
                         Err(e) => {
                             engine.truncate_rules(checkpoint);
-                            eprintln!("Error: {e:#}");
+                            command_error!("Error: {e:#}");
                         }
                     }
                     continue;
                 }
 
                 if let Some(rest) = line.strip_prefix("::source ") {
-                    if refuse_if_in_use(&in_use) {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
                     let src = rest.trim();
@@ -1107,17 +1231,17 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                     current_store = new_store;
                                     eprintln!("Sourced and evaluated.");
                                 }
-                                Err(e) => eprintln!("Error: {e:#}"),
+                                Err(e) => command_error!("Error: {e:#}"),
                             },
-                            Err(e) => eprintln!("Source error: not valid UTF-8: {e}"),
+                            Err(e) => command_error!("Source error: not valid UTF-8: {e}"),
                         },
-                        Err(e) => eprintln!("Source error: {e:#}"),
+                        Err(e) => command_error!("Source error: {e:#}"),
                     }
                     continue;
                 }
 
                 if let Some(rest) = line.strip_prefix("::load-k8s ") {
-                    if refuse_if_in_use(&in_use) {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
                     let rest = rest.trim();
@@ -1139,15 +1263,15 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                     summary.objects, summary.replaced
                                 );
                             }
-                            Err(e) => eprintln!("Error: {e:#}"),
+                            Err(e) => command_error!("Error: {e:#}"),
                         },
-                        Err(e) => eprintln!("Load error: {e:#}"),
+                        Err(e) => command_error!("Load error: {e:#}"),
                     }
                     continue;
                 }
 
                 if let Some(rest) = line.strip_prefix("::load ") {
-                    if refuse_if_in_use(&in_use) {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
                     let rest = rest.trim();
@@ -1155,7 +1279,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                     let (relation, source) = match rest.find(|c: char| c.is_whitespace()) {
                         Some(idx) => (&rest[..idx], rest[idx + 1..].trim()),
                         None => {
-                            eprintln!(
+                            command_error!(
                                 "Usage: ::load <relation> <source>  (source is a file path or ! <cmd>)"
                             );
                             continue;
@@ -1167,16 +1291,16 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                 current_store = new_store;
                                 eprintln!("Inserted {n} fact(s) into {relation} and evaluated.");
                             }
-                            Err(e) => eprintln!("Error: {e:#}"),
+                            Err(e) => command_error!("Error: {e:#}"),
                         },
-                        Err(e) => eprintln!("Load error: {e:#}"),
+                        Err(e) => command_error!("Load error: {e:#}"),
                     }
                     continue;
                 }
 
                 // ~pred(old...). pred(new...).  — atomic replace (retract + insert, one eval)
                 if let Some(rest) = line.strip_prefix('~') {
-                    if refuse_if_in_use(&in_use) {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
                     let rest = rest.trim();
@@ -1191,7 +1315,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                     if let Some(arity) = engine.relation_arity(&new_rel)
                                         && new_tuple.len() != arity
                                     {
-                                        eprintln!(
+                                        command_error!(
                                             "arity mismatch: {new_rel}/{arity} expects {arity} arg(s), got {}",
                                             new_tuple.len()
                                         );
@@ -1220,21 +1344,21 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                                     );
                                                 }
                                             }
-                                            Err(e) => eprintln!("Error: {e:#}"),
+                                            Err(e) => command_error!("Error: {e:#}"),
                                         }
                                     }
                                 }
-                                Err(e) => eprintln!("Parse error: {e}"),
+                                Err(e) => command_error!("Parse error: {e}"),
                             }
                         }
-                        None => eprintln!("Usage: ~pred(old_args). pred(new_args)."),
+                        None => command_error!("Usage: ~pred(old_args). pred(new_args)."),
                     }
                     continue;
                 }
 
                 // +pred(args).  — insert ground fact
                 if let Some(inner) = line.strip_prefix('+') {
-                    if refuse_if_in_use(&in_use) {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
                     let inner = inner.trim_end_matches('.').trim();
@@ -1243,7 +1367,7 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                             if let Some(arity) = engine.relation_arity(&rel)
                                 && tuple.len() != arity
                             {
-                                eprintln!(
+                                command_error!(
                                     "arity mismatch: {rel}/{arity} expects {arity} arg(s), got {}",
                                     tuple.len()
                                 );
@@ -1259,21 +1383,21 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                             current_store = new_store;
                                             eprintln!("Asserted.");
                                         }
-                                        Err(e) => eprintln!("Error: {e:#}"),
+                                        Err(e) => command_error!("Error: {e:#}"),
                                     }
                                 }
                             } else {
                                 eprintln!("Fact already exists.");
                             }
                         }
-                        Err(e) => eprintln!("Parse error: {e}"),
+                        Err(e) => command_error!("Parse error: {e}"),
                     }
                     continue;
                 }
 
                 // -pred(args).  — retract ground fact
                 if let Some(inner) = line.strip_prefix('-') {
-                    if refuse_if_in_use(&in_use) {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
                     let inner = inner.trim_end_matches('.').trim();
@@ -1289,29 +1413,31 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
                                             current_store = new_store;
                                             eprintln!("Retracted.");
                                         }
-                                        Err(e) => eprintln!("Error: {e:#}"),
+                                        Err(e) => command_error!("Error: {e:#}"),
                                     }
                                 }
                             } else {
                                 eprintln!("No matching fact found.");
                             }
                         }
-                        Err(e) => eprintln!("Parse error: {e}"),
+                        Err(e) => command_error!("Parse error: {e}"),
                     }
                     continue;
                 }
 
                 // ::match <Kind> <namespace> <selector>  — scoped to one Kind
                 if let Some(rest) = line.strip_prefix("::match ") {
-                    if refuse_if_in_use(&in_use) {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
                     let parts: Vec<&str> = rest.trim().splitn(3, char::is_whitespace).collect();
                     match parts.as_slice() {
                         [kind, namespace, selector] => {
-                            run_match(engine, Some(kind), namespace, selector, format);
+                            if !run_match(engine, Some(kind), namespace, selector, format) {
+                                command_failed = true;
+                            }
                         }
-                        _ => eprintln!(
+                        _ => command_error!(
                             "Usage: ::match <Kind> <namespace> <selector>  (namespace \"\" for cluster-scoped)"
                         ),
                     }
@@ -1320,37 +1446,45 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
 
                 // ::match_all <namespace> <selector>  — any Kind
                 if let Some(rest) = line.strip_prefix("::match_all ") {
-                    if refuse_if_in_use(&in_use) {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
                     let parts: Vec<&str> = rest.trim().splitn(2, char::is_whitespace).collect();
                     match parts.as_slice() {
                         [namespace, selector] => {
-                            run_match(engine, None, namespace, selector, format);
+                            if !run_match(engine, None, namespace, selector, format) {
+                                command_failed = true;
+                            }
                         }
-                        _ => eprintln!("Usage: ::match_all <namespace> <selector>"),
+                        _ => command_error!("Usage: ::match_all <namespace> <selector>"),
                     }
                     continue;
                 }
 
                 // Everything else is not a command. Queries go through `?-`.
                 if line.starts_with("::") {
-                    eprintln!("Unknown command: {line} (try \\help)");
+                    command_error!("Unknown command: {line} (try \\help)");
                 } else {
-                    eprintln!("Not a command. Queries start with ?-, e.g. ?- {line}");
+                    command_error!("Not a command. Queries start with ?-, e.g. ?- {line}");
                 }
             }
             Err(ReadlineError::Interrupted) => continue,
             Err(ReadlineError::Eof) => break,
             Err(e) => {
-                eprintln!("Error: {e}");
+                command_error!("Error: {e}");
                 break;
             }
         }
     }
 
-    let _ = rl.save_history(&history_path);
-    Ok(!had_failure)
+    input.save_history();
+    Ok(if stop_on_error && command_failed {
+        SessionStatus::Error
+    } else if had_failure {
+        SessionStatus::Findings
+    } else {
+        SessionStatus::Clean
+    })
 }
 
 /// Split a multi-line pasted string into individual commands, keeping lines
@@ -1546,12 +1680,14 @@ fn print_reaches_grouped(violations: &[rbac::Violation]) {
     }
 }
 
+/// Print what RBAC permissions changed from `before` to `after`. Returns
+/// `false` when any permission was gained (the `FAIL` verdict).
 fn print_access_diff(
     before: &rbac::PermissionTables,
     after: &rbac::PermissionTables,
     before_label: &str,
     after_label: &str,
-) {
+) -> bool {
     let can_gained = rbac::diff::check_permission_expansion(before, after);
     let can_lost = rbac::diff::check_permission_contraction(before, after);
     let eff_gained = rbac::diff::check_effective_can_expansion(before, after);
@@ -1566,7 +1702,7 @@ fn print_access_diff(
         println!("PASS  {} permission(s) removed, none added", total_lost);
     } else {
         println!("PASS  no permission changes");
-        return;
+        return true;
     }
 
     let verdicts = per_principal_verdicts(&can_gained, &can_lost, &eff_gained, &eff_lost);
@@ -1625,6 +1761,7 @@ fn print_access_diff(
         println!("  EFFECTIVE LOST ({}) [escalation-aware]:", eff_lost.len());
         print_eff_diffs_grouped(&eff_lost, before);
     }
+    total_gained == 0
 }
 
 fn per_principal_verdicts(
@@ -1727,11 +1864,18 @@ fn paths_json(paths: &[rbac::AccessPath]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Run an `::smt` subcommand. Returns `false` when the check reported a
-/// failure (a `FAIL` line in plain output, `"result":"fail"` in ndjson), so the
-/// caller can turn it into a nonzero exit status. Usage errors and unknown
-/// subcommands return `true`: they are not check results.
-fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
+/// What an `::smt` check concluded.
+enum CheckResult {
+    Pass,
+    /// A `FAIL` line in plain output, `"result":"fail"` in ndjson.
+    Fail,
+    /// A usage error or unknown subcommand: no check ran.
+    Error,
+}
+
+/// Run an `::smt` subcommand. The caller turns a `Fail` into exit status 1
+/// and an `Error` into exit status 2 under `--script`.
+fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckResult {
     let ndjson = format == OutputFormat::Ndjson;
     let mut tokens = input.splitn(2, ' ');
     let subcommand = tokens.next().unwrap_or("").trim();
@@ -1747,7 +1891,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                     "Usage: ::smt check_access <namespace> <resource> <verb> [expected_principal ...]"
                 );
                 eprintln!("       Use \"\" for namespace to check cluster-wide (CRB) grants.");
-                return true;
+                return CheckResult::Error;
             };
             let namespace = ns_raw.trim_matches('"');
             let resource = res_raw.trim_matches('"');
@@ -1771,7 +1915,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                 } else {
                     println!("PASS  can(_, {namespace:?}, {resource:?}, {verb:?})");
                 }
-                true
+                CheckResult::Pass
             } else {
                 if ndjson {
                     for v in &violations {
@@ -1805,7 +1949,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                         print_violation_paths(&v.paths);
                     }
                 }
-                false
+                CheckResult::Fail
             }
         }
         "reaches" | "cluster-admin" => {
@@ -1837,7 +1981,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                     eprintln!(
                         "       Use ::smt cluster-admin [--direct] [--all] to check for cluster-admin level access."
                     );
-                    return true;
+                    return CheckResult::Error;
                 };
                 let expected_owned: Vec<String> = token_iter
                     .filter(|s| !matches!(*s, "[]" | "[" | "]"))
@@ -1877,7 +2021,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                         "PASS  effective_can(_, {namespace:?}, {apigroup:?}, {resource:?}, {verb:?})"
                     );
                 }
-                true
+                CheckResult::Pass
             } else {
                 if ndjson {
                     let emit_violations = |violations: &[rbac::Violation], kind: &str| {
@@ -1916,7 +2060,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                         print_reaches_grouped(&via);
                     }
                 }
-                false
+                CheckResult::Fail
             }
         }
         "check_isolation" => {
@@ -1926,7 +2070,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                 eprintln!(
                     "       Checks that only the listed principals have any RBAC access in <namespace>."
                 );
-                return true;
+                return CheckResult::Error;
             };
             let namespace = ns_raw.trim_matches('"');
             let allowed_owned: Vec<String> = args
@@ -1949,7 +2093,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                         "PASS  namespace {namespace:?} is isolated to the expected principals"
                     );
                 }
-                true
+                CheckResult::Pass
             } else {
                 if ndjson {
                     for v in &violations {
@@ -1973,7 +2117,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                         );
                     }
                 }
-                false
+                CheckResult::Fail
             }
         }
         "node_selector" => {
@@ -1987,7 +2131,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                 } else {
                     println!("PASS  all pods with nodeSelectors are schedulable");
                 }
-                true
+                CheckResult::Pass
             } else {
                 if ndjson {
                     for p in &unschedulable {
@@ -2002,7 +2146,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                         println!("        {}/{}", p.namespace, p.name);
                     }
                 }
-                false
+                CheckResult::Fail
             }
         }
         "anti_affinity" => {
@@ -2017,7 +2161,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                     } else {
                         println!("PASS  no anti-affinity conflicts found");
                     }
-                    true
+                    CheckResult::Pass
                 }
                 PlacementResult::Sat(mut assignment) => {
                     assignment.sort_by(|a, b| a.0.cmp(&b.0));
@@ -2034,7 +2178,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                             println!("        {pod} → {node}");
                         }
                     }
-                    true
+                    CheckResult::Pass
                 }
                 PlacementResult::Unsat => {
                     if ndjson {
@@ -2047,7 +2191,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                             "FAIL  no valid placement exists — anti-affinity constraints unsatisfiable"
                         );
                     }
-                    false
+                    CheckResult::Fail
                 }
             }
         }
@@ -2062,7 +2206,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                 } else {
                     println!("PASS  full coverage — no nodeSelector gap found (Z3 UNSAT)");
                 }
-                true
+                CheckResult::Pass
             } else {
                 if ndjson {
                     for gap in &gaps {
@@ -2087,7 +2231,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
                         println!("  GAP {}  {}", i + 1, labels.join(", "));
                     }
                 }
-                false
+                CheckResult::Fail
             }
         }
         _ => {
@@ -2095,7 +2239,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> bool {
             eprintln!(
                 "Available: check_access, reaches, cluster-admin, node_selector, anti_affinity, karpenter"
             );
-            true
+            CheckResult::Error
         }
     }
 }
@@ -2732,7 +2876,7 @@ fn render_table(headers: &[String], rows: &[Vec<String>]) -> String {
 /// line (`Column = value, ...`, or `rel(a, b, ...)` in compact format). `_` and
 /// missing trailing arguments match anything. `live` is false under `\use`: a
 /// frozen snapshot has no live session of its own, so `store` is read directly
-/// even when the live engine has one.
+/// even when the live engine has one. Returns `false` if the query failed.
 fn list_tuples(
     engine: &Engine,
     store: &EvalStore,
@@ -2741,14 +2885,14 @@ fn list_tuples(
     body: &str,
     cols: &[String],
     live: bool,
-) {
+) -> bool {
     let live_rows: Vec<Vec<Value>>;
     let rows: &[Vec<Value>] = if live && engine.has_session() {
         live_rows = match engine.query_live(rel) {
             Ok(rows) => rows,
             Err(e) => {
                 eprintln!("Error: {e:#}");
-                return;
+                return false;
             }
         };
         &live_rows
@@ -2760,7 +2904,7 @@ fn list_tuples(
             Ok(q) => q,
             Err(e) => {
                 eprintln!("Parse error: {e}");
-                return;
+                return false;
             }
         },
         _ => query::ParsedQuery {
@@ -2771,7 +2915,7 @@ fn list_tuples(
     let matched = query::filter_tuples(rows, &q);
     if matched.is_empty() {
         eprintln!("No results.");
-        return;
+        return true;
     }
     if format == OutputFormat::Table {
         let width = matched.iter().map(|t| t.len()).max().unwrap_or(0);
@@ -2784,7 +2928,7 @@ fn list_tuples(
             .collect();
         print!("{}", render_table(&headers, &rows));
         eprintln!("Found {} result(s).", matched.len());
-        return;
+        return true;
     }
     let show = |v: &Value| {
         if format == OutputFormat::Pretty {
@@ -2815,6 +2959,7 @@ fn list_tuples(
         }
     }
     eprintln!("Found {} result(s).", matched.len());
+    true
 }
 
 /// Column count of `rel`: from a stored row, else from its Decl.

@@ -57,6 +57,9 @@ pub trait FactSource {
 /// - Plain directory: expands to `dir/**/*`, filtered to .json/.yaml/.yml
 /// - Glob pattern: expanded as-is (supports **), filtered to .json/.yaml/.yml
 /// - Explicit file: parsed directly
+///
+/// A path that matches no manifest files is an error, so a typo'd path fails
+/// loudly instead of loading nothing.
 pub struct K8sManifestsSource {
     pub paths: Vec<String>,
 }
@@ -66,12 +69,14 @@ impl FactSource for K8sManifestsSource {
         let mut objects = Vec::new();
         for pattern in &self.paths {
             let expanded = expand_pattern(pattern);
+            let mut matched = false;
             for path in expanded {
                 let path = path?;
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 if !matches!(ext, "json" | "yaml" | "yml") {
                     continue;
                 }
+                matched = true;
                 let bytes =
                     std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
                 let parsed = match ext {
@@ -80,6 +85,9 @@ impl FactSource for K8sManifestsSource {
                 }
                 .with_context(|| format!("parsing {}", path.display()))?;
                 objects.extend(parsed);
+            }
+            if !matched {
+                anyhow::bail!("no .json, .yaml or .yml files match {pattern:?}");
             }
         }
         Ok(objects)
@@ -905,6 +913,30 @@ mod tests {
 
     fn engine_from_store(store: MemStore) -> Engine {
         Engine::new(store, Path::new("rules"), Box::new(InterpreterBackend)).expect("engine")
+    }
+
+    /// A path that matches no manifest files is an error, not an empty load,
+    /// whether it is missing or a directory with no manifests in it.
+    #[test]
+    fn manifest_path_matching_no_files_is_an_error() {
+        let dir =
+            std::env::temp_dir().join(format!("pallograph-no-manifests-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("notes.txt"), "not a manifest").expect("write file");
+        for path in [dir.join("missing.yaml"), dir.clone()] {
+            let mut source = K8sManifestsSource {
+                paths: vec![path.to_string_lossy().into_owned()],
+            };
+            let Err(err) = object_facts(&mut source) else {
+                panic!("loading {path:?} should fail");
+            };
+            assert!(
+                err.to_string()
+                    .contains("no .json, .yaml or .yml files match"),
+                "{err:#}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Data carries the object's metadata (labels included, managedFields
