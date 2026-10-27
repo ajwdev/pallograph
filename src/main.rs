@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -47,9 +48,17 @@ struct Cli {
     /// names each column, `compact` prints bare tuples, `table` aligns columns
     /// under a header, and `ndjson` emits one JSON object per row (or per
     /// violation), suitable for piping into jq, DuckDB, etc. The process exits
-    /// 1 if any `::smt` check failed.
+    /// 1 if any `::smt` check failed or `::access-diff` found new permissions.
     #[arg(long, value_enum, default_value = "default")]
     format: OutputFormat,
+
+    /// Run the commands in this file (`-` for stdin), one per line, instead of
+    /// starting the REPL. Blank lines and lines starting with `#` are skipped.
+    /// Stops at the first line that is not a command or whose command fails.
+    /// Exits 0 when clean, 1 on findings (a failed `::smt` check, or
+    /// `::access-diff` finding new permissions), 2 on an error.
+    #[arg(long, value_name = "FILE")]
+    script: Option<PathBuf>,
 }
 
 /// Load one datasource. k8s objects go to `objects` so the engine can track
@@ -131,10 +140,20 @@ async fn load_datasource(
     Ok(())
 }
 
+/// Exits 2 on an error, as `--script` does when a command fails, so it is
+/// never mistaken for a finding (exit 1).
 #[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
+async fn main() -> ExitCode {
+    match run(Cli::parse()).await {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            ExitCode::from(repl::SessionStatus::Error.exit_code())
+        }
+    }
+}
 
+async fn run(cli: Cli) -> Result<ExitCode> {
     // Load EDB facts into a staging MemStore.
     // Priority: config file > small fixture default.
     let mut edb = MemStore::new();
@@ -181,14 +200,15 @@ async fn main() -> Result<()> {
     let mut engine = Engine::with_objects(edb, objects, &cli.rules, backend)?;
     if cli.explain {
         let mut cp = engine.compile()?;
-        return cp.dump_plan();
+        cp.dump_plan()?;
+        return Ok(ExitCode::SUCCESS);
     }
 
     let store = engine.evaluate()?;
 
-    if !repl::run(&mut engine, store, cli.format)? {
-        std::process::exit(1);
-    }
-
-    Ok(())
+    let status = match &cli.script {
+        Some(path) => repl::run_script(&mut engine, store, cli.format, path)?,
+        None => repl::run(&mut engine, store, cli.format)?,
+    };
+    Ok(ExitCode::from(status.exit_code()))
 }
