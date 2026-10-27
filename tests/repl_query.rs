@@ -336,21 +336,6 @@ fn snapshot_leaves_out_query_results() {
     }
 }
 
-/// `::reset` drops added facts and rules but keeps named snapshots: a diff
-/// against one taken before the reset sees no change.
-#[test]
-fn reset_keeps_snapshots() {
-    for backend in ["interpreter", "dd"] {
-        let commands = "\\snapshot before\n\
-             +binding_subject(\"kube-system\", \"rb-bob\", /user, \"bob@example.com\").\n\
-             \\reset\n\
-             \\diff before\n\
-             ::quit\n";
-        let (stdout, _) = run_session_with(&["--backend", backend], commands);
-        assert!(stdout.contains("(no changes)"), "{backend}: {stdout}");
-    }
-}
-
 // -----------------------------------------------------------------------
 // `\rollback`: returning to a named snapshot
 // -----------------------------------------------------------------------
@@ -602,7 +587,6 @@ fn use_refuses_state_changes() {
             "{}\\use before\n\
              +bar(1).\n\
              \\define baz(X) :- bar(X).\n\
-             \\reset\n\
              \\snapshot again\n\
              \\rollback before\n\
              \\match Pod kube-system foo=bar\n\
@@ -614,7 +598,7 @@ fn use_refuses_state_changes() {
         let refusals = stderr
             .matches("Snapshot 'before' is in use; \\use to return to the live state.")
             .count();
-        assert_eq!(refusals, 7, "{backend}: {stderr}");
+        assert_eq!(refusals, 6, "{backend}: {stderr}");
     }
 }
 

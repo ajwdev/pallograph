@@ -250,9 +250,6 @@ fn print_help() {
     println!(
         "  \\format default|compact|pretty|table|ndjson - set output format (compact = bare tuples, table = aligned columns, ndjson = one JSON object per row)"
     );
-    println!(
-        "  \\reset                                 — clear session state (_N results, \\define rules, + facts), re-evaluate"
-    );
     println!("  !<cmd>                                 — run a shell command");
     println!(
         "  # <text>                               - comment, ignored (handy in --script files)"
@@ -416,13 +413,12 @@ fn known_relations_in_use(
 }
 
 /// Return `true` and refuse a state-changing command (`+`, `-`, `~`,
-/// `\define`, `\load`, `\load-k8s`, `\source`, `\reset`, `\snapshot`,
-/// `\rollback`) while a
-/// snapshot is in use: a frozen state never changes, so there is nothing for
-/// the command to act on. `\match` and `\match_all` are refused for the same
-/// reason even though they leave the EDB untouched: they re-evaluate the
-/// live engine, which a frozen snapshot has none of. A refusal marks the
-/// line as failed.
+/// `\define`, `\load`, `\load-k8s`, `\source`, `\snapshot`, `\rollback`)
+/// while a snapshot is in use: a frozen state never changes, so there is
+/// nothing for the command to act on. `\match` and `\match_all` are refused
+/// for the same reason even though they leave the EDB untouched: they
+/// re-evaluate the live engine, which a frozen snapshot has none of. A
+/// refusal marks the line as failed.
 fn refuse_if_in_use(in_use: &Option<String>, command_failed: &mut bool) -> bool {
     if let Some(name) = in_use {
         eprintln!("Snapshot '{name}' is in use; \\use to return to the live state.");
@@ -902,24 +898,6 @@ fn session(
                             command_error!("Error: {e:#}");
                             engine.remove_rules_for(&result_name);
                         }
-                    }
-                    continue;
-                }
-
-                if line == "::reset" {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    engine.reset_session();
-                    // Named snapshots are frozen copies, independent of the
-                    // engine's live state, so they survive ::reset untouched.
-                    query_counter = 0;
-                    match engine.evaluate() {
-                        Ok(new_store) => {
-                            current_store = new_store;
-                            println!("Session reset.");
-                        }
-                        Err(e) => command_error!("Error: {e:#}"),
                     }
                     continue;
                 }

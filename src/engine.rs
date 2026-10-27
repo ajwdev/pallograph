@@ -761,9 +761,6 @@ pub struct Engine {
     /// Mangle source for each rule file, plus any REPL-defined rules.
     rule_sources: Vec<String>,
     backend: Box<dyn Backend>,
-    /// Lengths of edb and rule_sources after initial load — used by reset_session.
-    edb_base_len: usize,
-    rules_base_len: usize,
     /// Persistent incremental DD session, started by `Backend::spawn_session`
     /// (present for the DD backend, absent for the interpreter).  When Some, fact
     /// mutations are fed directly to the worker rather than waiting for a full
@@ -898,8 +895,6 @@ impl Engine {
         rule_sources: Vec<String>,
         backend: Box<dyn Backend>,
     ) -> Result<Self> {
-        let edb_base_len = edb.len();
-        let rules_base_len = rule_sources.len();
         // Backends with a persistent session (DD) start it here, so fact
         // mutations feed deltas to the worker rather than forcing a full
         // recompute. Rule changes still trigger a full worker rebuild.
@@ -910,8 +905,6 @@ impl Engine {
             edb_index,
             rule_sources,
             backend,
-            edb_base_len,
-            rules_base_len,
             session,
             #[cfg(test)]
             rebuild_count: 0,
@@ -1211,17 +1204,6 @@ impl Engine {
         UpsertSummary {
             objects: total,
             replaced: replaced.len() + collapsed,
-        }
-    }
-
-    /// Reset all REPL session state: drop added rules and EDB temporaries, restore
-    /// to the state at initial load.
-    pub fn reset_session(&mut self) {
-        self.edb.truncate(self.edb_base_len);
-        self.edb_index = self.edb.iter().cloned().collect();
-        self.rule_sources.truncate(self.rules_base_len);
-        if let Some(s) = &mut self.session {
-            let _ = s.rebuild(&self.edb, &self.rule_sources);
         }
     }
 
@@ -1568,13 +1550,14 @@ mod tests {
         let (mut edb, rules) = diamond();
         edb.push(edb[0].clone());
         let mut engine = Engine::from_parts(edb, rules, Box::new(InterpreterBackend)).unwrap();
+        let saved = engine.save_inputs();
         let ab = vec![s("a"), s("b")];
         assert!(engine.retract_fact("edge", &ab));
         assert!(!engine.add_fact("edge".to_string(), ab.clone()));
         assert!(engine.retract_fact("edge", &ab));
         assert!(engine.add_fact("edge".to_string(), ab.clone()));
 
-        engine.reset_session();
+        engine.restore_inputs(&saved).unwrap();
         assert!(!engine.add_fact("edge".to_string(), ab));
     }
 

@@ -11,7 +11,7 @@ use crate::engine::{EngineInputs, EvalStore, is_scratch_relation};
 
 /// A `\snapshot`'s saved state: a frozen copy of the eval store at the
 /// moment `\snapshot` ran, so later mutations to the live engine (`+`, `-`,
-/// `~`, `::reset`) never change it, plus a copy of the engine's inputs
+/// `~`, `\rollback`) never change it, plus a copy of the engine's inputs
 /// (facts and rules) that `\rollback` restores.
 ///
 /// `\why` under `\use` explains facts from the frozen state's own
