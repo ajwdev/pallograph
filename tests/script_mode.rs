@@ -176,6 +176,23 @@ fn unknown_line_exits_2_and_stops() {
 }
 
 #[test]
+fn rollback_to_unknown_snapshot_exits_2() {
+    let ws = Workspace::new();
+    let out = ws.run_script("\\rollback nosuch\n\\snapshot base\n");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr(&out).contains("No snapshot named 'nosuch'."),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        !stdout(&out).contains("Saved snapshot"),
+        "ran past the failed line: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
 fn load_of_nonexistent_path_exits_2() {
     let ws = Workspace::new();
     let missing = ws.dir.join("nonexistent.yaml");

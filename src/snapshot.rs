@@ -7,11 +7,12 @@ use std::fmt;
 use mangle_common::Value;
 
 use crate::dd::session::FrozenLazyProvenance;
-use crate::engine::{EvalStore, is_scratch_relation};
+use crate::engine::{EngineInputs, EvalStore, is_scratch_relation};
 
 /// A `\snapshot`'s saved state: a frozen copy of the eval store at the
 /// moment `\snapshot` ran, so later mutations to the live engine (`+`, `-`,
-/// `~`, `::reset`) never change it.
+/// `~`, `\rollback`) never change it, plus a copy of the engine's inputs
+/// (facts and rules) that `\rollback` restores.
 ///
 /// `\why` under `\use` explains facts from the frozen state's own
 /// provenance: `store.provenance` on the interpreter, or `lazy_provenance`
@@ -20,6 +21,7 @@ use crate::engine::{EvalStore, is_scratch_relation};
 pub struct FrozenState {
     pub store: EvalStore,
     pub lazy_provenance: Option<FrozenLazyProvenance>,
+    pub inputs: EngineInputs,
 }
 
 pub struct Diff {

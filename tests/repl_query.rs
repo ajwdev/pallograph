@@ -336,18 +336,157 @@ fn snapshot_leaves_out_query_results() {
     }
 }
 
-/// `::reset` drops added facts and rules but keeps named snapshots: a diff
-/// against one taken before the reset sees no change.
+// -----------------------------------------------------------------------
+// `\rollback`: returning to a named snapshot
+// -----------------------------------------------------------------------
+
+/// Backend flags the rollback tests run under: each backend, plus the DD
+/// backend with provenance, whose session is rebuilt with annotations.
+const ROLLBACK_BACKENDS: [&[&str]; 3] = [
+    &["--backend", "interpreter"],
+    &["--backend", "dd"],
+    &["--backend", "dd", "--provenance"],
+];
+
+/// Two labels on a Pod loaded at startup, as the `+`, `-` and `~` tests
+/// below change them.
+const ETCD_COMPONENT: &str =
+    r#"object_label("v1", "Pod", "kube-system", "etcd-kind-control-plane", "component", "etcd")"#;
+const ETCD_TIER: &str = r#"object_label("v1", "Pod", "kube-system", "etcd-kind-control-plane", "tier", "control-plane")"#;
+
+/// `\rollback` undoes `+`, `-` of a startup fact and `~` of another: a
+/// diff against the snapshot sees changes before it and none after.
 #[test]
-fn reset_keeps_snapshots() {
-    for backend in ["interpreter", "dd"] {
-        let commands = "\\snapshot before\n\
+fn rollback_undoes_fact_changes() {
+    for args in ROLLBACK_BACKENDS {
+        let commands = format!(
+            "\\snapshot base\n\
              +binding_subject(\"kube-system\", \"rb-bob\", /user, \"bob@example.com\").\n\
-             \\reset\n\
-             \\diff before\n\
-             ::quit\n";
-        let (stdout, _) = run_session_with(&["--backend", backend], commands);
-        assert!(stdout.contains("(no changes)"), "{backend}: {stdout}");
+             -{ETCD_COMPONENT}.\n\
+             ~{ETCD_TIER}. object_label(\"v1\", \"Pod\", \"kube-system\", \"etcd-kind-control-plane\", \"tier\", \"edited\").\n\
+             \\diff base\n\
+             \\rollback base\n\
+             \\diff base\n\
+             ?- object_label(\"v1\", \"Pod\", \"kube-system\", \"etcd-kind-control-plane\", K, V)\n\
+             ::quit\n"
+        );
+        let (stdout, stderr) = run_session_with(args, &commands);
+        let (before, after) = stdout
+            .split_once("Rolled back to snapshot 'base'.")
+            .unwrap_or_else(|| panic!("{args:?}: {stdout}\n{stderr}"));
+        assert!(before.contains("bob@example.com"), "{args:?}: {before}");
+        assert!(before.contains(r#""etcd""#), "{args:?}: {before}");
+        assert!(before.contains(r#""edited""#), "{args:?}: {before}");
+        assert!(after.contains("(no changes)"), "{args:?}: {after}");
+        assert!(
+            after.contains(r#"K = "component", V = "etcd""#),
+            "{args:?}: {after}"
+        );
+        assert!(
+            after.contains(r#"K = "tier", V = "control-plane""#),
+            "{args:?}: {after}"
+        );
+        assert!(!after.contains("edited"), "{args:?}: {after}");
+    }
+}
+
+/// `\rollback` drops a rule `\define`d after the snapshot.
+#[test]
+fn rollback_drops_defined_rule() {
+    for args in ROLLBACK_BACKENDS {
+        let (_, stderr) = run_session_with(
+            args,
+            "\\snapshot base\n\
+             \\define admin_kind(K) :- direct_perm(\"admin@example.com\", K, _, _, _, _, _).\n\
+             ?- admin_kind(K)\n\
+             \\rollback base\n\
+             ?- admin_kind(K)\n\
+             ::quit\n",
+        );
+        assert!(stderr.contains("Found "), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("Unknown relation 'admin_kind'"),
+            "{args:?}: {stderr}"
+        );
+    }
+}
+
+/// Rolling back to an older snapshot after taking a newer one, then to the
+/// newer one: each snapshot outlives a rollback to it or past it.
+#[test]
+fn rollback_to_older_then_newer_snapshot() {
+    for args in ROLLBACK_BACKENDS {
+        let (stdout, _) = run_session_with(
+            args,
+            "\\snapshot a\n\
+             +binding_subject(\"kube-system\", \"rb-bob\", /user, \"bob@example.com\").\n\
+             \\snapshot b\n\
+             +binding_subject(\"kube-system\", \"rb-carol\", /user, \"carol@example.com\").\n\
+             \\rollback a\n\
+             \\diff a\n\
+             \\rollback b\n\
+             \\diff b\n\
+             \\diff a\n\
+             ::quit\n",
+        );
+        let sections: Vec<&str> = stdout.split("Rolled back to snapshot ").collect();
+        assert_eq!(sections.len(), 3, "{args:?}: {stdout}");
+        // After `\rollback a`: `\diff a` is clean.
+        assert!(sections[1].contains("(no changes)"), "{args:?}: {stdout}");
+        // After `\rollback b`: `\diff b` is clean, `\diff a` sees bob only.
+        let (diff_b, diff_a) = sections[2]
+            .split_once("(no changes)")
+            .unwrap_or_else(|| panic!("{args:?}: {stdout}"));
+        assert!(!diff_b.contains("bob@example.com"), "{args:?}: {stdout}");
+        assert!(diff_a.contains("bob@example.com"), "{args:?}: {stdout}");
+        assert!(!diff_a.contains("carol@example.com"), "{args:?}: {stdout}");
+    }
+}
+
+/// `?-` results (`_N`) are not part of a snapshot: `\rollback` drops all
+/// of them, from before the snapshot or after, and numbering starts over.
+#[test]
+fn rollback_drops_all_query_results() {
+    for args in ROLLBACK_BACKENDS {
+        let (_, stderr) = run_session_with(
+            args,
+            "?- direct_perm(\"admin@example.com\", K, Ns, G, R, Rn, V)\n\
+             \\snapshot base\n\
+             ?- direct_perm(\"admin@example.com\", K, Ns, G, R, Rn, V)\n\
+             \\rollback base\n\
+             ?- _0(K, Ns, G, R, Rn, V)\n\
+             ?- _1(K, Ns, G, R, Rn, V)\n\
+             ?- direct_perm(\"admin@example.com\", K, Ns, G, R, Rn, V)\n\
+             ::quit\n",
+        );
+        assert!(
+            stderr.contains("Unknown relation '_0'"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains("Unknown relation '_1'"),
+            "{args:?}: {stderr}"
+        );
+        // `_0` before the snapshot, `_1` after it, `_0` again after the
+        // rollback.
+        assert_eq!(stderr.matches("(→ _0)").count(), 2, "{args:?}: {stderr}");
+        assert_eq!(stderr.matches("(→ _1)").count(), 1, "{args:?}: {stderr}");
+    }
+}
+
+/// `\rollback` of a name never snapshotted is an error, and changes nothing.
+#[test]
+fn rollback_unknown_snapshot_is_refused() {
+    for args in ROLLBACK_BACKENDS {
+        let (_, stderr) = run_session_with(args, "\\rollback nosuch\n\\rollback\n::quit\n");
+        assert!(
+            stderr.contains("No snapshot named 'nosuch'."),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains("Usage: ::rollback <name>"),
+            "{args:?}: {stderr}"
+        );
     }
 }
 
@@ -448,8 +587,8 @@ fn use_refuses_state_changes() {
             "{}\\use before\n\
              +bar(1).\n\
              \\define baz(X) :- bar(X).\n\
-             \\reset\n\
              \\snapshot again\n\
+             \\rollback before\n\
              \\match Pod kube-system foo=bar\n\
              \\match_all kube-system foo=bar\n\
              ::quit\n",
@@ -606,12 +745,17 @@ fn demo_role(resources: &str) -> String {
 /// Write `demo_role(resources)` into its own fresh temp dir, so a
 /// datasource can load it alone. Returns the file's path.
 fn write_demo_role(resources: &str) -> PathBuf {
+    write_manifest(&demo_role(resources))
+}
+
+/// Write `yaml` into its own fresh temp dir. Returns the file's path.
+fn write_manifest(yaml: &str) -> PathBuf {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir =
         std::env::temp_dir().join(format!("pallograph-repl-upsert-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let path = dir.join("demo.yaml");
-    std::fs::write(&path, demo_role(resources)).expect("write manifest");
+    std::fs::write(&path, yaml).expect("write manifest");
     path
 }
 
@@ -700,6 +844,61 @@ fn load_k8s_over_startup_object_contracts_access() {
         );
     }
     for path in [startup, narrower] {
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+}
+
+/// `\rollback` after `\load-k8s` replaced a startup object brings back the
+/// startup version exactly: its `k8s` row and its labels, including one
+/// the new version dropped.
+#[test]
+fn rollback_restores_startup_object_after_load_k8s() {
+    let config_map = |labels: &str| {
+        format!(
+            "apiVersion: v1\n\
+             kind: ConfigMap\n\
+             metadata: {{name: demo, namespace: default, labels: {{{labels}}}}}\n\
+             data: {{tier: x}}\n"
+        )
+    };
+    let startup = write_manifest(&config_map("tier: web, team: a"));
+    let changed = write_manifest(&config_map("tier: api"));
+    let labels = "?- object_label(\"v1\", \"ConfigMap\", \"default\", \"demo\", K, V)\n";
+    let commands = format!(
+        "\\snapshot base\n\
+         \\load-k8s {}\n\
+         {labels}\
+         \\rollback base\n\
+         {labels}\
+         \\diff base\n\
+         ::quit\n",
+        changed.display()
+    );
+    for args in ROLLBACK_BACKENDS {
+        let (stdout, stderr) = run_session_loading(&[&startup], args, &commands);
+        assert!(
+            stderr.contains("Loaded 1 object(s) (1 replaced) and evaluated."),
+            "{args:?}: {stderr}"
+        );
+        let (before, after) = stdout
+            .split_once("Rolled back to snapshot 'base'.")
+            .unwrap_or_else(|| panic!("{args:?}: {stdout}\n{stderr}"));
+        let mut before_labels: Vec<&str> =
+            before.lines().filter(|l| l.starts_with("  K = ")).collect();
+        before_labels.sort();
+        assert_eq!(before_labels, [r#"  K = "tier", V = "api""#], "{args:?}");
+        let mut after_labels: Vec<&str> =
+            after.lines().filter(|l| l.starts_with("  K = ")).collect();
+        after_labels.sort();
+        assert_eq!(
+            after_labels,
+            [r#"  K = "team", V = "a""#, r#"  K = "tier", V = "web""#],
+            "{args:?}"
+        );
+        // The diff covers every relation, `k8s` included.
+        assert!(after.contains("(no changes)"), "{args:?}: {after}");
+    }
+    for path in [startup, changed] {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

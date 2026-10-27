@@ -65,11 +65,13 @@ just trust it.
 rule, and `\source` loads a whole `.mg` file (its ground facts go in as
 facts, so `-` can retract them, and the rest as rules). Take a `\snapshot`
 first, then use `\diff` or `\access-diff` to see exactly which facts or RBAC
-permissions moved. `\use <name>` points `?-`, `\why` and `\show` at that
-snapshot instead of the live state (the prompt changes to `pallograph
-(<name>)>` and state-changing commands are refused until a bare `\use`
-returns to live); `\use <name> <command>` runs one command against the
-snapshot and returns automatically.
+permissions moved, and `\rollback <name>` to put the facts and rules back
+as they were when you took it (the snapshot stays, so you can return to it
+again; each snapshot holds its own copy of the facts). `\use <name>`
+points `?-`, `\why` and `\show` at that snapshot instead of the live state
+(the prompt changes to `pallograph (<name>)>` and state-changing commands
+are refused until a bare `\use` returns to live); `\use <name> <command>`
+runs one command against the snapshot and returns automatically.
 
 **Check access and scheduling.** The RBAC `\smt` commands (`check_access`,
 `reaches`, `cluster-admin`) scan the grants the rules derive; the scheduling ones
