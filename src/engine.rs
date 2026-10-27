@@ -12,6 +12,8 @@ use mangle_interpreter::{Interpreter, MemStore, ProvenanceEntry};
 use mangle_ir::physical::{Condition, Constant, DataSource, Op, Operand};
 use mangle_ir::{Inst, InstId, Ir, NameId};
 
+use crate::edb::{Fact, ObjectFacts, ObjectKey};
+
 pub(crate) const EDB_DECLS: &str = include_str!("../rules/00_edb_prelude.mg");
 
 /// Snapshot of all derived facts after an evaluation pass.
@@ -730,6 +732,14 @@ fn execute_with_provenance<'a>(
     Ok(interpreter)
 }
 
+/// What [`Engine::upsert_objects`] did: how many objects it loaded, and how
+/// many of those replaced an object already loaded under the same key.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct UpsertSummary {
+    pub objects: usize,
+    pub replaced: usize,
+}
+
 pub struct Engine {
     /// EDB facts collected at load time; replayed on each evaluate.
     edb: Vec<(String, Vec<Value>)>,
@@ -818,6 +828,19 @@ pub fn load_bench_fixtures_from(dir: &str) -> Result<(Vec<(String, Vec<Value>)>,
 
 impl Engine {
     pub fn new(edb_store: MemStore, rules_dir: &Path, backend: Box<dyn Backend>) -> Result<Self> {
+        Self::with_objects(edb_store, Vec::new(), rules_dir, backend)
+    }
+
+    /// Like [`Self::new`], plus k8s objects run through the projection
+    /// pipeline. When two objects share a key, the later one wins, so a
+    /// profile can list a cluster snapshot and then manifests that override
+    /// some of its objects.
+    pub fn with_objects(
+        edb_store: MemStore,
+        objects: Vec<ObjectFacts>,
+        rules_dir: &Path,
+        backend: Box<dyn Backend>,
+    ) -> Result<Self> {
         let rule_files =
             glob::glob(&rules_dir.join("*.mg").to_string_lossy()).context("glob rules")?;
 
@@ -829,7 +852,28 @@ impl Engine {
             rule_sources.push(src);
         }
 
-        Self::from_parts(drain_store(edb_store), rule_sources, backend)
+        Self::from_objects(
+            crate::edb::drain_store(edb_store),
+            objects,
+            rule_sources,
+            backend,
+        )
+    }
+
+    /// [`Self::from_parts`] plus k8s objects, whose facts join `edb`.
+    ///
+    /// Duplicates are dropped here rather than through
+    /// [`Self::upsert_objects`], whose EDB scan per load would make startup
+    /// quadratic in the number of objects.
+    fn from_objects(
+        mut edb: Vec<Fact>,
+        objects: Vec<ObjectFacts>,
+        rule_sources: Vec<String>,
+        backend: Box<dyn Backend>,
+    ) -> Result<Self> {
+        let (objects, _) = last_per_key(objects);
+        edb.extend(objects.into_iter().flat_map(|object| object.facts));
+        Self::from_parts(edb, rule_sources, backend)
     }
 
     /// Construct an Engine directly from pre-loaded data, bypassing all file I/O.
@@ -1012,39 +1056,119 @@ impl Engine {
 
     /// Remove a ground fact from the EDB. Returns true if a matching fact was found and removed.
     pub fn retract_fact(&mut self, relation: &str, tuple: &[Value]) -> bool {
-        if let Some(pos) = self
+        let removed = self.remove_fact(relation, tuple);
+        if removed && let Some(s) = &self.session {
+            s.commit();
+        }
+        removed
+    }
+
+    /// Remove one copy of a fact from the EDB and its index, and buffer the
+    /// retraction for the live session without committing it, so a batch of
+    /// retractions can share one commit.
+    fn remove_fact(&mut self, relation: &str, tuple: &[Value]) -> bool {
+        let Some(pos) = self
             .edb
             .iter()
             .position(|(r, t)| r == relation && t.as_slice() == tuple)
-        {
-            if let Some(s) = &self.session {
-                let row = crate::dd::value::Row::from(tuple);
-                s.retract(relation.to_string(), row);
-                s.commit();
-            }
-            let entry = self.edb.remove(pos);
-            // `populate_from` does not deduplicate, so another copy may
-            // remain; the index keeps the fact until the last one goes.
-            if !self.edb.contains(&entry) {
-                self.edb_index.remove(&entry);
-            }
-            true
-        } else {
-            false
+        else {
+            return false;
+        };
+        if let Some(s) = &self.session {
+            let row = crate::dd::value::Row::from(tuple);
+            s.retract(relation.to_string(), row);
         }
+        let entry = self.edb.remove(pos);
+        // The EDB can hold a fact more than once (two objects that emit the
+        // same fact each add a copy); the index keeps the fact until the
+        // last copy goes.
+        if !self.edb.contains(&entry) {
+            self.edb_index.remove(&entry);
+        }
+        true
     }
 
-    /// Load facts from a FactSource through the k8s projection pipeline, appending to the EDB.
-    pub fn populate_from(&mut self, source: &mut dyn crate::edb::FactSource) -> Result<()> {
-        let mut tmp = mangle_interpreter::MemStore::new();
-        crate::edb::populate(&mut tmp, source)?;
-        for entry in drain_store(tmp) {
+    /// Load k8s objects from a FactSource through the projection pipeline,
+    /// replacing any object already loaded under the same key.
+    pub fn populate_from(
+        &mut self,
+        source: &mut dyn crate::edb::FactSource,
+    ) -> Result<UpsertSummary> {
+        let objects = crate::edb::object_facts(source)?;
+        Ok(self.upsert_objects(objects))
+    }
+
+    /// Insert each object's facts, first retracting the facts the same
+    /// object (same group, kind, namespace and name, any version) emitted
+    /// when it was last loaded, at startup or earlier in the session.
+    /// Without this the EDB would hold both versions' `k8s/5` rows and rules
+    /// would see the union of old and new.
+    ///
+    /// The old facts are not stored anywhere: each matching `k8s/5` row's
+    /// Data holds the whole object, so [`crate::edb::regenerate_facts`]
+    /// rebuilds it and recomputes what it emitted. Finding the rows is one
+    /// scan of the EDB per call.
+    ///
+    /// A fact both versions emit is retracted and re-added, which nets out.
+    /// A fact another object also emits survives, as each object added its
+    /// own copy. Objects absent from `objects` are left alone: there is no
+    /// way to delete one yet.
+    pub fn upsert_objects(&mut self, objects: Vec<ObjectFacts>) -> UpsertSummary {
+        let total = objects.len();
+        let (objects, collapsed) = last_per_key(objects);
+        let keys: HashSet<&ObjectKey> = objects.iter().map(|object| &object.key).collect();
+        let mut replaced: HashSet<ObjectKey> = HashSet::new();
+        let previous: Vec<Vec<Value>> = self
+            .edb
+            .iter()
+            .filter(|(relation, _)| relation == "k8s")
+            .filter_map(|(_, tuple)| {
+                let key = ObjectKey::of_k8s_tuple(tuple)?;
+                keys.contains(&key).then(|| {
+                    replaced.insert(key);
+                    tuple.clone()
+                })
+            })
+            .collect();
+
+        let mut changed = false;
+        let mut needs_rebuild = false;
+        for tuple in &previous {
+            // Retract the row found, not the regenerated one, so a
+            // hand-written row with an unusual Data still goes.
+            changed |= self.remove_fact("k8s", tuple);
+            for (relation, old) in crate::edb::regenerate_facts(tuple) {
+                if relation != "k8s" {
+                    changed |= self.remove_fact(&relation, &old);
+                }
+            }
+        }
+        for entry in objects.into_iter().flat_map(|object| object.facts) {
+            if let Some(s) = &self.session {
+                if s.has_input(&entry.0) {
+                    s.insert(
+                        entry.0.clone(),
+                        crate::dd::value::Row::from(entry.1.as_slice()),
+                    );
+                } else {
+                    // A rebuild hydrates the session from the whole EDB.
+                    needs_rebuild = true;
+                }
+            }
             self.push_fact(entry);
+            changed = true;
         }
-        if let Some(s) = &mut self.session {
-            s.rebuild(&self.edb, &self.rule_sources)?;
+        if needs_rebuild {
+            self.rebuild_session();
+        } else if let Some(s) = &self.session
+            && changed
+        {
+            s.commit();
         }
-        Ok(())
+        UpsertSummary {
+            objects: total,
+            replaced: replaced.len() + collapsed,
+        }
     }
 
     /// Reset all REPL session state: drop added rules and EDB temporaries, restore
@@ -1138,6 +1262,23 @@ impl Engine {
     }
 }
 
+/// Keep only the last object loaded under each key, in load order, and
+/// count how many earlier ones were dropped.
+fn last_per_key(objects: Vec<ObjectFacts>) -> (Vec<ObjectFacts>, usize) {
+    let mut last: HashMap<ObjectKey, usize> = HashMap::new();
+    for (i, object) in objects.iter().enumerate() {
+        last.insert(object.key.clone(), i);
+    }
+    let dropped = objects.len() - last.len();
+    let kept = objects
+        .into_iter()
+        .enumerate()
+        .filter(|(i, object)| last[&object.key] == *i)
+        .map(|(_, object)| object)
+        .collect();
+    (kept, dropped)
+}
+
 /// Extract the head predicate name from a Mangle rule source string.
 ///
 /// Scans for the first non-empty, non-`Decl`, non-comment line and returns
@@ -1159,18 +1300,6 @@ fn extract_head_pred(rule_src: &str) -> Option<String> {
     None
 }
 
-/// Drain all facts from a MemStore into a Vec for later replay.
-fn drain_store(store: MemStore) -> Vec<(String, Vec<Value>)> {
-    let mut out = Vec::new();
-    for rel in store.relation_names() {
-        let rel: String = rel;
-        for tuple in store.get_facts(&rel) {
-            out.push((rel.clone(), tuple));
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1184,7 +1313,7 @@ mod tests {
             vec!["fixtures/testdata/small".to_string()],
         )
         .context("load testdata")?;
-        let edb = drain_store(edb_store);
+        let edb = crate::edb::drain_store(edb_store);
 
         let rule_files = glob::glob("rules/*.mg")
             .context("glob rules")?
@@ -1404,6 +1533,154 @@ mod tests {
 
         engine.reset_session();
         assert!(!engine.add_fact("edge".to_string(), ab));
+    }
+
+    /// Objects handed straight to the projection pipeline.
+    struct Objects(Vec<serde_json::Value>);
+
+    impl crate::edb::FactSource for Objects {
+        fn k8s_objects(
+            &mut self,
+        ) -> Result<Vec<(kube::api::DynamicObject, Option<(String, String)>)>> {
+            self.0
+                .drain(..)
+                .map(|json| Ok((serde_json::from_value(json)?, None)))
+                .collect()
+        }
+    }
+
+    fn objects(json: Vec<serde_json::Value>) -> Vec<ObjectFacts> {
+        crate::edb::object_facts(&mut Objects(json)).unwrap()
+    }
+
+    /// A ConfigMap `name` labelled `tier=<tier>`.
+    fn config_map(name: &str, tier: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": name, "namespace": "default", "labels": {"tier": tier}},
+            "data": {"tier": tier},
+        })
+    }
+
+    /// A NodePool `pool` in `api_version` whose nodes get `zone=<zone>`.
+    fn node_pool(api_version: &str, zone: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": api_version,
+            "kind": "NodePool",
+            "metadata": {"name": "pool"},
+            "spec": {"template": {"metadata": {"labels": {"zone": zone}}}},
+        })
+    }
+
+    /// Both backends, started with `startup` objects on top of the diamond.
+    fn object_engines(startup: Vec<ObjectFacts>) -> [Engine; 2] {
+        let (edb, rules) = diamond();
+        let backends: [Box<dyn Backend>; 2] = [
+            Box::new(InterpreterBackend),
+            Box::new(DdBackend { provenance: false }),
+        ];
+        backends.map(|backend| {
+            Engine::from_objects(edb.clone(), startup.clone(), rules.clone(), backend).unwrap()
+        })
+    }
+
+    fn rows(engine: &Engine, relation: &str) -> Vec<Vec<Value>> {
+        let store = engine.evaluate().unwrap();
+        let mut rows = store.scan(relation).to_vec();
+        rows.sort();
+        rows
+    }
+
+    /// The `tier` labels on ConfigMaps, as (name, tier) pairs.
+    fn tiers(engine: &Engine) -> Vec<(Value, Value)> {
+        rows(engine, "object_label")
+            .into_iter()
+            .map(|row| (row[3].clone(), row[5].clone()))
+            .collect()
+    }
+
+    /// Loading an object again replaces the facts its last load emitted,
+    /// whether that load was at startup or earlier in the session.
+    #[test]
+    fn upsert_replaces_object_facts() {
+        let startup = objects(vec![config_map("x", "web"), config_map("y", "db")]);
+        for mut engine in object_engines(startup) {
+            let summary = engine.upsert_objects(objects(vec![config_map("x", "api")]));
+            assert_eq!(
+                summary,
+                UpsertSummary {
+                    objects: 1,
+                    replaced: 1
+                }
+            );
+            assert_eq!(
+                tiers(&engine),
+                [(s("x"), s("api")), (s("y"), s("db"))],
+                "x replaced, y untouched"
+            );
+            assert_eq!(rows(&engine, "k8s").len(), 2);
+
+            engine.upsert_objects(objects(vec![config_map("x", "cache")]));
+            assert_eq!(tiers(&engine), [(s("x"), s("cache")), (s("y"), s("db"))]);
+            assert_eq!(rows(&engine, "k8s").len(), 2);
+            assert_eq!(rows(&engine, "edge").len(), 4);
+        }
+    }
+
+    /// A fact two objects emit stays while either is still loaded with it.
+    /// NodePools in two API groups are two objects, but both emit
+    /// `nodepool_label("pool", "zone", ...)`.
+    #[test]
+    fn upsert_keeps_fact_another_object_emits() {
+        let startup = objects(vec![
+            node_pool("karpenter.sh/v1", "a"),
+            node_pool("other.dev/v1", "a"),
+        ]);
+        let zone = |z: &str| vec![s("pool"), s("zone"), s(z)];
+        for mut engine in object_engines(startup) {
+            engine.upsert_objects(objects(vec![node_pool("karpenter.sh/v1", "b")]));
+            assert_eq!(rows(&engine, "nodepool_label"), [zone("a"), zone("b")]);
+            engine.upsert_objects(objects(vec![node_pool("other.dev/v1", "b")]));
+            assert_eq!(rows(&engine, "nodepool_label"), [zone("b")]);
+        }
+    }
+
+    /// Another version in the same API group is the same object.
+    #[test]
+    fn upsert_matches_any_version_in_group() {
+        let startup = objects(vec![node_pool("karpenter.sh/v1beta1", "a")]);
+        for mut engine in object_engines(startup) {
+            let summary = engine.upsert_objects(objects(vec![node_pool("karpenter.sh/v1", "b")]));
+            assert_eq!(summary.replaced, 1);
+            let k8s = rows(&engine, "k8s");
+            assert_eq!(k8s.len(), 1);
+            assert_eq!(k8s[0][0], s("karpenter.sh/v1"));
+            assert_eq!(
+                rows(&engine, "nodepool_label"),
+                [vec![s("pool"), s("zone"), s("b")]]
+            );
+        }
+    }
+
+    /// The same object twice in one load: the later copy wins.
+    #[test]
+    fn upsert_same_object_twice_in_one_load() {
+        for mut engine in object_engines(vec![]) {
+            let summary = engine.upsert_objects(objects(vec![
+                config_map("x", "web"),
+                config_map("x", "api"),
+            ]));
+            assert_eq!(
+                summary,
+                UpsertSummary {
+                    objects: 2,
+                    replaced: 1
+                }
+            );
+            assert_eq!(tiers(&engine), [(s("x"), s("api"))]);
+            assert_eq!(rows(&engine, "k8s").len(), 1);
+        }
     }
 
     /// `--provenance` gives `Engine` a live lazy session, and backward-chaining

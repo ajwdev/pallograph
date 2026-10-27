@@ -36,6 +36,33 @@ pub fn json_to_value(v: &Json) -> Option<Value> {
     }
 }
 
+/// The exact inverse of `json_to_value`, for the values it produces: the
+/// names `/true` and `/false` become JSON bools again, and other names
+/// (struct keys aside) become strings. `json_to_value` drops nulls, so
+/// `json_to_value(&data_to_json(v)) == Some(v)` holds but the JSON side
+/// loses them. Used to rebuild a k8s object from its `k8s/5` Data.
+pub fn data_to_json(v: &Value) -> Json {
+    match v {
+        Value::Name(s) if s == "/true" => Json::Bool(true),
+        Value::Name(s) if s == "/false" => Json::Bool(false),
+        Value::Compound(CompoundKind::List | CompoundKind::Pair, elems) => {
+            Json::Array(elems.iter().map(data_to_json).collect())
+        }
+        Value::Compound(CompoundKind::Struct | CompoundKind::Map, pairs) => {
+            let mut map = serde_json::Map::with_capacity(pairs.len() / 2);
+            for chunk in pairs.as_chunks::<2>().0 {
+                let key = match &chunk[0] {
+                    Value::Name(s) => s.strip_prefix('/').unwrap_or(s).to_string(),
+                    other => other.to_string(),
+                };
+                map.insert(key, data_to_json(&chunk[1]));
+            }
+            Json::Object(map)
+        }
+        other => value_to_json(other),
+    }
+}
+
 /// Convert a mangle Value to a serde_json Value. Inverse of `json_to_value`.
 /// Used by `::export`. Struct keys are the `/`-prefixed `Name` values, emitted
 /// without the leading slash; everything else is reproduced faithfully.
@@ -111,6 +138,22 @@ mod tests {
             Json::from("/true")
         );
         assert_eq!(value_to_json(&Value::Null), Json::Null);
+    }
+
+    /// Bools come back as bools, nulls are gone, and converting back gives
+    /// the same Value.
+    #[test]
+    fn data_to_json_inverts_json_to_value() {
+        let json = serde_json::json!({
+            "b": true, "n": null, "i": 3, "f": 1.5, "s": "/true",
+            "l": [false, {"k": "v"}], "big": 18446744073709551615u64
+        });
+        let value = json_to_value(&json).unwrap();
+        let back = data_to_json(&value);
+        assert_eq!(back["b"], Json::Bool(true));
+        assert_eq!(back["l"][0], Json::Bool(false));
+        assert!(back.get("n").is_none());
+        assert_eq!(json_to_value(&back), Some(value));
     }
 
     #[test]

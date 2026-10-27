@@ -52,7 +52,14 @@ struct Cli {
     format: OutputFormat,
 }
 
-async fn load_datasource(edb: &mut MemStore, name: &str, ds: &config::Datasource) -> Result<()> {
+/// Load one datasource. k8s objects go to `objects` so the engine can track
+/// which facts each emitted; flat tuples go straight to `edb`.
+async fn load_datasource(
+    edb: &mut MemStore,
+    objects: &mut Vec<edb::ObjectFacts>,
+    name: &str,
+    ds: &config::Datasource,
+) -> Result<()> {
     use config::{ContentKind, SourceKind};
     match ds.source {
         SourceKind::K8s => {
@@ -66,7 +73,8 @@ async fn load_datasource(edb: &mut MemStore, name: &str, ds: &config::Datasource
                     .push("DYLD_INSERT_LIBRARIES".into());
             }
             let client = kube::Client::try_from(config)?;
-            edb::load_from_cluster(edb, client).await?;
+            let mut source = edb::ClusterSource::fetch(client).await?;
+            objects.extend(edb::object_facts(&mut source)?);
         }
         SourceKind::File => {
             let paths = ds
@@ -79,7 +87,10 @@ async fn load_datasource(edb: &mut MemStore, name: &str, ds: &config::Datasource
             match content {
                 ContentKind::K8sManifests => {
                     eprintln!("  {name}: file ({}) → k8s-manifests", paths.join(", "));
-                    edb::load_from_manifests(edb, paths.clone())?;
+                    let mut source = edb::K8sManifestsSource {
+                        paths: paths.clone(),
+                    };
+                    objects.extend(edb::object_facts(&mut source)?);
                 }
                 ContentKind::JsonTuples => {
                     let relation = ds.relation.as_deref().with_context(|| {
@@ -102,7 +113,10 @@ async fn load_datasource(edb: &mut MemStore, name: &str, ds: &config::Datasource
             match content {
                 ContentKind::K8sManifests => {
                     eprintln!("  {name}: shell → k8s-manifests");
-                    edb::load_k8s_from_command(edb, command)?;
+                    let mut source = edb::ShellSource {
+                        command: command.to_string(),
+                    };
+                    objects.extend(edb::object_facts(&mut source)?);
                 }
                 ContentKind::JsonTuples => {
                     let relation = ds.relation.as_deref().with_context(|| {
@@ -124,6 +138,7 @@ async fn main() -> Result<()> {
     // Load EDB facts into a staging MemStore.
     // Priority: config file > small fixture default.
     let mut edb = MemStore::new();
+    let mut objects = Vec::new();
     match config::load_config(cli.config.as_deref())? {
         Some(cfg) => {
             let profile_name = cli
@@ -141,12 +156,15 @@ async fn main() -> Result<()> {
                     .datasources
                     .get(name.as_str())
                     .with_context(|| format!("datasource '{name}' not found in config"))?;
-                load_datasource(&mut edb, name, ds).await?;
+                load_datasource(&mut edb, &mut objects, name, ds).await?;
             }
         }
         None => {
             eprintln!("datasource: k8s-manifests (fixtures/testdata/small) [default]");
-            edb::load_from_manifests(&mut edb, vec!["fixtures/testdata/small".to_string()])?;
+            let mut source = edb::K8sManifestsSource {
+                paths: vec!["fixtures/testdata/small".to_string()],
+            };
+            objects = edb::object_facts(&mut source)?;
         }
     }
 
@@ -160,7 +178,7 @@ async fn main() -> Result<()> {
     };
 
     // Build the policy engine.
-    let mut engine = Engine::new(edb, &cli.rules, backend)?;
+    let mut engine = Engine::with_objects(edb, objects, &cli.rules, backend)?;
     if cli.explain {
         let mut cp = engine.compile()?;
         return cp.dump_plan();
