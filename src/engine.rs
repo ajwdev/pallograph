@@ -740,6 +740,18 @@ pub struct UpsertSummary {
     pub replaced: usize,
 }
 
+/// A copy of what the engine evaluates: the facts loaded from the cluster
+/// or added since (EDB), and the rule sources, `\define` rules included.
+/// `\snapshot` saves one so `\rollback` can put it back. The rules behind
+/// `?-` results (`_N`) are left out: those results belong to the REPL
+/// session, not to the state a snapshot saves. The duplicate index is left
+/// out too; [`Engine::restore_inputs`] rebuilds it.
+#[derive(Clone)]
+pub struct EngineInputs {
+    edb: Vec<(String, Vec<Value>)>,
+    rule_sources: Vec<String>,
+}
+
 pub struct Engine {
     /// EDB facts collected at load time; replayed on each evaluate.
     edb: Vec<(String, Vec<Value>)>,
@@ -1041,17 +1053,48 @@ impl Engine {
         self.edb.push(entry);
     }
 
-    /// Re-spawn the live session from the current EDB and rules, if there is one.
+    /// Re-spawn the live session from the current EDB and rules, if there
+    /// is one, printing rather than returning any error.
     fn rebuild_session(&mut self) {
+        if let Err(e) = self.try_rebuild_session() {
+            eprintln!("Error rebuilding incremental session: {e:#}");
+        }
+    }
+
+    /// Re-spawn the live session from the current EDB and rules, if there is one.
+    fn try_rebuild_session(&mut self) -> Result<()> {
         #[cfg(test)]
         {
             self.rebuild_count += 1;
         }
-        if let Some(s) = &mut self.session
-            && let Err(e) = s.rebuild(&self.edb, &self.rule_sources)
-        {
-            eprintln!("Error rebuilding incremental session: {e:#}");
+        if let Some(s) = &mut self.session {
+            s.rebuild(&self.edb, &self.rule_sources)?;
         }
+        Ok(())
+    }
+
+    /// Copy the engine's current facts and rules, minus the rules behind
+    /// `?-` results (`_N`), for `\snapshot`.
+    pub fn save_inputs(&self) -> EngineInputs {
+        let rule_sources = self
+            .rule_sources
+            .iter()
+            .filter(|rule| !extract_head_pred(rule).is_some_and(|head| is_scratch_relation(&head)))
+            .cloned()
+            .collect();
+        EngineInputs {
+            edb: self.edb.clone(),
+            rule_sources,
+        }
+    }
+
+    /// Replace the engine's facts and rules with `inputs`, for `\rollback`.
+    /// The live session, if any, is rebuilt once from them.
+    pub fn restore_inputs(&mut self, inputs: &EngineInputs) -> Result<()> {
+        self.edb = inputs.edb.clone();
+        self.edb_index = self.edb.iter().cloned().collect();
+        self.rule_sources = inputs.rule_sources.clone();
+        self.try_rebuild_session()
     }
 
     /// Remove a ground fact from the EDB. Returns true if a matching fact was found and removed.
@@ -1680,6 +1723,46 @@ mod tests {
             );
             assert_eq!(tiers(&engine), [(s("x"), s("api"))]);
             assert_eq!(rows(&engine, "k8s").len(), 1);
+        }
+    }
+
+    /// Restoring saved inputs undoes an upsert of a startup object, an
+    /// added fact and an added rule, leaving the same facts as before, and
+    /// rebuilds the DD session once. `?-` result rules (`_N`) are never
+    /// saved, so none survive a restore, whenever they were added.
+    #[test]
+    fn restore_inputs_undoes_upsert_of_startup_object() {
+        let startup = objects(vec![config_map("x", "web"), config_map("y", "db")]);
+        for mut engine in object_engines(startup) {
+            let before = sorted_store(engine.evaluate().unwrap());
+            let rules_before = engine.rules_len();
+            engine
+                .add_query_rule("_0(X) :- path(X, \"d\").".to_string())
+                .unwrap();
+            let saved = engine.save_inputs();
+            engine
+                .add_query_rule("_1(X) :- path(\"a\", X).".to_string())
+                .unwrap();
+
+            engine.upsert_objects(objects(vec![config_map("x", "api")]));
+            engine.add_fact("edge".to_string(), vec![s("d"), s("e")]);
+            engine
+                .add_rule("reach_e(X) :- path(X, \"e\").".to_string())
+                .unwrap();
+            assert_eq!(tiers(&engine), [(s("x"), s("api")), (s("y"), s("db"))]);
+
+            let rebuilds = engine.rebuild_count;
+            engine.restore_inputs(&saved).unwrap();
+            assert_eq!(engine.rebuild_count, rebuilds + 1);
+            assert_eq!(engine.rules_len(), rules_before);
+            assert_eq!(tiers(&engine), [(s("x"), s("web")), (s("y"), s("db"))]);
+            let after = engine.evaluate().unwrap();
+            assert!(after.scan("_0").is_empty() && after.scan("_1").is_empty());
+            assert_eq!(sorted_store(after), before);
+            // The duplicate index matches the restored EDB: the retracted
+            // startup row can't be re-added, the dropped edge can.
+            assert!(!engine.add_fact("edge".to_string(), vec![s("a"), s("b")]));
+            assert!(engine.add_fact("edge".to_string(), vec![s("d"), s("e")]));
         }
     }
 
