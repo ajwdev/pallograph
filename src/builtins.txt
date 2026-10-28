@@ -14,7 +14,7 @@
 # sharing one of them would both be platform principals. The sections
 # record which kind each entry is.
 #
-# Use ::smt cluster-admin --all to include builtins.
+# Use rbac::cluster-admin --all to include builtins.
 #
 # Controller list generated from upstream k8s via:
 #   ast-grep run -p 'saRolePrefix + $STR' -l go --json controller_policy.go \

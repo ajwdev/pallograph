@@ -230,7 +230,7 @@ subject_escalation_hop(Name, Kind, Target) :-
 # controls_identity) is what makes the transitive closure below BFS-ordered:
 # semi-naive evaluation extends controls_identity by one hop per fixpoint
 # iteration, so shorter paths are always derived before longer ones. Because
-# provenance records only the first (is_new) insertion, \why on any
+# provenance records only the first (is_new) insertion, why on any
 # controls_identity fact will show the shortest path to the target.
 
 Decl escalation_hop(Principal, Target)

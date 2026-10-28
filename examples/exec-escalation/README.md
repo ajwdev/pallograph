@@ -26,9 +26,9 @@ whatever pods happen to be running in that namespace.
 
 ## What pallograph Shows
 
-`\access-diff` surfaces the new `pods/exec create` permission.
+`rbac::diff` surfaces the new `pods/exec create` permission.
 
-`\smt cluster-admin` confirms the full escalation chain:
+`rbac::cluster-admin` confirms the full escalation chain:
 
 ```
 alice
@@ -40,8 +40,8 @@ alice
 ## Demo
 
 ```
-\snapshot baseline
-\source examples/exec-escalation/alice-exec.mg
-\access-diff baseline
-\smt cluster-admin
+snapshot baseline
+source examples/exec-escalation/alice-exec.mg
+rbac::diff baseline
+rbac::cluster-admin
 ```

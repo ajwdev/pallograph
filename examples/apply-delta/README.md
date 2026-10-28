@@ -1,4 +1,4 @@
-# Recipe: review a PR with `\apply-delta`
+# Recipe: review a PR with `apply-delta`
 
 A runnable end-to-end example of inspecting a PR against a tiny synthetic
 cluster: snapshot the live state, apply what merging the PR would do, and see
@@ -51,13 +51,13 @@ FAIL  7 new permission(s) granted
 
 Three distinct things:
 
-- **`\apply-delta base/ head/`** applies the PR's effect to the live cluster:
+- **`apply-delta base/ head/`** applies the PR's effect to the live cluster:
   eve's binding added, pod-reader updated, bob's binding retracted,
   cluster-admin and alice-reader untouched (`+1 ~1 -1`, 2 unchanged).
-- **`\access-diff base`** is the **pass/fail gate**: any permission expansion
+- **`rbac::diff base`** is the **pass/fail gate**: any permission expansion
   exits 1. Here the PR grants eve cluster-admin and alice `watch`, so it
   fails. (Exit codes: 0 clean, 1 findings, 2 error.)
-- **`\diff-relation base unexpected_cluster_admin`** is a **diagnostic**, not a
+- **`diff-relation base unexpected_cluster_admin`** is a **diagnostic**, not a
   check: it just shows how that one relation changed (eve added, bob removed).
   It never passes or fails on its own.
 
@@ -65,13 +65,13 @@ The `unexpected_cluster_admin` relation comes from the sibling recipe
 [`../cluster-admin-approved/`](../cluster-admin-approved/), sourced by
 `review.pg`; the approval closure (`cluster-admin-allowlist.json`, empty here)
 is loaded at startup. Add `eve@example.com` to the closure and eve drops out
-of `unexpected_cluster_admin` - though `\access-diff` still reports her new
+of `unexpected_cluster_admin` - though `rbac::diff` still reports her new
 access, since it is the broad expansion check and does not consult the
 closure.
 
 ## Things to try
 
-- **Brand-new chart** (empty base, everything is an add): `\apply-delta - head/`.
-- **Chart deleted** (empty head, everything retracted): `\apply-delta base/ -`.
-- **Scope the diagnostic** to any relation: `\diff-relation base direct_perm`,
-  or diff two snapshots: `\diff-relation s1 s2 <relation>`.
+- **Brand-new chart** (empty base, everything is an add): `apply-delta - head/`.
+- **Chart deleted** (empty head, everything retracted): `apply-delta base/ -`.
+- **Scope the diagnostic** to any relation: `diff-relation base direct_perm`,
+  or diff two snapshots: `diff-relation s1 s2 <relation>`.

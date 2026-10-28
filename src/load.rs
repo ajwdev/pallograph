@@ -149,7 +149,7 @@ fn json_scalar_to_value(v: &Json) -> Result<Value> {
         Json::Null => Ok(Value::Null),
         Json::Array(_) | Json::Object(_) => bail!(
             "nested arrays/objects are not supported in the generic tuple loader — \
-             use \\load-k8s for k8s objects with compound fields"
+             use k8s::load for k8s objects with compound fields"
         ),
     }
 }

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Drives the built binary over the small fixture to check the ndjson
-//! output of `::smt` checks and the exit status contract: nonzero when any
+//! output of `rbac::`/`sched::` checks and the exit status contract: nonzero when any
 //! check fails, zero when all pass.
 
 use std::io::Write;
@@ -63,7 +63,7 @@ fn json_lines(out: &Output) -> Vec<serde_json::Value> {
 
 #[test]
 fn failing_check_emits_ndjson_and_exits_1() {
-    let out = run_session("::smt cluster-admin\n::quit\n", "ndjson");
+    let out = run_session("rbac::cluster-admin\n::quit\n", "ndjson");
     let lines = json_lines(&out);
     assert!(!lines.is_empty(), "no stdout lines");
     for l in &lines {
@@ -91,7 +91,7 @@ fn passing_check_emits_pass_line_and_exits_0() {
     // Cluster-wide grants reach every namespace, so isolation only holds once
     // the principals holding them are listed as allowed.
     let out = run_session(
-        "::smt check_isolation no-such-namespace admin@example.com \
+        "rbac::isolation no-such-namespace admin@example.com \
          system:serviceaccount:kube-system:kindnet \
          system:serviceaccount:local-path-storage:local-path-provisioner-service-account \
          system:serviceaccount:kube-system:default \
@@ -106,7 +106,7 @@ fn passing_check_emits_pass_line_and_exits_0() {
         String::from_utf8_lossy(&out.stdout)
     );
     assert_eq!(lines[0]["result"], "pass");
-    assert_eq!(lines[0]["check"], "check_isolation");
+    assert_eq!(lines[0]["check"], "isolation");
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -117,7 +117,7 @@ fn passing_check_emits_pass_line_and_exits_0() {
 
 #[test]
 fn plain_output_annotates_user_principals_and_exits_1() {
-    let out = run_session("::smt cluster-admin\n::quit\n", "default");
+    let out = run_session("rbac::cluster-admin\n::quit\n", "default");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.contains("admin@example.com (user)"),

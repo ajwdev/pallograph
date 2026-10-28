@@ -29,8 +29,8 @@ binding the sixth `direct_perm` column if you need it.
 ## Demo
 
 ```
-\source examples/exec-escalation/alice-exec.mg
-\source examples/indirect-perm/indirect-perm.mg
+source examples/exec-escalation/alice-exec.mg
+source examples/indirect-perm/indirect-perm.mg
 ?- indirect_perm("alice", Ns, ApiGroup, Resource, Verb, Via)
 ```
 
@@ -42,5 +42,5 @@ Ns = "kube-system", ApiGroup = "", Resource = "endpoints", Verb = "get", Via = "
 Ns = "", ApiGroup = "", Resource = "nodes", Verb = "list", Via = "system:serviceaccount:kube-system:kindnet"
 ```
 
-For "who can reach X" questions, `\smt reaches` and `\smt cluster-admin` do
+For "who can reach X" questions, `rbac::reaches` and `rbac::cluster-admin` do
 this expansion for you and also print the escalation path.

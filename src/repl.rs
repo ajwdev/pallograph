@@ -94,7 +94,7 @@ fn print_relation_detail(name: &str, store: &EvalStore, doc: Option<&RelationDoc
 }
 
 /// How result-set tuples are rendered. `Plain`, named `default` on the command
-/// line and in `\format`, prints `Column = value` pairs, `Compact` prints bare
+/// line and in `format`, prints `Column = value` pairs, `Compact` prints bare
 /// `rel(a, b, ...)` tuples and `Pretty` indents nested values. `Table` prints
 /// an aligned table with a header row. `Ndjson` emits one JSON object per
 /// tuple on its own line, for piping into `jq`, DuckDB, etc.
@@ -149,6 +149,10 @@ fn ndjson_row(tuple: &[Value], key: impl Fn(usize) -> Option<String>) -> String 
 fn print_help() {
     println!("\n=== Interactive Query Mode ===");
     println!();
+    println!("Commands are bare paths (e.g. `show`, `rbac::reaches`). A leading `::` is the");
+    println!("fully-qualified form, used to disambiguate (e.g. `::rbac::diff` vs `::diff`).");
+    println!("Queries always start with `?-`.");
+    println!();
     println!("Querying");
     println!("  ?- <predicate>                         - list all tuples for a relation");
     println!(
@@ -157,116 +161,168 @@ fn print_help() {
     println!(
         "  ?- <atom>, <atom>, ...                 - conjunctive query; name variables with uppercase (X) to see their bindings"
     );
+    println!("  query <body>                           - long form of ?-");
     println!(
-        "  \\show                                  — list documented relations (arity + description)"
+        "  show                                   - list documented relations (arity + description)"
     );
     println!(
-        "  \\show --all                            — also list undocumented intermediate relations"
+        "  show --all                             - also list undocumented intermediate relations"
     );
     println!(
-        "  \\show <rel...>                         — describe relations (columns, types, docs)"
+        "  show <rel...>                          - describe relations (columns, types, docs)"
     );
-    println!("  \\query <body>  / ?- <body>             - same as ?- (\\query is the long form)");
-    println!("  \\why <pred>(<args>...)                 — show derivation tree for a fact");
-    println!(
-        "  \\match <Kind> <ns> <selector>          — objects of <Kind> in <ns> matching a kubectl selector (ns \"\" = cluster-scoped)"
-    );
-    println!(
-        "  \\match_all <ns> <selector>             — objects of any Kind in <ns> matching a kubectl selector"
-    );
+    println!("  why <pred>(<args>...)                  - show derivation tree for a fact");
     println!();
     println!("EDB / Rules");
-    println!("  +pred(arg1, arg2, ...).                — insert a ground fact and re-evaluate");
-    println!("  -pred(arg1, arg2, ...).                — retract a ground fact and re-evaluate");
+    println!("  +pred(arg1, arg2, ...).                - insert a ground fact and re-evaluate");
+    println!("  -pred(arg1, arg2, ...).                - retract a ground fact and re-evaluate");
     println!(
-        "  ~pred(old...). pred(new...).           — atomic replace: retract old, insert new, re-evaluate"
+        "  ~pred(old...). pred(new...).           - atomic replace: retract old, insert new, re-evaluate"
     );
-    println!("  \\define <rule>.                        — add a rule and re-evaluate");
+    println!("  define <rule>.                         - add a rule and re-evaluate");
     println!();
     println!("Loading");
     println!(
-        "  \\source <src>                          — load a Mangle file or ! <cmd>: ground facts as facts (retractable), the rest as rules; re-evaluate"
+        "  source <src>                           - load a Mangle file or ! <cmd>: ground facts as facts (retractable), the rest as rules; re-evaluate"
     );
     println!(
-        "  \\load <rel> <src>                      — load flat JSON tuples into <rel>; src is a file or ! <cmd>"
+        "  load <rel> <src>                       - load flat JSON tuples into <rel>; src is a file or ! <cmd>"
     );
     println!(
-        "  \\load-k8s <src>                        — load k8s objects through the projection pipeline, replacing any already loaded with the same group, kind, namespace and name; src is a dir, .json file, or ! <kubectl args>"
+        "  apply-delta <base> <head>              - apply a PR's base->head delta onto live: add head-only objects, update changed ones, retract base-only ones (what Argo prunes), leave identical ones (keeping live drift); each side is a dir, .json file, or - for empty"
+    );
+    println!();
+    println!("Kubernetes  (k8s::)");
+    println!(
+        "  k8s::load <src>                        - load k8s objects through the projection pipeline, replacing any already loaded with the same group, kind, namespace and name; src is a dir, .json file, or ! <kubectl args>"
     );
     println!(
-        "  \\apply-delta <base> <head>             — apply a PR's base→head delta onto live: add head-only objects, update changed ones, retract base-only ones (what Argo prunes), leave identical ones (keeping live drift); each side is a dir, .json file, or - for empty"
+        "  k8s::match <Kind> <ns> <selector>      - objects of <Kind> in <ns> matching a kubectl selector (ns \"\" = cluster-scoped)"
+    );
+    println!(
+        "  k8s::match-all <ns> <selector>         - objects of any Kind in <ns> matching a kubectl selector"
     );
     println!();
     println!("Snapshots");
     println!(
-        "  \\snapshot <name>                       — save current eval state, and the facts and rules it came from, as a named snapshot"
+        "  snapshot <name>                        - save current eval state, and the facts and rules it came from, as a named snapshot"
     );
     println!(
-        "  \\rollback <name>                       — restore the facts and rules saved by \\snapshot <name>, re-evaluate, drop all _N results (the snapshot stays; each one holds a copy of the facts)"
+        "  rollback <name>                        - restore the facts and rules saved by snapshot <name>, re-evaluate, drop all _N results (the snapshot stays; each one holds a copy of the facts)"
     );
     println!(
-        "  \\diff <name>                           — diff the state in use (live, unless \\use points elsewhere) against a named snapshot"
+        "  diff <name>                            - diff the state in use (live, unless `use` points elsewhere) against a named snapshot"
+    );
+    println!("  diff <name1> <name2>                   - diff two named snapshots (all relations)");
+    println!(
+        "  diff-relation <name> [name2] <rel>     - like diff but scoped to one relation; a diagnostic view, not a pass/fail check"
     );
     println!(
-        "  \\diff <name1> <name2>                  — diff two named snapshots (all relations)"
+        "  use <name>                             - point ?-, why, show and friends at a named snapshot (no name: back to the live state)"
     );
     println!(
-        "  \\access-diff <name>                    — diff RBAC permissions, direct and through escalation, vs the state in use (live, unless \\use points elsewhere)"
-    );
-    println!(
-        "  \\access-diff <name1> <name2>           — diff RBAC permissions between two named snapshots"
-    );
-    println!(
-        "  \\diff-relation <name> [name2] <relation> — like \\diff but scoped to one relation; a diagnostic view, not a pass/fail check"
-    );
-    println!(
-        "  \\use <name>                            — point ?-, \\why, \\show and friends at a named snapshot (no name: back to the live state)"
-    );
-    println!(
-        "  \\use <name> <command>                  — run one command against <name>, then return to the previous state"
+        "  use <name> <command>                   - run one command against <name>, then return to the previous state"
     );
     println!();
-    println!("RBAC access / SMT / Z3");
+    println!("RBAC access  (rbac::)");
     println!(
-        "  \\smt check_access <ns> <r> <v> [p...] — find RBAC principals granted (ns,r,v) outside expected set (ns=\"\" for cluster-wide)"
+        "  rbac::access <ns> <r> <v> [p...]       - find RBAC principals granted (ns,r,v) outside the expected set (ns \"\" for cluster-wide)"
     );
     println!(
-        "  \\smt reaches <ns> <ag> <r> <v> [p...] — find RBAC principals that can reach (ns,ag,r,v), counting escalation"
+        "  rbac::reaches <ns> <ag> <r> <v> [p...] - find RBAC principals that can reach (ns,ag,r,v), counting escalation"
     );
     println!(
-        "  \\smt cluster-admin [p...]              — shorthand for reaches \"\" \"*\" \"*\" \"*\""
+        "  rbac::cluster-admin [p...]             - shorthand for reaches \"\" \"*\" \"*\" \"*\""
+    );
+    println!(
+        "  rbac::isolation <ns> [p...]            - check that only the listed principals have any access in <ns>"
     );
     println!(
         "                                           reaches/cluster-admin flags: --direct (also list principals with a direct grant), --all (include built-in k8s/EKS principals, hidden by default)"
     );
     println!(
-        "  \\smt node_selector                     — find pods whose nodeSelector no node satisfies"
+        "  rbac::diff <name> [name2]              - diff RBAC permissions, direct and through escalation, vs a snapshot (or between two snapshots)"
+    );
+    println!();
+    println!("Scheduling  (sched::)");
+    println!(
+        "  sched::node-selector                   - find pods whose nodeSelector no node satisfies"
     );
     println!(
-        "  \\smt anti_affinity                     — find a valid pod placement or prove none exists"
+        "  sched::anti-affinity                   - find a valid pod placement or prove none exists"
     );
     println!(
-        "  \\smt karpenter                         — find nodeSelector gaps in Karpenter NodePool coverage"
+        "  sched::karpenter                       - find nodeSelector gaps in Karpenter NodePool coverage"
     );
     println!(
         "                                           (--format ndjson: one JSON object per result/violation; exit status 1 if any check FAILs)"
     );
-    println!("  \\smtlib <rel> [rel...]                 — dump SMT-LIB 2 encoding of relations");
+    println!();
+    println!("Engine / debug");
+    println!("  smtlib <rel> [rel...]                  - dump SMT-LIB 2 encoding of relations");
     println!();
     println!("Session");
-    println!("  \\pretty                                - toggle default/pretty tuple display");
+    println!("  pretty                                 - toggle default/pretty tuple display");
     println!(
-        "  \\format default|compact|pretty|table|ndjson - set output format (compact = bare tuples, table = aligned columns, ndjson = one JSON object per row)"
+        "  format default|compact|pretty|table|ndjson - set output format (compact = bare tuples, table = aligned columns, ndjson = one JSON object per row)"
     );
-    println!("  !<cmd>                                 — run a shell command");
+    println!("  !<cmd>                                 - run a shell command");
     println!(
         "  # <text>                               - comment, ignored (handy in --script files)"
     );
-    println!("  \\help                                  — show this help");
-    println!("  \\quit                                  — exit");
+    println!("  help                                   - show this help");
+    println!("  quit                                   - exit");
     println!();
-    println!("  (legacy: ::cmd also accepted as alias for \\cmd)");
-    println!();
+}
+
+/// Print the subcommands of a subsystem container-command (`rbac`, `sched`,
+/// `k8s`), shown when a bare namespace is entered with no subcommand.
+fn print_subsystem_help(ns: &str) {
+    match ns {
+        "rbac" => {
+            println!("rbac:: - RBAC access analysis");
+            println!(
+                "  rbac::access <ns> <r> <v> [p...]       - principals granted (ns,r,v) beyond the expected set"
+            );
+            println!(
+                "  rbac::reaches <ns> <ag> <r> <v> [p...] - principals that can reach (ns,ag,r,v), counting escalation"
+            );
+            println!(
+                "  rbac::cluster-admin [p...]             - shorthand for reaches \"\" \"*\" \"*\" \"*\""
+            );
+            println!(
+                "  rbac::isolation <ns> [p...]            - check only the listed principals have access in <ns>"
+            );
+            println!(
+                "  rbac::diff <name> [name2]              - diff RBAC permissions vs a snapshot, or between two snapshots"
+            );
+        }
+        "sched" => {
+            println!("sched:: - scheduling / placement analysis");
+            println!(
+                "  sched::node-selector                   - pods whose nodeSelector no node satisfies"
+            );
+            println!(
+                "  sched::anti-affinity                   - a valid pod placement, or proof none exists"
+            );
+            println!(
+                "  sched::karpenter                       - nodeSelector gaps in Karpenter NodePool coverage"
+            );
+        }
+        "k8s" => {
+            println!("k8s:: - Kubernetes object graph");
+            println!(
+                "  k8s::load <src>                        - load k8s objects through the projection pipeline"
+            );
+            println!(
+                "  k8s::match <Kind> <ns> <selector>      - objects of <Kind> matching a kubectl selector"
+            );
+            println!(
+                "  k8s::match-all <ns> <selector>         - objects of any Kind matching a kubectl selector"
+            );
+        }
+        _ => {}
+    }
 }
 
 /// Run a real kubectl-style label selector through the `labels.mg` engine and
@@ -274,7 +330,7 @@ fn print_help() {
 /// asserted as synthetic `selector_*` facts under a query owner, evaluated, then
 /// retracted so the engine's EDB is left untouched (the same assert→query→retract
 /// path the `+`/`?-`/`-` commands expose). `kind = Some(k)` scopes to one Kind
-/// (`::match`); `None` matches any Kind (`::match_all`). `namespace` scopes the
+/// (`k8s::match`); `None` matches any Kind (`k8s::match-all`). `namespace` scopes the
 /// owner; "" targets cluster-scoped objects. Returns `false` if the selector
 /// did not parse or evaluation failed.
 fn run_match(
@@ -374,8 +430,8 @@ fn run_match(
     true
 }
 
-/// The interactive prompt, red like the rest of the REPL's chrome. `\use`
-/// with no snapshot (`None`) points it back at the plain prompt; `\use
+/// The interactive prompt, red like the rest of the REPL's chrome. `use`
+/// with no snapshot (`None`) points it back at the plain prompt; `use
 /// <name>` names the snapshot queries are pointed at.
 fn prompt(in_use: Option<&str>) -> String {
     match in_use {
@@ -385,7 +441,7 @@ fn prompt(in_use: Option<&str>) -> String {
 }
 
 /// The state read-only commands run against: the named snapshot's frozen
-/// store under `\use <name>`, or the live `current_store` otherwise.
+/// store under `use <name>`, or the live `current_store` otherwise.
 fn active_store<'a>(
     current_store: &'a EvalStore,
     snapshots: &'a BTreeMap<String, FrozenState>,
@@ -402,10 +458,10 @@ fn active_store<'a>(
     }
 }
 
-/// Relation names a `?-` query may reference under `\use <name>`: every
+/// Relation names a `?-` query may reference under `use <name>`: every
 /// relation the frozen store actually holds rows or keys for, plus any
 /// relation with a `Decl` (covers one with no rows at snapshot time). Unlike
-/// `Engine::known_relations`, this leaves out a relation `\define` added
+/// `Engine::known_relations`, this leaves out a relation `define` added
 /// after the snapshot was taken: it did not exist in the frozen state, so a
 /// query against it is unknown, not merely empty.
 fn known_relations_in_use(
@@ -421,15 +477,15 @@ fn known_relations_in_use(
 }
 
 /// Return `true` and refuse a state-changing command (`+`, `-`, `~`,
-/// `\define`, `\load`, `\load-k8s`, `\apply-delta`, `\source`,
-/// `\snapshot`, `\rollback`) while a snapshot is in use: a frozen state never changes, so there is
-/// nothing for the command to act on. `\match` and `\match_all` are refused
+/// `define`, `load`, `k8s::load`, `apply-delta`, `source`,
+/// `snapshot`, `rollback`) while a snapshot is in use: a frozen state never changes, so there is
+/// nothing for the command to act on. `k8s::match` and `k8s::match-all` are refused
 /// for the same reason even though they leave the EDB untouched: they
 /// re-evaluate the live engine, which a frozen snapshot has none of. A
 /// refusal marks the line as failed.
 fn refuse_if_in_use(in_use: &Option<String>, command_failed: &mut bool) -> bool {
     if let Some(name) = in_use {
-        eprintln!("Snapshot '{name}' is in use; \\use to return to the live state.");
+        eprintln!("Snapshot '{name}' is in use; use to return to the live state.");
         *command_failed = true;
         true
     } else {
@@ -438,7 +494,7 @@ fn refuse_if_in_use(in_use: &Option<String>, command_failed: &mut bool) -> bool 
 }
 
 /// Print a `?-` query's result rows in the current output format, shared by
-/// the live (`_N`-backed) and `\use` (throwaway) result paths.
+/// the live (`_N`-backed) and `use` (throwaway) result paths.
 fn print_query_rows(format: OutputFormat, vars: &[String], tuples: &[Vec<Value>]) {
     if format == OutputFormat::Table {
         let rows: Vec<Vec<String>> = tuples
@@ -467,7 +523,7 @@ fn print_query_rows(format: OutputFormat, vars: &[String], tuples: &[Vec<Value>]
 pub enum SessionStatus {
     /// Every command ran and no check failed: exit 0.
     Clean,
-    /// An `::smt` check failed or `::access-diff` found new permissions: exit 1.
+    /// An `rbac::`/`sched::` check failed or `rbac::diff` found new permissions: exit 1.
     Findings,
     /// A `--script` line was not a command, or its command failed: exit 2.
     Error,
@@ -522,9 +578,9 @@ impl Input {
     }
 }
 
-/// Run the REPL until EOF or `::quit`. A command that fails prints an error
-/// and the session carries on, so this returns `Findings` if any `::smt`
-/// check failed or `::access-diff` found new permissions, else `Clean`.
+/// Run the REPL until EOF or `quit`. A command that fails prints an error
+/// and the session carries on, so this returns `Findings` if any `rbac::`/
+/// `sched::` check failed or `rbac::diff` found new permissions, else `Clean`.
 pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Result<SessionStatus> {
     // Banner is interactive chrome: skip it when stdout is redirected so a
     // piped session (e.g. `... | pallograph --format ndjson > out.json`) yields
@@ -595,13 +651,13 @@ fn session(
     let mut snapshots: BTreeMap<String, FrozenState> = BTreeMap::new();
     // The `bool` is whether the line belongs in rustyline history: `true` for
     // a pasted multi-line command split apart below, `false` for the inner
-    // command and restore sentinel a `\use <name> <command>` one-shot queues,
+    // command and restore sentinel a `use <name> <command>` one-shot queues,
     // so up-arrow recalls the one-shot line as typed rather than its parts.
     let mut pending: std::collections::VecDeque<(String, bool)> = std::collections::VecDeque::new();
-    // `None` = live state; `Some(name)` = `\use <name>` is pointing read-only
+    // `None` = live state; `Some(name)` = `use <name>` is pointing read-only
     // commands at that frozen snapshot.
     let mut in_use: Option<String> = None;
-    // `\use <name> <command>` queues `<command>` and this sentinel onto the
+    // `use <name> <command>` queues `<command>` and this sentinel onto the
     // front of `pending`, so the command runs with `<name>` in use and the
     // sentinel then restores whatever was in use before — on every `continue`
     // path, since it is just another queued line. The null byte keeps it out
@@ -628,11 +684,16 @@ fn session(
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                // Normalize \ meta-prefix to :: so all existing dispatch keeps working.
-                let line = if let Some(rest) = line.strip_prefix('\\') {
-                    format!("::{rest}")
-                } else {
+                // Commands are bare paths (e.g. `show`, `rbac::reaches`). Internally
+                // they are canonicalized to the `::`-qualified form, which is also
+                // what a user types to disambiguate (e.g. `::rbac::diff` vs `::diff`).
+                // Queries (`?-`), fact mutations (`+ - ~`), shell (`!`) and comments
+                // (`#`, handled above) are not commands and are left untouched.
+                let line = if line.starts_with("::") || line.starts_with(['?', '!', '+', '-', '~'])
+                {
                     line
+                } else {
+                    format!("::{line}")
                 };
                 // Split pasted multi-line input into individual commands.
                 // Only split at newlines where parentheses are balanced and we're
@@ -773,7 +834,7 @@ fn session(
                         }
                         if hidden > 0 {
                             println!(
-                                "  ({hidden} undocumented relation(s) hidden; ::show --all to include)"
+                                "  ({hidden} undocumented relation(s) hidden; show --all to include)"
                             );
                         }
                     } else {
@@ -947,7 +1008,7 @@ fn session(
                 if let Some(rest) = line.strip_prefix("::why ") {
                     if !engine.supports_provenance() {
                         command_error!(
-                            "::why needs provenance, which is off for this session. \
+                            "why needs provenance, which is off for this session. \
                              Re-run with `--backend dd --provenance`, or use \
                              `--backend interpreter`."
                         );
@@ -959,7 +1020,7 @@ fn session(
                         Ok(q) => {
                             // A live session is the source of truth: mutators
                             // don't refresh `current_store` while one exists.
-                            // Under `\use`, the frozen store is always read
+                            // Under `use`, the frozen store is always read
                             // directly: it has no live session of its own.
                             let live: Vec<Vec<Value>>;
                             let rows: &[Vec<Value>] = if in_use.is_none() && engine.has_session() {
@@ -980,7 +1041,7 @@ fn session(
                             } else if engine.has_session() {
                                 // DD backend: lazy provenance, one shortest proof
                                 // reconstructed on demand from the live session,
-                                // or from the copy `\snapshot` froze under `\use`.
+                                // or from the copy `snapshot` froze under `use`.
                                 let provenance: Option<&dyn LazyProvenance> = match &in_use {
                                     Some(name) => snapshots
                                         .get(name)
@@ -1014,7 +1075,7 @@ fn session(
                                 }
                             } else {
                                 // Interpreter: the active store (frozen under
-                                // `\use`) carries its own provenance.
+                                // `use`) carries its own provenance.
                                 let index = build_provenance_index(&active.provenance);
                                 for tuple in matched {
                                     println!("{}({})", q.predicate, join_values(tuple));
@@ -1030,7 +1091,7 @@ fn session(
                 if let Some(rest) = line.strip_prefix("::smtlib ") {
                     let relations: Vec<&str> = rest.split_whitespace().collect();
                     if relations.is_empty() {
-                        command_error!("Usage: ::smtlib <relation> [relation ...]");
+                        command_error!("Usage: smtlib <relation> [relation ...]");
                     } else {
                         let active = active_store(&current_store, &snapshots, &in_use);
                         let cfg = z3::Config::new();
@@ -1038,16 +1099,6 @@ fn session(
                         let mut enc = smt::SmtEncoder::new(&ctx);
                         enc.load(active, &relations);
                         println!("{}", enc.to_smtlib());
-                    }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("::smt ") {
-                    let active = active_store(&current_store, &snapshots, &in_use);
-                    match smt_command(rest.trim(), active, format) {
-                        CheckResult::Pass => {}
-                        CheckResult::Fail => had_failure = true,
-                        CheckResult::Error => command_failed = true,
                     }
                     continue;
                 }
@@ -1171,7 +1222,11 @@ fn session(
                     continue;
                 }
 
-                if let Some(rest) = line.strip_prefix("::access-diff ") {
+                if line == "::rbac::diff" {
+                    command_error!("Usage: rbac::diff <snap>  or  rbac::diff <snap1> <snap2>");
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("::rbac::diff ") {
                     let parts: Vec<&str> = rest.trim().splitn(2, ' ').collect();
                     let lookup = |n: &str| -> Option<&FrozenState> { snapshots.get(n) };
                     let tables_of = |store: &EvalStore| {
@@ -1211,7 +1266,7 @@ fn session(
                             }
                         }
                         _ => command_error!(
-                            "Usage: ::access-diff <snap>  or  ::access-diff <snap1> <snap2>"
+                            "Usage: rbac::diff <snap>  or  rbac::diff <snap1> <snap2>"
                         ),
                     }
                     continue;
@@ -1315,7 +1370,7 @@ fn session(
                     continue;
                 }
 
-                if let Some(rest) = line.strip_prefix("::load-k8s ") {
+                if let Some(rest) = line.strip_prefix("::k8s::load ") {
                     if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
@@ -1353,7 +1408,7 @@ fn session(
                     let args: Vec<&str> = rest.split_whitespace().collect();
                     let [base_arg, head_arg] = args.as_slice() else {
                         command_error!(
-                            "Usage: \\apply-delta <base> <head> (a dir, .json file, or - for an empty side)"
+                            "Usage: apply-delta <base> <head> (a dir, .json file, or - for an empty side)"
                         );
                         continue;
                     };
@@ -1546,8 +1601,8 @@ fn session(
                     continue;
                 }
 
-                // ::match <Kind> <namespace> <selector>  — scoped to one Kind
-                if let Some(rest) = line.strip_prefix("::match ") {
+                // k8s::match <Kind> <namespace> <selector>  - scoped to one Kind
+                if let Some(rest) = line.strip_prefix("::k8s::match ") {
                     if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
@@ -1559,14 +1614,14 @@ fn session(
                             }
                         }
                         _ => command_error!(
-                            "Usage: ::match <Kind> <namespace> <selector>  (namespace \"\" for cluster-scoped)"
+                            "Usage: k8s::match <Kind> <namespace> <selector>  (namespace \"\" for cluster-scoped)"
                         ),
                     }
                     continue;
                 }
 
-                // ::match_all <namespace> <selector>  — any Kind
-                if let Some(rest) = line.strip_prefix("::match_all ") {
+                // k8s::match-all <namespace> <selector>  - any Kind
+                if let Some(rest) = line.strip_prefix("::k8s::match-all ") {
                     if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
@@ -1577,17 +1632,58 @@ fn session(
                                 command_failed = true;
                             }
                         }
-                        _ => command_error!("Usage: ::match_all <namespace> <selector>"),
+                        _ => command_error!("Usage: k8s::match-all <namespace> <selector>"),
                     }
                     continue;
                 }
 
-                // Everything else is not a command. Queries go through `?-`.
-                if line.starts_with("::") {
-                    command_error!("Unknown command: {line} (try \\help)");
-                } else {
-                    command_error!("Not a command. Queries start with ?-, e.g. ?- {line}");
+                // Subsystem container-commands. A bare namespace lists its
+                // subcommands; `ns::sub` runs one. The k8s object commands have
+                // their own blocks above, so a leftover `::k8s::` here is an
+                // unknown subcommand.
+                if line == "::rbac" {
+                    print_subsystem_help("rbac");
+                    continue;
                 }
+                if line == "::sched" {
+                    print_subsystem_help("sched");
+                    continue;
+                }
+                if line == "::k8s" {
+                    print_subsystem_help("k8s");
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("::rbac::") {
+                    let active = active_store(&current_store, &snapshots, &in_use);
+                    match rbac_command(rest.trim(), active, format) {
+                        CheckResult::Pass => {}
+                        CheckResult::Fail => had_failure = true,
+                        CheckResult::Error => command_failed = true,
+                    }
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("::sched::") {
+                    let active = active_store(&current_store, &snapshots, &in_use);
+                    match sched_command(rest.trim(), active, format) {
+                        CheckResult::Pass => {}
+                        CheckResult::Fail => had_failure = true,
+                        CheckResult::Error => command_failed = true,
+                    }
+                    continue;
+                }
+                if line.strip_prefix("::k8s::").is_some() {
+                    command_error!(
+                        "Unknown k8s command. Available: k8s::load, k8s::match, k8s::match-all."
+                    );
+                    continue;
+                }
+
+                // Not a known command. Commands are bare paths (see `help`);
+                // queries go through `?-`.
+                let shown = line.strip_prefix("::").unwrap_or(&line);
+                command_error!(
+                    "Unknown command: {shown}. Type `help` for commands, or `?- {shown}` to run it as a query."
+                );
             }
             Err(ReadlineError::Interrupted) => continue,
             Err(ReadlineError::Eof) => break,
@@ -1985,7 +2081,7 @@ fn paths_json(paths: &[rbac::AccessPath]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// What an `::smt` check concluded.
+/// What an `rbac::`/`sched::` check concluded.
 enum CheckResult {
     Pass,
     /// A `FAIL` line in plain output, `"result":"fail"` in ndjson.
@@ -1994,22 +2090,22 @@ enum CheckResult {
     Error,
 }
 
-/// Run an `::smt` subcommand. The caller turns a `Fail` into exit status 1
-/// and an `Error` into exit status 2 under `--script`.
-fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckResult {
+/// Run an `rbac::` RBAC access check. The caller turns a `Fail` into exit
+/// status 1 and an `Error` into exit status 2 under `--script`.
+fn rbac_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckResult {
     let ndjson = format == OutputFormat::Ndjson;
     let mut tokens = input.splitn(2, ' ');
     let subcommand = tokens.next().unwrap_or("").trim();
     let rest = tokens.next().unwrap_or("").trim();
 
     match subcommand {
-        "check_access" => {
+        "access" => {
             let mut args = rest.split_whitespace();
             let (Some(ns_raw), Some(res_raw), Some(verb_raw)) =
                 (args.next(), args.next(), args.next())
             else {
                 eprintln!(
-                    "Usage: ::smt check_access <namespace> <resource> <verb> [expected_principal ...]"
+                    "Usage: rbac::access <namespace> <resource> <verb> [expected_principal ...]"
                 );
                 eprintln!("       Use \"\" for namespace to check cluster-wide (CRB) grants.");
                 return CheckResult::Error;
@@ -2031,7 +2127,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRes
                 if ndjson {
                     println!(
                         "{}",
-                        serde_json::json!({"result":"pass","check":"check_access","namespace":namespace,"resource":resource,"verb":verb})
+                        serde_json::json!({"result":"pass","check":"access","namespace":namespace,"resource":resource,"verb":verb})
                     );
                 } else {
                     println!("PASS  can(_, {namespace:?}, {resource:?}, {verb:?})");
@@ -2044,7 +2140,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRes
                             "{}",
                             serde_json::json!({
                                 "result": "fail",
-                                "check": "check_access",
+                                "check": "access",
                                 "principal": v.principal.name,
                                 "principal_kind": v.principal.kind.as_str(),
                                 "namespace": namespace,
@@ -2097,10 +2193,10 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRes
                     token_iter.next(),
                 ) else {
                     eprintln!(
-                        "Usage: ::smt reaches <namespace> <apigroup> <resource> <verb> [--direct] [--all] [expected ...]"
+                        "Usage: rbac::reaches <namespace> <apigroup> <resource> <verb> [--direct] [--all] [expected ...]"
                     );
                     eprintln!(
-                        "       Use ::smt cluster-admin [--direct] [--all] to check for cluster-admin level access."
+                        "       Use rbac::cluster-admin [--direct] [--all] to check for cluster-admin level access."
                     );
                     return CheckResult::Error;
                 };
@@ -2184,10 +2280,10 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRes
                 CheckResult::Fail
             }
         }
-        "check_isolation" => {
+        "isolation" => {
             let mut args = rest.split_whitespace();
             let Some(ns_raw) = args.next() else {
-                eprintln!("Usage: ::smt check_isolation <namespace> [allowed_principal ...]");
+                eprintln!("Usage: rbac::isolation <namespace> [allowed_principal ...]");
                 eprintln!(
                     "       Checks that only the listed principals have any RBAC access in <namespace>."
                 );
@@ -2207,7 +2303,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRes
                 if ndjson {
                     println!(
                         "{}",
-                        serde_json::json!({"result":"pass","check":"check_isolation","namespace":namespace})
+                        serde_json::json!({"result":"pass","check":"isolation","namespace":namespace})
                     );
                 } else {
                     println!(
@@ -2220,7 +2316,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRes
                     for v in &violations {
                         println!(
                             "{}",
-                            serde_json::json!({"result":"fail","check":"check_isolation","principal":v.principal.name,"principal_kind":v.principal.kind.as_str(),"namespace":v.namespace,"resource":v.resource,"verb":v.verb})
+                            serde_json::json!({"result":"fail","check":"isolation","principal":v.principal.name,"principal_kind":v.principal.kind.as_str(),"namespace":v.namespace,"resource":v.resource,"verb":v.verb})
                         );
                     }
                 } else {
@@ -2241,13 +2337,28 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRes
                 CheckResult::Fail
             }
         }
-        "node_selector" => {
+        _ => {
+            eprintln!("Unknown rbac command: {subcommand:?}");
+            eprintln!("Available: access, reaches, cluster-admin, isolation.");
+            CheckResult::Error
+        }
+    }
+}
+
+/// Run a `sched::` scheduling/placement check. Same `Pass`/`Fail`/`Error`
+/// contract as [`rbac_command`].
+fn sched_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckResult {
+    let ndjson = format == OutputFormat::Ndjson;
+    let subcommand = input.split_whitespace().next().unwrap_or("").trim();
+
+    match subcommand {
+        "node-selector" => {
             let unschedulable = smt::scheduling::check_node_selector(store);
             if unschedulable.is_empty() {
                 if ndjson {
                     println!(
                         "{}",
-                        serde_json::json!({"result":"pass","check":"node_selector"})
+                        serde_json::json!({"result":"pass","check":"node-selector"})
                     );
                 } else {
                     println!("PASS  all pods with nodeSelectors are schedulable");
@@ -2258,7 +2369,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRes
                     for p in &unschedulable {
                         println!(
                             "{}",
-                            serde_json::json!({"result":"fail","check":"node_selector","namespace":p.namespace,"pod":p.name})
+                            serde_json::json!({"result":"fail","check":"node-selector","namespace":p.namespace,"pod":p.name})
                         );
                     }
                 } else {
@@ -2270,14 +2381,14 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRes
                 CheckResult::Fail
             }
         }
-        "anti_affinity" => {
+        "anti-affinity" => {
             use smt::scheduling::PlacementResult;
             match smt::scheduling::check_anti_affinity_placement(store) {
                 PlacementResult::Sat(assignment) if assignment.is_empty() => {
                     if ndjson {
                         println!(
                             "{}",
-                            serde_json::json!({"result":"pass","check":"anti_affinity"})
+                            serde_json::json!({"result":"pass","check":"anti-affinity"})
                         );
                     } else {
                         println!("PASS  no anti-affinity conflicts found");
@@ -2290,7 +2401,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRes
                         for (pod, node) in &assignment {
                             println!(
                                 "{}",
-                                serde_json::json!({"result":"pass","check":"anti_affinity","pod":pod,"node":node})
+                                serde_json::json!({"result":"pass","check":"anti-affinity","pod":pod,"node":node})
                             );
                         }
                     } else {
@@ -2305,7 +2416,7 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRes
                     if ndjson {
                         println!(
                             "{}",
-                            serde_json::json!({"result":"fail","check":"anti_affinity"})
+                            serde_json::json!({"result":"fail","check":"anti-affinity"})
                         );
                     } else {
                         println!(
@@ -2356,10 +2467,8 @@ fn smt_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRes
             }
         }
         _ => {
-            eprintln!("Unknown SMT subcommand: {subcommand:?}");
-            eprintln!(
-                "Available: check_access, reaches, cluster-admin, node_selector, anti_affinity, karpenter"
-            );
+            eprintln!("Unknown sched command: {subcommand:?}");
+            eprintln!("Available: node-selector, anti-affinity, karpenter.");
             CheckResult::Error
         }
     }
@@ -2644,7 +2753,7 @@ fn parse_ground_tuple(input: &str) -> anyhow::Result<(String, Vec<Value>)> {
 /// Convert a ground term to the `Value` the interpreter stores for it.
 /// Struct, list, map and pair literals parse as `fn:struct(...)` and friends;
 /// they are built with the interpreter's own `eval_function`, so a fact added
-/// with `+` equals the same fact loaded with `\source`.
+/// with `+` equals the same fact loaded with `source`.
 fn ground_value(arena: &mangle_ast::Arena, term: &mangle_ast::BaseTerm) -> anyhow::Result<Value> {
     use mangle_ast::{BaseTerm, Const};
     match term {
@@ -2683,7 +2792,7 @@ fn ground_value(arena: &mangle_ast::Arena, term: &mangle_ast::BaseTerm) -> anyho
     }
 }
 
-/// A `\source`d file split into ground facts and the rest of its text.
+/// A `source`d file split into ground facts and the rest of its text.
 #[derive(Debug, Default, PartialEq)]
 struct SourcedProgram {
     /// Ground facts (an atom with no body and only constant arguments), to be
@@ -2833,7 +2942,7 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '~' | '.' | '%' | '/')
 }
 
-/// Load one side of a `\apply-delta` into its rendered objects. A literal
+/// Load one side of a `apply-delta` into its rendered objects. A literal
 /// `-` is an intentionally empty side (a brand-new chart has no base; a
 /// deleted chart has no head), distinct from a path that matches no files,
 /// which still errors like any manifest load.
@@ -3062,7 +3171,7 @@ fn render_table(headers: &[String], rows: &[Vec<String>]) -> String {
 
 /// Print the tuples of `rel` matching the constants in `body`, one row per
 /// line (`Column = value, ...`, or `rel(a, b, ...)` in compact format). `_` and
-/// missing trailing arguments match anything. `live` is false under `\use`: a
+/// missing trailing arguments match anything. `live` is false under `use`: a
 /// frozen snapshot has no live session of its own, so `store` is read directly
 /// even when the live engine has one. Returns `false` if the query failed.
 fn list_tuples(
@@ -3637,7 +3746,7 @@ mod source_tests {
         }
     }
 
-    /// A bodiless atom with a variable stays a rule, as before `\source` split
+    /// A bodiless atom with a variable stays a rule, as before `source` split
     /// out facts, so it fails the same way: an unbound head variable.
     #[test]
     fn non_ground_fact_stays_a_rule() {

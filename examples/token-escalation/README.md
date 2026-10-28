@@ -20,9 +20,9 @@ This is a quieter path with fewer observable side effects.
 
 ## What pallograph Shows
 
-`\access-diff` surfaces the new `serviceaccounts/token create` permission.
+`rbac::diff` surfaces the new `serviceaccounts/token create` permission.
 
-`\smt cluster-admin` confirms the escalation:
+`rbac::cluster-admin` confirms the escalation:
 
 ```
 alice
@@ -33,8 +33,8 @@ alice
 ## Demo
 
 ```
-\snapshot baseline
-\source examples/token-escalation/alice-sa-token.mg
-\access-diff baseline
-\smt cluster-admin
+snapshot baseline
+source examples/token-escalation/alice-sa-token.mg
+rbac::diff baseline
+rbac::cluster-admin
 ```

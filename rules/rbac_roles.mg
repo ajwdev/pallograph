@@ -74,7 +74,7 @@ clusterrole_own_rule(Role, Rule) :-
 #
 # The RBAC authorizer never runs aggregation: it reads each ClusterRole's
 # stored rules field, which the controller writes. Pallograph recomputes
-# that field from the selectors anyway, so that a what-if change (\load a
+# that field from the selectors anyway, so that a what-if change (load a
 # role labelled aggregate-to-admin) shows up in the roles that aggregate it.
 # A loaded cluster's stored rules for an aggregated role are already the
 # controller's output, and recomputing them gives the same answer, except on

@@ -31,7 +31,7 @@ enum Fixture {
 enum Scenario {
     /// Build the RBAC access model used by cluster-admin/access checks.
     LoadAccessModel,
-    /// Build the permission tables `\access-diff` compares, for one snapshot.
+    /// Build the permission tables `rbac::diff` compares, for one snapshot.
     LoadPermissionTables,
     /// Enumerate principals with a direct cluster-admin grant.
     DirectClusterAdmin,

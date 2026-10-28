@@ -1,6 +1,6 @@
 # Karpenter: Finding Coverage Gaps in NodePool Configuration
 
-Demonstrates `\smt karpenter` - uses Z3 to synthesize concrete nodeSelectors
+Demonstrates `sched::karpenter` - uses Z3 to synthesize concrete nodeSelectors
 that fall through ALL Karpenter NodePools. Every label value individually exists
 in some pool, but the combination is unsatisfiable.
 
@@ -25,8 +25,8 @@ Two NodePools:
 
 ```
 cargo run
-\load-k8s examples/karpenter-unschedulable
-\smt karpenter
+k8s::load examples/karpenter-unschedulable
+sched::karpenter
 ```
 
 ## Expected Output

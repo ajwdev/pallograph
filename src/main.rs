@@ -38,25 +38,26 @@ struct Cli {
     #[arg(long, value_enum, default_value = "interpreter")]
     backend: BackendKind,
 
-    /// Enable provenance for the DD backend so `::why` works.
+    /// Enable provenance for the DD backend so `why` works.
     /// Off by default: it adds per-fact annotation operators to every rule and is
     /// only needed for explanation queries. (The interpreter always has it.)
     #[arg(long)]
     provenance: bool,
 
-    /// Output format for query/relation results and `::smt` checks. `default`
-    /// names each column, `compact` prints bare tuples, `table` aligns columns
-    /// under a header, and `ndjson` emits one JSON object per row (or per
+    /// Output format for query/relation results and `rbac::`/`sched::` checks.
+    /// `default` names each column, `compact` prints bare tuples, `table` aligns
+    /// columns under a header, and `ndjson` emits one JSON object per row (or per
     /// violation), suitable for piping into jq, DuckDB, etc. The process exits
-    /// 1 if any `::smt` check failed or `::access-diff` found new permissions.
+    /// 1 if any `rbac::`/`sched::` check failed or `rbac::diff` found new
+    /// permissions.
     #[arg(long, value_enum, default_value = "default")]
     format: OutputFormat,
 
     /// Run the commands in this file (`-` for stdin), one per line, instead of
     /// starting the REPL. Blank lines and lines starting with `#` are skipped.
     /// Stops at the first line that is not a command or whose command fails.
-    /// Exits 0 when clean, 1 on findings (a failed `::smt` check, or
-    /// `::access-diff` finding new permissions), 2 on an error.
+    /// Exits 0 when clean, 1 on findings (a failed `rbac::`/`sched::` check, or
+    /// `rbac::diff` finding new permissions), 2 on an error.
     #[arg(long, value_name = "FILE")]
     script: Option<PathBuf>,
 }

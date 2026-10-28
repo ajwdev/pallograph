@@ -3,7 +3,7 @@
 
 //! Drives the built binary over the small fixture to check the REPL's
 //! `?-` query UX: tuple listing, output formats, unknown-relation hints and
-//! the hint printed for input that is not a command, and `\source` of the
+//! the hint printed for input that is not a command, and `source` of the
 //! example scenarios on both backends.
 
 use std::io::Write;
@@ -91,7 +91,7 @@ fn default_listing_names_columns() {
 
 #[test]
 fn compact_format_prints_tuples() {
-    let (stdout, _) = run_session(&format!("\\format compact\n{ADMIN}\n::quit\n"));
+    let (stdout, _) = run_session(&format!("format compact\n{ADMIN}\n::quit\n"));
     assert!(
         stdout.contains(r#"direct_perm("admin@example.com", /user, "", "*", "*", /any, "*")"#),
         "stdout: {stdout}"
@@ -101,7 +101,7 @@ fn compact_format_prints_tuples() {
 
 #[test]
 fn table_format_prints_header_and_rule() {
-    let (stdout, _) = run_session(&format!("\\format table\n{ADMIN}\n::quit\n"));
+    let (stdout, _) = run_session(&format!("format table\n{ADMIN}\n::quit\n"));
     let lines: Vec<&str> = stdout.lines().filter(|l| l.starts_with("  ")).collect();
     assert!(lines.len() >= 3, "stdout: {stdout}");
     assert!(
@@ -140,7 +140,7 @@ fn too_many_arguments_is_an_error() {
 
 #[test]
 fn plain_format_name_is_rejected() {
-    let (_, stderr) = run_session("\\format plain\n::quit\n");
+    let (_, stderr) = run_session("format plain\n::quit\n");
     assert!(
         stderr
             .contains("Unknown format 'plain'. Use: default | compact | pretty | table | ndjson."),
@@ -151,10 +151,7 @@ fn plain_format_name_is_rejected() {
 #[test]
 fn bare_predicate_line_prints_hint() {
     let (stdout, stderr) = run_session("direct_perm(X)\n::quit\n");
-    assert!(
-        stderr.contains("Not a command. Queries start with ?-, e.g. ?- direct_perm(X)"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("?- direct_perm(X)"), "stderr: {stderr}");
     assert!(!stdout.contains("direct_perm("), "stdout: {stdout}");
 }
 
@@ -171,7 +168,7 @@ fn sourced_examples_match_across_backends() {
     ];
     for example in examples {
         let commands = format!(
-            "\\source {example}\n\\format compact\n?- controls_identity(\"alice\", T)\n::quit\n"
+            "source {example}\nformat compact\n?- controls_identity(\"alice\", T)\n::quit\n"
         );
         let results = ["interpreter", "dd"].map(|backend| {
             let (stdout, stderr) = run_session_with(&["--backend", backend], &commands);
@@ -197,8 +194,8 @@ fn sourced_examples_match_across_backends() {
     }
 }
 
-/// Facts asserted and retracted on either side of a `\snapshot` must reach
-/// both the snapshot and the current state that `\access-diff` compares
+/// Facts asserted and retracted on either side of a `snapshot` must reach
+/// both the snapshot and the current state that `rbac::diff` compares
 /// against, on both backends.
 #[test]
 fn access_diff_sees_fact_changes_across_backends() {
@@ -208,12 +205,12 @@ fn access_diff_sees_fact_changes_across_backends() {
         "+binding_subject(\"kube-system\", \"rb-alice\", /user, \"alice@example.com\").\n\
          +binding_roleref(\"kube-system\", \"rb-alice\", \"Role\", \"alice-debug\").\n\
          +{alice}.\n\
-         \\snapshot before\n\
+         snapshot before\n\
          -{alice}.\n\
          +binding_subject(\"kube-system\", \"rb-bob\", /user, \"bob@example.com\").\n\
          +binding_roleref(\"kube-system\", \"rb-bob\", \"Role\", \"bob-oncall\").\n\
          +{bob}.\n\
-         \\access-diff before\n\
+         rbac::diff before\n\
          ::quit\n"
     );
     let results = ["interpreter", "dd"].map(|backend| {
@@ -244,7 +241,7 @@ fn access_diff_sees_fact_changes_across_backends() {
     assert_eq!(results[0], results[1]);
 }
 
-/// `\snapshot` freezes a copy of the eval state; it must not inject
+/// `snapshot` freezes a copy of the eval state; it must not inject
 /// `<name>__<relation>` facts into the live engine, so querying one is an
 /// unknown relation, not a hit.
 #[test]
@@ -252,7 +249,7 @@ fn snapshot_does_not_add_relations_to_live_state() {
     for backend in ["interpreter", "dd"] {
         let (_, stderr) = run_session_with(
             &["--backend", backend],
-            "\\snapshot before\n?- before__direct_perm(N, K, Ns, G, R, Rn, V)\n::quit\n",
+            "snapshot before\n?- before__direct_perm(N, K, Ns, G, R, Rn, V)\n::quit\n",
         );
         assert!(
             stderr.contains("Unknown relation 'before__direct_perm'"),
@@ -261,14 +258,14 @@ fn snapshot_does_not_add_relations_to_live_state() {
     }
 }
 
-/// A second `\snapshot` under a name already taken is refused, leaving the
+/// A second `snapshot` under a name already taken is refused, leaving the
 /// first snapshot (and the current state) untouched.
 #[test]
 fn snapshot_refuses_taken_name() {
     for backend in ["interpreter", "dd"] {
         let (stdout, stderr) = run_session_with(
             &["--backend", backend],
-            "\\snapshot before\n\\snapshot before\n\\diff before\n::quit\n",
+            "snapshot before\nsnapshot before\ndiff before\n::quit\n",
         );
         assert!(
             stderr.contains("Snapshot 'before' already exists."),
@@ -278,15 +275,13 @@ fn snapshot_refuses_taken_name() {
     }
 }
 
-/// `\snapshot a b` is a name with a space in it, not a name followed by
+/// `snapshot a b` is a name with a space in it, not a name followed by
 /// stray words: it is refused, and no snapshot named `a` is created.
 #[test]
 fn snapshot_refuses_name_with_space() {
     for backend in ["interpreter", "dd"] {
-        let (_, stderr) = run_session_with(
-            &["--backend", backend],
-            "\\snapshot a b\n\\diff a\n::quit\n",
-        );
+        let (_, stderr) =
+            run_session_with(&["--backend", backend], "snapshot a b\ndiff a\n::quit\n");
         assert!(
             stderr.contains("Snapshot names cannot be empty or contain spaces."),
             "{backend}: {stderr}"
@@ -303,10 +298,8 @@ fn snapshot_refuses_name_with_space() {
 #[test]
 fn snapshots_do_not_copy_earlier_snapshots() {
     for backend in ["interpreter", "dd"] {
-        let (stdout, _) = run_session_with(
-            &["--backend", backend],
-            "\\snapshot a\n\\snapshot b\n::quit\n",
-        );
+        let (stdout, _) =
+            run_session_with(&["--backend", backend], "snapshot a\nsnapshot b\n::quit\n");
         let counts: Vec<&str> = stdout
             .lines()
             .filter_map(|l| l.strip_prefix("Saved snapshot "))
@@ -325,8 +318,8 @@ fn snapshot_leaves_out_query_results() {
         let (stdout, _) = run_session_with(
             &["--backend", backend],
             "?- direct_perm(\"admin@example.com\", K, Ns, G, R, Rn, V)\n\
-             \\snapshot before\n\
-             \\diff before\n\
+             snapshot before\n\
+             diff before\n\
              ::quit\n",
         );
         assert!(
@@ -337,7 +330,7 @@ fn snapshot_leaves_out_query_results() {
 }
 
 // -----------------------------------------------------------------------
-// `\rollback`: returning to a named snapshot
+// `rollback`: returning to a named snapshot
 // -----------------------------------------------------------------------
 
 /// Backend flags the rollback tests run under: each backend, plus the DD
@@ -354,19 +347,19 @@ const ETCD_COMPONENT: &str =
     r#"object_label("v1", "Pod", "kube-system", "etcd-kind-control-plane", "component", "etcd")"#;
 const ETCD_TIER: &str = r#"object_label("v1", "Pod", "kube-system", "etcd-kind-control-plane", "tier", "control-plane")"#;
 
-/// `\rollback` undoes `+`, `-` of a startup fact and `~` of another: a
+/// `rollback` undoes `+`, `-` of a startup fact and `~` of another: a
 /// diff against the snapshot sees changes before it and none after.
 #[test]
 fn rollback_undoes_fact_changes() {
     for args in ROLLBACK_BACKENDS {
         let commands = format!(
-            "\\snapshot base\n\
+            "snapshot base\n\
              +binding_subject(\"kube-system\", \"rb-bob\", /user, \"bob@example.com\").\n\
              -{ETCD_COMPONENT}.\n\
              ~{ETCD_TIER}. object_label(\"v1\", \"Pod\", \"kube-system\", \"etcd-kind-control-plane\", \"tier\", \"edited\").\n\
-             \\diff base\n\
-             \\rollback base\n\
-             \\diff base\n\
+             diff base\n\
+             rollback base\n\
+             diff base\n\
              ?- object_label(\"v1\", \"Pod\", \"kube-system\", \"etcd-kind-control-plane\", K, V)\n\
              ::quit\n"
         );
@@ -390,16 +383,16 @@ fn rollback_undoes_fact_changes() {
     }
 }
 
-/// `\rollback` drops a rule `\define`d after the snapshot.
+/// `rollback` drops a rule `define`d after the snapshot.
 #[test]
 fn rollback_drops_defined_rule() {
     for args in ROLLBACK_BACKENDS {
         let (_, stderr) = run_session_with(
             args,
-            "\\snapshot base\n\
-             \\define admin_kind(K) :- direct_perm(\"admin@example.com\", K, _, _, _, _, _).\n\
+            "snapshot base\n\
+             define admin_kind(K) :- direct_perm(\"admin@example.com\", K, _, _, _, _, _).\n\
              ?- admin_kind(K)\n\
-             \\rollback base\n\
+             rollback base\n\
              ?- admin_kind(K)\n\
              ::quit\n",
         );
@@ -418,22 +411,22 @@ fn rollback_to_older_then_newer_snapshot() {
     for args in ROLLBACK_BACKENDS {
         let (stdout, _) = run_session_with(
             args,
-            "\\snapshot a\n\
+            "snapshot a\n\
              +binding_subject(\"kube-system\", \"rb-bob\", /user, \"bob@example.com\").\n\
-             \\snapshot b\n\
+             snapshot b\n\
              +binding_subject(\"kube-system\", \"rb-carol\", /user, \"carol@example.com\").\n\
-             \\rollback a\n\
-             \\diff a\n\
-             \\rollback b\n\
-             \\diff b\n\
-             \\diff a\n\
+             rollback a\n\
+             diff a\n\
+             rollback b\n\
+             diff b\n\
+             diff a\n\
              ::quit\n",
         );
         let sections: Vec<&str> = stdout.split("Rolled back to snapshot ").collect();
         assert_eq!(sections.len(), 3, "{args:?}: {stdout}");
-        // After `\rollback a`: `\diff a` is clean.
+        // After `rollback a`: `diff a` is clean.
         assert!(sections[1].contains("(no changes)"), "{args:?}: {stdout}");
-        // After `\rollback b`: `\diff b` is clean, `\diff a` sees bob only.
+        // After `rollback b`: `diff b` is clean, `diff a` sees bob only.
         let (diff_b, diff_a) = sections[2]
             .split_once("(no changes)")
             .unwrap_or_else(|| panic!("{args:?}: {stdout}"));
@@ -443,7 +436,7 @@ fn rollback_to_older_then_newer_snapshot() {
     }
 }
 
-/// `?-` results (`_N`) are not part of a snapshot: `\rollback` drops all
+/// `?-` results (`_N`) are not part of a snapshot: `rollback` drops all
 /// of them, from before the snapshot or after, and numbering starts over.
 #[test]
 fn rollback_drops_all_query_results() {
@@ -451,9 +444,9 @@ fn rollback_drops_all_query_results() {
         let (_, stderr) = run_session_with(
             args,
             "?- direct_perm(\"admin@example.com\", K, Ns, G, R, Rn, V)\n\
-             \\snapshot base\n\
+             snapshot base\n\
              ?- direct_perm(\"admin@example.com\", K, Ns, G, R, Rn, V)\n\
-             \\rollback base\n\
+             rollback base\n\
              ?- _0(K, Ns, G, R, Rn, V)\n\
              ?- _1(K, Ns, G, R, Rn, V)\n\
              ?- direct_perm(\"admin@example.com\", K, Ns, G, R, Rn, V)\n\
@@ -474,11 +467,11 @@ fn rollback_drops_all_query_results() {
     }
 }
 
-/// `\rollback` of a name never snapshotted is an error, and changes nothing.
+/// `rollback` of a name never snapshotted is an error, and changes nothing.
 #[test]
 fn rollback_unknown_snapshot_is_refused() {
     for args in ROLLBACK_BACKENDS {
-        let (_, stderr) = run_session_with(args, "\\rollback nosuch\n\\rollback\n::quit\n");
+        let (_, stderr) = run_session_with(args, "rollback nosuch\nrollback\n::quit\n");
         assert!(
             stderr.contains("No snapshot named 'nosuch'."),
             "{args:?}: {stderr}"
@@ -491,11 +484,11 @@ fn rollback_unknown_snapshot_is_refused() {
 }
 
 // -----------------------------------------------------------------------
-// `\use`: pointing queries at a snapshot
+// `use`: pointing queries at a snapshot
 // -----------------------------------------------------------------------
 
-/// Shared setup for the `\use` tests: alice is granted `pods/exec` on
-/// `kube-system`, `\snapshot before` freezes that, then alice is retracted
+/// Shared setup for the `use` tests: alice is granted `pods/exec` on
+/// `kube-system`, `snapshot before` freezes that, then alice is retracted
 /// and bob is granted the same permission. `before` keeps alice's grant;
 /// the live state has bob's instead.
 fn before_bob_setup() -> String {
@@ -505,7 +498,7 @@ fn before_bob_setup() -> String {
         "+binding_subject(\"kube-system\", \"rb-alice\", /user, \"alice@example.com\").\n\
          +binding_roleref(\"kube-system\", \"rb-alice\", \"Role\", \"alice-debug\").\n\
          +{alice}.\n\
-         \\snapshot before\n\
+         snapshot before\n\
          -{alice}.\n\
          +binding_subject(\"kube-system\", \"rb-bob\", /user, \"bob@example.com\").\n\
          +binding_roleref(\"kube-system\", \"rb-bob\", \"Role\", \"bob-oncall\").\n\
@@ -513,15 +506,15 @@ fn before_bob_setup() -> String {
     )
 }
 
-/// `\use <name>` points `?-` at the frozen facts: alice's grant is visible
-/// there, but gone once `\use` returns to the live state.
+/// `use <name>` points `?-` at the frozen facts: alice's grant is visible
+/// there, but gone once `use` returns to the live state.
 #[test]
 fn use_snapshot_queries_frozen_facts() {
     for backend in ["interpreter", "dd"] {
         let commands = format!(
-            "{}\\use before\n\
+            "{}use before\n\
              ?- direct_perm(\"alice@example.com\", K, Ns, G, R, Rn, V)\n\
-             \\use\n\
+             use\n\
              ?- direct_perm(\"alice@example.com\", K, Ns, G, R, Rn, V)\n\
              ::quit\n",
             before_bob_setup()
@@ -532,13 +525,13 @@ fn use_snapshot_queries_frozen_facts() {
     }
 }
 
-/// `\use <name> <command>` runs one command against the snapshot, then
+/// `use <name> <command>` runs one command against the snapshot, then
 /// returns to the state that was in use before — here, the live state.
 #[test]
 fn use_one_shot_returns_to_live() {
     for backend in ["interpreter", "dd"] {
         let commands = format!(
-            "{}\\use before ?- direct_perm(\"bob@example.com\", K, Ns, G, R, Rn, V)\n\
+            "{}use before ?- direct_perm(\"bob@example.com\", K, Ns, G, R, Rn, V)\n\
              ?- direct_perm(\"bob@example.com\", K, Ns, G, R, Rn, V)\n\
              ::quit\n",
             before_bob_setup()
@@ -555,7 +548,7 @@ fn use_one_shot_returns_to_live() {
 fn use_one_shot_returns_after_failed_command() {
     for backend in ["interpreter", "dd"] {
         let commands = format!(
-            "{}\\use before ?- nosuch(X)\n+bar(1).\n::quit\n",
+            "{}use before ?- nosuch(X)\n+bar(1).\n::quit\n",
             before_bob_setup()
         );
         let (_, stderr) = run_session_with(&["--backend", backend], &commands);
@@ -563,13 +556,13 @@ fn use_one_shot_returns_after_failed_command() {
     }
 }
 
-/// `\use` of an unknown name is refused and changes nothing: a following
+/// `use` of an unknown name is refused and changes nothing: a following
 /// `+` still runs against the live state.
 #[test]
 fn use_unknown_snapshot_is_refused() {
     for backend in ["interpreter", "dd"] {
         let (_, stderr) =
-            run_session_with(&["--backend", backend], "\\use nosuch\n+bar(1).\n::quit\n");
+            run_session_with(&["--backend", backend], "use nosuch\n+bar(1).\n::quit\n");
         assert!(
             stderr.contains("No snapshot named 'nosuch'."),
             "{backend}: {stderr}"
@@ -584,32 +577,32 @@ fn use_unknown_snapshot_is_refused() {
 fn use_refuses_state_changes() {
     for backend in ["interpreter", "dd"] {
         let commands = format!(
-            "{}\\use before\n\
+            "{}use before\n\
              +bar(1).\n\
-             \\define baz(X) :- bar(X).\n\
-             \\snapshot again\n\
-             \\rollback before\n\
-             \\match Pod kube-system foo=bar\n\
-             \\match_all kube-system foo=bar\n\
+             define baz(X) :- bar(X).\n\
+             snapshot again\n\
+             rollback before\n\
+             k8s::match Pod kube-system foo=bar\n\
+             k8s::match-all kube-system foo=bar\n\
              ::quit\n",
             before_bob_setup()
         );
         let (_, stderr) = run_session_with(&["--backend", backend], &commands);
         let refusals = stderr
-            .matches("Snapshot 'before' is in use; \\use to return to the live state.")
+            .matches("Snapshot 'before' is in use; use to return to the live state.")
             .count();
         assert_eq!(refusals, 6, "{backend}: {stderr}");
     }
 }
 
-/// A `?-` query with named variables under `\use` prints the same
+/// A `?-` query with named variables under `use` prints the same
 /// `Found <n> result(s).` trailing line as a `(→ _N)` query on the live
 /// state, minus the `_N` reference: no query-result relation is kept.
 #[test]
 fn use_query_keeps_no_results() {
     for backend in ["interpreter", "dd"] {
         let commands = format!(
-            "{}\\use before\n\
+            "{}use before\n\
              ?- direct_perm(\"alice@example.com\", K, Ns, G, R, Rn, V)\n\
              ?- direct_perm(\"alice@example.com\", K, Ns, G, R, Rn, V)\n\
              ::quit\n",
@@ -627,14 +620,14 @@ fn use_query_keeps_no_results() {
     }
 }
 
-/// A relation `\define`d after the snapshot was taken did not exist at
-/// snapshot time, so querying it under `\use` is unknown, not empty.
+/// A relation `define`d after the snapshot was taken did not exist at
+/// snapshot time, so querying it under `use` is unknown, not empty.
 #[test]
 fn use_query_ignores_relations_added_after_snapshot() {
     for backend in ["interpreter", "dd"] {
         let commands = format!(
-            "{}\\define spk(X) :- bar(X).\n\
-             \\use before ?- spk(X)\n\
+            "{}define spk(X) :- bar(X).\n\
+             use before ?- spk(X)\n\
              ::quit\n",
             before_bob_setup()
         );
@@ -646,14 +639,14 @@ fn use_query_ignores_relations_added_after_snapshot() {
     }
 }
 
-/// `\access-diff <name>` under `\use <other>` diffs the frozen `<name>`
+/// `rbac::diff <name>` under `use <other>` diffs the frozen `<name>`
 /// against the frozen `<other>`, and names it in the header.
 #[test]
 fn access_diff_under_use_names_state() {
     for backend in ["interpreter", "dd"] {
         let commands = format!(
-            "{}\\snapshot after\n\
-             \\use after \\access-diff before\n\
+            "{}snapshot after\n\
+             use after rbac::diff before\n\
              ::quit\n",
             before_bob_setup()
         );
@@ -678,17 +671,17 @@ fn access_diff_under_use_names_state() {
 }
 
 /// A snapshot keeps the proof of a fact as it stood when it was taken:
-/// after the binding that gave alice `pods/exec` is retracted, `\why` under
-/// `\use before` still explains her escalation, on both backends.
+/// after the binding that gave alice `pods/exec` is retracted, `why` under
+/// `use before` still explains her escalation, on both backends.
 #[test]
 fn why_on_snapshot_survives_retraction() {
-    let why = r#"\why controls_identity("alice", "system:serviceaccount:kube-system:default")"#;
+    let why = r#"why controls_identity("alice", "system:serviceaccount:kube-system:default")"#;
     let commands = format!(
-        "\\source examples/exec-escalation/alice-exec.mg\n\
+        "source examples/exec-escalation/alice-exec.mg\n\
          {why}\n\
-         \\snapshot before\n\
+         snapshot before\n\
          -binding_subject(\"kube-system\", \"rb-alice-exec\", /user, \"alice\").\n\
-         \\use before {why}\n\
+         use before {why}\n\
          ::quit\n"
     );
     for args in [
@@ -715,7 +708,7 @@ fn why_on_snapshot_survives_retraction() {
 }
 
 // -----------------------------------------------------------------------
-// `\load-k8s` replacing objects already loaded
+// `k8s::load` replacing objects already loaded
 // -----------------------------------------------------------------------
 
 /// A ClusterRole `demo` granting `get` on `resources` (comma-separated),
@@ -778,7 +771,7 @@ fn load_k8s_replaces_object_across_backends() {
     let v1 = write_demo_role("secrets");
     let v2 = write_demo_role("configmaps");
     let commands = format!(
-        "\\load-k8s {}\n\\load-k8s {}\n?- clusterrole_rule(\"demo\", R)\n::quit\n",
+        "k8s::load {}\nk8s::load {}\n?- clusterrole_rule(\"demo\", R)\n::quit\n",
         v1.display(),
         v2.display()
     );
@@ -799,17 +792,17 @@ fn load_k8s_replaces_object_across_backends() {
     }
 }
 
-/// An object loaded at startup, then replaced by `\load-k8s` with a
-/// narrower version: `\access-diff` reports the permission it lost and
+/// An object loaded at startup, then replaced by `k8s::load` with a
+/// narrower version: `rbac::diff` reports the permission it lost and
 /// none gained.
 #[test]
 fn load_k8s_over_startup_object_contracts_access() {
     let startup = write_demo_role("secrets,configmaps");
     let narrower = write_demo_role("configmaps");
     let commands = format!(
-        "\\snapshot before\n\
-         \\load-k8s {}\n\
-         \\access-diff before\n\
+        "snapshot before\n\
+         k8s::load {}\n\
+         rbac::diff before\n\
          ?- clusterrole_rule(\"demo\", R)\n\
          ::quit\n",
         narrower.display()
@@ -848,7 +841,7 @@ fn load_k8s_over_startup_object_contracts_access() {
     }
 }
 
-/// `\rollback` after `\load-k8s` replaced a startup object brings back the
+/// `rollback` after `k8s::load` replaced a startup object brings back the
 /// startup version exactly: its `k8s` row and its labels, including one
 /// the new version dropped.
 #[test]
@@ -865,12 +858,12 @@ fn rollback_restores_startup_object_after_load_k8s() {
     let changed = write_manifest(&config_map("tier: api"));
     let labels = "?- object_label(\"v1\", \"ConfigMap\", \"default\", \"demo\", K, V)\n";
     let commands = format!(
-        "\\snapshot base\n\
-         \\load-k8s {}\n\
+        "snapshot base\n\
+         k8s::load {}\n\
          {labels}\
-         \\rollback base\n\
+         rollback base\n\
          {labels}\
-         \\diff base\n\
+         diff base\n\
          ::quit\n",
         changed.display()
     );

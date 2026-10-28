@@ -18,10 +18,10 @@
 # This scenario only adds the RoleBinding — the dangerous pods are already there.
 #
 # Demo flow:
-#   \snapshot baseline
-#   \source examples/exec-escalation/alice-exec.mg
-#   \access-diff baseline
-#   \smt cluster-admin
+#   snapshot baseline
+#   source examples/exec-escalation/alice-exec.mg
+#   rbac::diff baseline
+#   rbac::cluster-admin
 
 binding_subject("kube-system", "rb-alice-exec", /user, "alice").
 binding_roleref("kube-system", "rb-alice-exec", "Role", "alice-exec").

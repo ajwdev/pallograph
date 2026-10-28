@@ -23,7 +23,7 @@ pub struct EvalStore {
     pub provenance: Vec<ProvenanceEntry>,
 }
 
-/// True for relations a frozen state (`\snapshot`) or a `Diff` should not
+/// True for relations a frozen state (`snapshot`) or a `Diff` should not
 /// see: the interpreter's GroupBy scratch space (`$temp_grp_0`; the DD
 /// backend has none) and a `?-` query's result relation (`_0`, `_1`, ...).
 pub(crate) fn is_scratch_relation(name: &str) -> bool {
@@ -56,7 +56,7 @@ impl EvalStore {
     }
 
     /// Clone this eval state, leaving out scratch relations (see
-    /// `is_scratch_relation`). `\snapshot` freezes a copy this way: later
+    /// `is_scratch_relation`). `snapshot` freezes a copy this way: later
     /// mutations to the live engine state must not change it, and the copy
     /// must not include query results or interpreter temporaries.
     pub fn frozen_copy(&self) -> EvalStore {
@@ -756,8 +756,8 @@ pub struct ApplySummary {
 }
 
 /// A copy of what the engine evaluates: the facts loaded from the cluster
-/// or added since (EDB), and the rule sources, `\define` rules included.
-/// `\snapshot` saves one so `\rollback` can put it back. The rules behind
+/// or added since (EDB), and the rule sources, `define` rules included.
+/// `snapshot` saves one so `rollback` can put it back. The rules behind
 /// `?-` results (`_N`) are left out: those results belong to the REPL
 /// session, not to the state a snapshot saves. The duplicate index is left
 /// out too; [`Engine::restore_inputs`] rebuilds it.
@@ -1082,7 +1082,7 @@ impl Engine {
     }
 
     /// Copy the engine's current facts and rules, minus the rules behind
-    /// `?-` results (`_N`), for `\snapshot`.
+    /// `?-` results (`_N`), for `snapshot`.
     pub fn save_inputs(&self) -> EngineInputs {
         let rule_sources = self
             .rule_sources
@@ -1096,7 +1096,7 @@ impl Engine {
         }
     }
 
-    /// Replace the engine's facts and rules with `inputs`, for `\rollback`.
+    /// Replace the engine's facts and rules with `inputs`, for `rollback`.
     /// The live session, if any, is rebuilt once from them.
     pub fn restore_inputs(&mut self, inputs: &EngineInputs) -> Result<()> {
         self.edb = inputs.edb.clone();
@@ -1300,7 +1300,7 @@ impl Engine {
     }
 
     /// Evaluate `rule` as the only rule source, against a frozen state's rows
-    /// for `relations` as the only input facts (EDB). Used by `\use <name>` so
+    /// for `relations` as the only input facts (EDB). Used by `use <name>` so
     /// a `?-` query under a snapshot runs just the query rule over the frozen
     /// facts: the live engine's rule set is not re-run, and this never
     /// touches the live engine (no session, no `self.edb`, no `self.rule_sources`).

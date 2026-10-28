@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Drives the built binary with `--script` over the small fixture to check
-//! the exit status contract: 0 when clean, 1 on findings (`::access-diff`
+//! the exit status contract: 0 when clean, 1 on findings (`rbac::diff`
 //! finding new permissions), 2 when a line is not a command or its command
 //! fails, with the script stopping at that line.
 
@@ -159,8 +159,8 @@ fn clean_script_exits_0() {
     let out = ws.run_script(
         "# no changes since the snapshot\n\
          \n\
-         \\snapshot base\n\
-         \\access-diff base\n",
+         snapshot base\n\
+         rbac::diff base\n",
     );
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert!(
@@ -174,7 +174,7 @@ fn clean_script_exits_0() {
 fn access_diff_expansion_exits_1() {
     let ws = Workspace::new();
     let out = ws.run_script(&format!(
-        "::snapshot base\n::load-k8s {}\n::access-diff base\n",
+        "::snapshot base\nk8s::load {}\nrbac::diff base\n",
         ws.rendered()
     ));
     assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
@@ -189,7 +189,7 @@ fn access_diff_contraction_only_exits_0() {
     // grant) back to `base` (without), so permissions are only removed.
     let ws = Workspace::new();
     let out = ws.run_script(&format!(
-        "::snapshot base\n::load-k8s {}\n::snapshot head\n::access-diff head base\n",
+        "::snapshot base\nk8s::load {}\n::snapshot head\nrbac::diff head base\n",
         ws.rendered()
     ));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -201,7 +201,7 @@ fn unknown_line_exits_2_and_stops() {
     let ws = Workspace::new();
     let out = ws.run_script("bogus line\n::snapshot base\n");
     assert_eq!(out.status.code(), Some(2));
-    assert!(stderr(&out).contains("Not a command"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("Unknown command"), "{}", stderr(&out));
     assert!(
         !stdout(&out).contains("Saved snapshot"),
         "ran past the failed line: {}",
@@ -212,7 +212,7 @@ fn unknown_line_exits_2_and_stops() {
 #[test]
 fn rollback_to_unknown_snapshot_exits_2() {
     let ws = Workspace::new();
-    let out = ws.run_script("\\rollback nosuch\n\\snapshot base\n");
+    let out = ws.run_script("rollback nosuch\nsnapshot base\n");
     assert_eq!(out.status.code(), Some(2));
     assert!(
         stderr(&out).contains("No snapshot named 'nosuch'."),
@@ -231,7 +231,7 @@ fn load_of_nonexistent_path_exits_2() {
     let ws = Workspace::new();
     let missing = ws.dir.join("nonexistent.yaml");
     let out = ws.run_script(&format!(
-        "::snapshot base\n::load-k8s {}\n::access-diff base\n",
+        "::snapshot base\nk8s::load {}\nrbac::diff base\n",
         missing.display()
     ));
     assert_eq!(out.status.code(), Some(2));
@@ -248,7 +248,7 @@ fn error_after_findings_exits_2() {
     // A finding followed by a broken line is still a broken run.
     let ws = Workspace::new();
     let out = ws.run_script(&format!(
-        "::snapshot base\n::load-k8s {}\n::access-diff base\n::access-diff nope\n",
+        "::snapshot base\nk8s::load {}\nrbac::diff base\nrbac::diff nope\n",
         ws.rendered()
     ));
     assert_eq!(out.status.code(), Some(2));
@@ -258,7 +258,7 @@ fn error_after_findings_exits_2() {
 #[test]
 fn smt_usage_error_exits_2() {
     let ws = Workspace::new();
-    let out = ws.run_script("::smt check_access\n");
+    let out = ws.run_script("rbac::access\n");
     assert_eq!(out.status.code(), Some(2));
 }
 
@@ -266,7 +266,7 @@ fn smt_usage_error_exits_2() {
 fn script_from_stdin() {
     let ws = Workspace::new();
     let script = format!(
-        "::snapshot base\n::load-k8s {}\n::access-diff base\n",
+        "::snapshot base\nk8s::load {}\nrbac::diff base\n",
         ws.rendered()
     );
     let out = ws.run(&["--script".as_ref(), "-".as_ref()], &script);
@@ -298,7 +298,7 @@ fn startup_path_matching_no_files_exits_2() {
     );
     std::fs::write(ws.dir.join("pallograph.toml"), config).expect("write config");
     for args in [&["--script".as_ref(), "-".as_ref()][..], &[]] {
-        let out = ws.run(args, "\\snapshot base\n");
+        let out = ws.run(args, "snapshot base\n");
         assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
         assert!(
             stderr(&out).contains("no .json, .yaml or .yml files match"),
@@ -323,7 +323,7 @@ fn apply_delta_add_then_access_diff_expands_exits_1() {
     // access-diff against the pre-delta snapshot finds the new permission.
     let ws = Workspace::new();
     let out = ws.run_script(&format!(
-        "::snapshot base\n::apply-delta - {}\n::access-diff base\n",
+        "::snapshot base\n::apply-delta - {}\nrbac::diff base\n",
         ws.rendered()
     ));
     assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
@@ -344,10 +344,10 @@ fn apply_delta_retracts_base_only_object_exits_0() {
     // the access-diff against the pre-delta snapshot only loses permissions.
     let ws = Workspace::new();
     let out = ws.run_script(&format!(
-        "::load-k8s {rendered}\n\
+        "k8s::load {rendered}\n\
          ::snapshot base\n\
          ::apply-delta {rendered} -\n\
-         ::access-diff base\n",
+         rbac::diff base\n",
         rendered = ws.rendered()
     ));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -365,7 +365,7 @@ fn apply_delta_wrong_arity_exits_2() {
     let out = ws.run_script("::snapshot base\n::apply-delta onlyone\n");
     assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
     assert!(
-        stderr(&out).contains("Usage: \\apply-delta"),
+        stderr(&out).contains("Usage: apply-delta"),
         "{}",
         stderr(&out)
     );
@@ -386,7 +386,7 @@ fn apply_delta_missing_side_exits_2() {
 
 #[test]
 fn diff_relation_shows_added_row() {
-    // \diff-relation is a diagnostic diff, not a gate: it shows the row the
+    // diff-relation is a diagnostic diff, not a gate: it shows the row the
     // delta added to user_is_cluster_admin and exits 0 either way.
     let ws = Workspace::new();
     let admin = ws.manifests("admin", ADMIN_GRANT);

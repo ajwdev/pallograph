@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Access diff between two sets of RBAC grants (`\access-diff`), computed in
+//! Access diff between two sets of RBAC grants (`rbac::diff`), computed in
 //! Rust over `PermissionTables`. No Z3 involved.
 
 use std::collections::HashMap;
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn rbac_tables_read_the_small_fixture() {
-        // The permission tables behind \access-diff are built from relations
+        // The permission tables behind rbac::diff are built from relations
         // scanned by name; an empty result means a rename or
         // reshape went unnoticed.
         let engine = load_engine();
