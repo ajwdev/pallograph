@@ -205,3 +205,146 @@ fn user_impersonation_does_not_carry_user_groups() {
         );
     }
 }
+
+/// A RoleBinding in `namespace` of the ClusterRole `role` to one
+/// ServiceAccount of that namespace.
+fn role_binding_to_sa(namespace: &str, name: &str, role: &str, service_account: &str) -> String {
+    format!(
+        r#"{{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{{"name":"{name}","namespace":"{namespace}"}},"roleRef":{{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"{role}"}},"subjects":[{{"kind":"ServiceAccount","name":"{service_account}","namespace":"{namespace}"}}]}}"#
+    )
+}
+
+fn service_account(namespace: &str, name: &str) -> String {
+    format!(
+        r#"{{"apiVersion":"v1","kind":"ServiceAccount","metadata":{{"name":"{name}","namespace":"{namespace}"}}}}"#
+    )
+}
+
+const DEPLOYER: &str = "system:serviceaccount:team-a:deployer";
+
+/// team-a:deployer, the ClusterRole impersonator (impersonate users and
+/// groups), and the group platform-admins holding cluster-admin. The
+/// caller binds impersonator.
+fn user_and_group_impersonation() -> Vec<String> {
+    vec![
+        cluster_role(
+            "cluster-admin",
+            r#"[{"apiGroups":["*"],"resources":["*"],"verbs":["*"]}]"#,
+        ),
+        cluster_role_binding(
+            "platform-admins",
+            "cluster-admin",
+            "Group",
+            "platform-admins",
+        ),
+        cluster_role(
+            "impersonator",
+            r#"[{"apiGroups":[""],"resources":["users","groups"],"verbs":["impersonate"]}]"#,
+        ),
+        service_account("team-a", "deployer"),
+        cluster_role(
+            "node-reader",
+            r#"[{"apiGroups":[""],"resources":["nodes"],"verbs":["get"]}]"#,
+        ),
+        cluster_role_binding("bob", "node-reader", "User", "bob"),
+    ]
+}
+
+// Kubernetes checks impersonating a user or group as a cluster-scoped
+// request, which a RoleBinding never matches. So deployer, granted
+// impersonate on users and groups only in team-a, can impersonate neither
+// platform-admins nor bob.
+#[test]
+fn namespaced_user_and_group_impersonation_grants_nothing() {
+    let mut manifests = user_and_group_impersonation();
+    manifests.push(role_binding_to_sa(
+        "team-a",
+        "deployer-impersonate",
+        "impersonator",
+        "deployer",
+    ));
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert!(
+            !has_row(&result, "controls_group", &[DEPLOYER, "platform-admins"]),
+            "{backend}: a RoleBinding does not allow impersonating groups, got {:?}",
+            result.scan("controls_group")
+        );
+        assert!(
+            !has_row(&result, "controls_identity", &[DEPLOYER, "bob"]),
+            "{backend}: a RoleBinding does not allow impersonating users, got {:?}",
+            result.scan("controls_identity")
+        );
+    }
+}
+
+// The same grant through a ClusterRoleBinding is cluster-scoped, so
+// deployer can impersonate platform-admins and bob.
+#[test]
+fn cluster_wide_user_and_group_impersonation_escalates() {
+    let mut manifests = user_and_group_impersonation();
+    manifests.push(r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"deployer-impersonate"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"impersonator"},"subjects":[{"kind":"ServiceAccount","name":"deployer","namespace":"team-a"}]}"#.into());
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert!(
+            has_row(&result, "controls_group", &[DEPLOYER, "platform-admins"]),
+            "{backend}: deployer controls platform-admins"
+        );
+        assert!(
+            has_row(&result, "controls_identity", &[DEPLOYER, "bob"]),
+            "{backend}: deployer controls bob"
+        );
+    }
+}
+
+// Impersonating a ServiceAccount is checked in the ServiceAccount's
+// namespace, so impersonate on serviceaccounts in team-a reaches
+// team-a:admin but not team-b:admin, though both hold cluster-admin.
+// Checked one hop at a time (escalation_hop): through team-a:admin,
+// deployer reaches everything.
+#[test]
+fn namespaced_service_account_impersonation_stays_in_its_namespace() {
+    let manifests = [
+        cluster_role(
+            "cluster-admin",
+            r#"[{"apiGroups":["*"],"resources":["*"],"verbs":["*"]}]"#,
+        ),
+        cluster_role(
+            "sa-impersonator",
+            r#"[{"apiGroups":[""],"resources":["serviceaccounts"],"verbs":["impersonate"]}]"#,
+        ),
+        service_account("team-a", "deployer"),
+        service_account("team-a", "admin"),
+        service_account("team-b", "admin"),
+        role_binding_to_sa(
+            "team-a",
+            "deployer-impersonate",
+            "sa-impersonator",
+            "deployer",
+        ),
+        r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"admins"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"ServiceAccount","name":"admin","namespace":"team-a"},{"kind":"ServiceAccount","name":"admin","namespace":"team-b"}]}"#.into(),
+    ];
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert!(
+            has_row(
+                &result,
+                "escalation_hop",
+                &[DEPLOYER, "system:serviceaccount:team-a:admin"]
+            ),
+            "{backend}: deployer can impersonate team-a:admin"
+        );
+        assert!(
+            !has_row(
+                &result,
+                "escalation_hop",
+                &[DEPLOYER, "system:serviceaccount:team-b:admin"]
+            ),
+            "{backend}: deployer cannot impersonate team-b:admin, got {:?}",
+            result.scan("escalation_hop")
+        );
+    }
+}
