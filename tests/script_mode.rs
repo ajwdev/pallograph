@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Drives the built binary with `--script` over the small fixture to check
-//! the exit status contract: 0 when clean, 1 on findings (`::access-diff`
+//! the exit status contract: 0 when clean, 1 on findings (`rbac::diff`
 //! finding new permissions), 2 when a line is not a command or its command
 //! fails, with the script stopping at that line.
 
@@ -116,12 +116,36 @@ impl Workspace {
         self.run(&["--script".as_ref(), path.as_os_str()], "")
     }
 
+    /// Like [`run_script`], but with rc enabled: write `rc` to a file passed as
+    /// `--rcfile` (so it runs before the script) instead of `--no-rc`.
+    fn run_script_with_rcfile(&self, rc: &str, script: &str) -> Output {
+        let rc_path = self.dir.join("pallographrc");
+        std::fs::write(&rc_path, rc).expect("write rc");
+        let script_path = self.dir.join("script.pg");
+        std::fs::write(&script_path, script).expect("write script");
+        let child = Command::new(env!("CARGO_BIN_EXE_pallograph"))
+            .arg("-C")
+            .arg(self.dir.join("pallograph.toml"))
+            .args(["--profile", "dev"])
+            .arg("--rcfile")
+            .arg(&rc_path)
+            .arg("--script")
+            .arg(&script_path)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn pallograph");
+        child.wait_with_output().expect("wait")
+    }
+
     /// Run with extra arguments, feeding `stdin`.
     fn run(&self, args: &[&std::ffi::OsStr], stdin: &str) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_pallograph"))
             .arg("-C")
             .arg(self.dir.join("pallograph.toml"))
-            .args(["--profile", "dev"])
+            .args(["--profile", "dev", "--no-rc"])
             .args(args)
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .stdin(Stdio::piped())
@@ -159,8 +183,8 @@ fn clean_script_exits_0() {
     let out = ws.run_script(
         "# no changes since the snapshot\n\
          \n\
-         \\snapshot base\n\
-         \\access-diff base\n",
+         snapshot base\n\
+         rbac::diff base\n",
     );
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert!(
@@ -174,7 +198,7 @@ fn clean_script_exits_0() {
 fn access_diff_expansion_exits_1() {
     let ws = Workspace::new();
     let out = ws.run_script(&format!(
-        "::snapshot base\n::load-k8s {}\n::access-diff base\n",
+        "::snapshot base\nk8s::load {}\nrbac::diff base\n",
         ws.rendered()
     ));
     assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
@@ -189,7 +213,7 @@ fn access_diff_contraction_only_exits_0() {
     // grant) back to `base` (without), so permissions are only removed.
     let ws = Workspace::new();
     let out = ws.run_script(&format!(
-        "::snapshot base\n::load-k8s {}\n::snapshot head\n::access-diff head base\n",
+        "::snapshot base\nk8s::load {}\n::snapshot head\nrbac::diff head base\n",
         ws.rendered()
     ));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -201,7 +225,7 @@ fn unknown_line_exits_2_and_stops() {
     let ws = Workspace::new();
     let out = ws.run_script("bogus line\n::snapshot base\n");
     assert_eq!(out.status.code(), Some(2));
-    assert!(stderr(&out).contains("Not a command"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("Unknown command"), "{}", stderr(&out));
     assert!(
         !stdout(&out).contains("Saved snapshot"),
         "ran past the failed line: {}",
@@ -212,7 +236,7 @@ fn unknown_line_exits_2_and_stops() {
 #[test]
 fn rollback_to_unknown_snapshot_exits_2() {
     let ws = Workspace::new();
-    let out = ws.run_script("\\rollback nosuch\n\\snapshot base\n");
+    let out = ws.run_script("rollback nosuch\nsnapshot base\n");
     assert_eq!(out.status.code(), Some(2));
     assert!(
         stderr(&out).contains("No snapshot named 'nosuch'."),
@@ -231,7 +255,7 @@ fn load_of_nonexistent_path_exits_2() {
     let ws = Workspace::new();
     let missing = ws.dir.join("nonexistent.yaml");
     let out = ws.run_script(&format!(
-        "::snapshot base\n::load-k8s {}\n::access-diff base\n",
+        "::snapshot base\nk8s::load {}\nrbac::diff base\n",
         missing.display()
     ));
     assert_eq!(out.status.code(), Some(2));
@@ -248,7 +272,7 @@ fn error_after_findings_exits_2() {
     // A finding followed by a broken line is still a broken run.
     let ws = Workspace::new();
     let out = ws.run_script(&format!(
-        "::snapshot base\n::load-k8s {}\n::access-diff base\n::access-diff nope\n",
+        "::snapshot base\nk8s::load {}\nrbac::diff base\nrbac::diff nope\n",
         ws.rendered()
     ));
     assert_eq!(out.status.code(), Some(2));
@@ -258,7 +282,7 @@ fn error_after_findings_exits_2() {
 #[test]
 fn smt_usage_error_exits_2() {
     let ws = Workspace::new();
-    let out = ws.run_script("::smt check_access\n");
+    let out = ws.run_script("rbac::access\n");
     assert_eq!(out.status.code(), Some(2));
 }
 
@@ -266,7 +290,7 @@ fn smt_usage_error_exits_2() {
 fn script_from_stdin() {
     let ws = Workspace::new();
     let script = format!(
-        "::snapshot base\n::load-k8s {}\n::access-diff base\n",
+        "::snapshot base\nk8s::load {}\nrbac::diff base\n",
         ws.rendered()
     );
     let out = ws.run(&["--script".as_ref(), "-".as_ref()], &script);
@@ -298,7 +322,7 @@ fn startup_path_matching_no_files_exits_2() {
     );
     std::fs::write(ws.dir.join("pallograph.toml"), config).expect("write config");
     for args in [&["--script".as_ref(), "-".as_ref()][..], &[]] {
-        let out = ws.run(args, "\\snapshot base\n");
+        let out = ws.run(args, "snapshot base\n");
         assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
         assert!(
             stderr(&out).contains("no .json, .yaml or .yml files match"),
@@ -319,11 +343,11 @@ fn piped_repl_stays_forgiving() {
 
 #[test]
 fn apply_delta_add_then_access_diff_expands_exits_1() {
-    // Empty base, head adds mallory's grant: apply-delta onto live, then the
+    // Empty base, head adds mallory's grant: k8s::apply-delta onto live, then the
     // access-diff against the pre-delta snapshot finds the new permission.
     let ws = Workspace::new();
     let out = ws.run_script(&format!(
-        "::snapshot base\n::apply-delta - {}\n::access-diff base\n",
+        "::snapshot base\nk8s::apply-delta - {}\nrbac::diff base\n",
         ws.rendered()
     ));
     assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
@@ -344,10 +368,10 @@ fn apply_delta_retracts_base_only_object_exits_0() {
     // the access-diff against the pre-delta snapshot only loses permissions.
     let ws = Workspace::new();
     let out = ws.run_script(&format!(
-        "::load-k8s {rendered}\n\
+        "k8s::load {rendered}\n\
          ::snapshot base\n\
-         ::apply-delta {rendered} -\n\
-         ::access-diff base\n",
+         k8s::apply-delta {rendered} -\n\
+         rbac::diff base\n",
         rendered = ws.rendered()
     ));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -362,10 +386,10 @@ fn apply_delta_retracts_base_only_object_exits_0() {
 #[test]
 fn apply_delta_wrong_arity_exits_2() {
     let ws = Workspace::new();
-    let out = ws.run_script("::snapshot base\n::apply-delta onlyone\n");
+    let out = ws.run_script("::snapshot base\nk8s::apply-delta onlyone\n");
     assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
     assert!(
-        stderr(&out).contains("Usage: \\apply-delta"),
+        stderr(&out).contains("Usage: k8s::apply-delta"),
         "{}",
         stderr(&out)
     );
@@ -376,7 +400,7 @@ fn apply_delta_missing_side_exits_2() {
     let ws = Workspace::new();
     let missing = ws.dir.join("nonexistent");
     let out = ws.run_script(&format!(
-        "::snapshot base\n::apply-delta {} {}\n",
+        "::snapshot base\nk8s::apply-delta {} {}\n",
         ws.rendered(),
         missing.display()
     ));
@@ -386,13 +410,13 @@ fn apply_delta_missing_side_exits_2() {
 
 #[test]
 fn diff_relation_shows_added_row() {
-    // \diff-relation is a diagnostic diff, not a gate: it shows the row the
+    // diff-relation is a diagnostic diff, not a gate: it shows the row the
     // delta added to user_is_cluster_admin and exits 0 either way.
     let ws = Workspace::new();
     let admin = ws.manifests("admin", ADMIN_GRANT);
     let out = ws.run_script(&format!(
         "::snapshot base\n\
-         ::apply-delta - {admin}\n\
+         k8s::apply-delta - {admin}\n\
          ::diff-relation base user_is_cluster_admin\n"
     ));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -409,7 +433,7 @@ fn diff_relation_no_change_reports_no_changes() {
     let admin = ws.manifests("admin", ADMIN_GRANT);
     let out = ws.run_script(&format!(
         "::snapshot base\n\
-         ::apply-delta - {admin}\n\
+         k8s::apply-delta - {admin}\n\
          ::diff-relation base sa_is_cluster_admin\n"
     ));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -443,7 +467,7 @@ fn diff_relation_shows_unexpected_cluster_admin() {
     let out = ws.run_script(&format!(
         "::source {CA_VIEW}\n\
          ::snapshot base\n\
-         ::apply-delta - {admin}\n\
+         k8s::apply-delta - {admin}\n\
          ::diff-relation base unexpected_cluster_admin\n"
     ));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -464,11 +488,101 @@ fn diff_relation_approved_admin_absent() {
         "+cluster_admin_allowed(\"eve@example.com\")\n\
          ::source {CA_VIEW}\n\
          ::snapshot base\n\
-         ::apply-delta - {admin}\n\
+         k8s::apply-delta - {admin}\n\
          ::diff-relation base unexpected_cluster_admin\n"
     ));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     let stdout = stdout(&out);
     assert!(stdout.contains("(no changes)"), "{stdout}");
     assert!(!stdout.contains("eve@example.com"), "{stdout}");
+}
+
+#[test]
+fn alias_expands_on_bare_command() {
+    // `alias` defines a shorthand; typing it runs the expansion (here the
+    // escalation-aware cluster-admin check), not an "unknown command".
+    let ws = Workspace::new();
+    let out = ws.run_script("alias ca rbac::cluster-admin\nca\n");
+    let combined = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(
+        !combined.contains("Unknown command"),
+        "alias did not expand: {combined}"
+    );
+    assert!(
+        combined.contains("can reach") || combined.contains("effective_can"),
+        "{combined}"
+    );
+}
+
+#[test]
+fn unalias_removes_the_alias() {
+    let ws = Workspace::new();
+    let out = ws.run_script("alias ca rbac::cluster-admin\nunalias ca\nca\n");
+    assert!(
+        stderr(&out).contains("Unknown command: ca"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn qualified_form_bypasses_an_alias() {
+    // Shadow a builtin with an alias, then confirm the `::`-qualified form still
+    // runs the real command rather than the alias.
+    let ws = Workspace::new();
+    let out = ws.run_script("alias show rbac::cluster-admin\n::show\n");
+    let combined = format!("{}{}", stdout(&out), stderr(&out));
+    // `::show` lists relations (the fixture has `pod`), not a reachability check.
+    assert!(
+        !combined.contains("can reach"),
+        "alias was not bypassed: {combined}"
+    );
+}
+
+#[test]
+fn rcfile_runs_before_the_script() {
+    // An alias defined in the rc file is available to the script that follows.
+    let ws = Workspace::new();
+    let out = ws.run_script_with_rcfile("alias ca rbac::cluster-admin\n", "ca\n");
+    let combined = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(
+        !combined.contains("Unknown command"),
+        "rc alias not applied: {combined}"
+    );
+    assert!(
+        combined.contains("can reach") || combined.contains("effective_can"),
+        "{combined}"
+    );
+}
+
+#[test]
+fn bare_command_missing_args_shows_usage() {
+    // A known command invoked with no arguments is not "unknown": show its usage.
+    let ws = Workspace::new();
+    let out = ws.run_script("diff\n");
+    let combined = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(combined.contains("Usage: diff"), "{combined}");
+    assert!(!combined.contains("Unknown command: diff"), "{combined}");
+}
+
+#[test]
+fn bare_k8s_subcommand_missing_args_shows_usage() {
+    let ws = Workspace::new();
+    let out = ws.run_script("k8s::match\n");
+    let combined = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(combined.contains("Usage: k8s::match"), "{combined}");
+}
+
+#[test]
+fn rcfile_error_warns_but_session_continues() {
+    // A broken rc line must warn and not abort: the clean script that follows
+    // still runs and the session exits 0.
+    let ws = Workspace::new();
+    let out = ws.run_script_with_rcfile("bogus-rc-command\n", "snapshot base\nrbac::diff base\n");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Unknown command: bogus-rc-command"),
+        "{}",
+        stderr(&out)
+    );
 }

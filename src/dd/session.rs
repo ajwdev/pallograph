@@ -118,7 +118,7 @@ pub enum Command {
         resp: Sender<Option<Grounding>>,
     },
     /// Lazy provenance: copy every live row and annotation (leaving out
-    /// `?-` query results) and the rules, so `\snapshot` can keep a frozen
+    /// `?-` query results) and the rules, so `snapshot` can keep a frozen
     /// copy that `why_height`/`why_step` answer from after the live session
     /// moves on. `annotated_relations` is left empty for the caller to fill.
     /// Responds with `Err` while any rule has live evaluation errors.

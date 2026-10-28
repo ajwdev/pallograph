@@ -43,48 +43,54 @@ identity, and the derivation behind one of those answers.
 ```
 ?- k8s_object_count
 ?- direct_perm(Who, Kind, "", "*", "*", /any, "*")
-\smt cluster-admin
+rbac::cluster-admin
 ?- controls_identity(P, Target)
-\why controls_identity("developer@example.com", "system:serviceaccount:kube-system:default")
+why controls_identity("developer@example.com", "system:serviceaccount:kube-system:default")
 ```
 
-Run `\help` in the REPL for the full command list. (The older `::cmd` form is
-still accepted as an alias for `\cmd`.)
+Run `help` in the REPL for the full command list. Commands are bare paths
+(e.g. `show`, `rbac::reaches`); a leading `::` is the fully-qualified form,
+used to disambiguate (e.g. `::rbac::diff` vs `::diff`). Queries start with `?-`.
+Tab completes command paths, relation names, and file arguments.
+
+Startup commands are read from `$XDG_CONFIG_HOME/pallograph/pallographrc` (then
+`./.pallographrc`); use `alias <name> <command...>` there for shorthands, e.g.
+`alias ca rbac::cluster-admin`. `--rcfile <file>` and `--no-rc` override.
 
 ## What it can do
 
 **Query the graph.** `?- <atom>, <atom>, ...` runs a Datalog query against
 facts loaded from the cluster (EDB) and everything the rules derive from them.
-`\show` lists the documented relations along with their columns.
+`show` lists the documented relations along with their columns.
 
-**Explain results.** `\why <fact>` prints the derivation tree (provenance), so
+**Explain results.** `why <fact>` prints the derivation tree (provenance), so
 you can see the chain of bindings and rules that produced a fact rather than
 just trust it.
 
-**Play what-if.** `+fact.` and `-fact.` add or retract facts, `\define` adds a
-rule, and `\source` loads a whole `.mg` file (its ground facts go in as
-facts, so `-` can retract them, and the rest as rules). Take a `\snapshot`
-first, then use `\diff` or `\access-diff` to see exactly which facts or RBAC
-permissions moved, and `\rollback <name>` to put the facts and rules back
+**Play what-if.** `+fact.` and `-fact.` add or retract facts, `define` adds a
+rule, and `source` loads a whole `.mg` file (its ground facts go in as
+facts, so `-` can retract them, and the rest as rules). Take a `snapshot`
+first, then use `diff` or `rbac::diff` to see exactly which facts or RBAC
+permissions moved, and `rollback <name>` to put the facts and rules back
 as they were when you took it (the snapshot stays, so you can return to it
-again; each snapshot holds its own copy of the facts). `\use <name>`
-points `?-`, `\why` and `\show` at that snapshot instead of the live state
+again; each snapshot holds its own copy of the facts). `use <name>`
+points `?-`, `why` and `show` at that snapshot instead of the live state
 (the prompt changes to `pallograph (<name>)>` and state-changing commands
-are refused until a bare `\use` returns to live); `\use <name> <command>`
+are refused until a bare `use` returns to live); `use <name> <command>`
 runs one command against the snapshot and returns automatically.
 
-**Check access and scheduling.** The RBAC `\smt` commands (`check_access`,
-`reaches`, `cluster-admin`) scan the grants the rules derive; the scheduling ones
-hand the question to Z3:
+**Check access and scheduling.** The RBAC `rbac::` commands (`access`,
+`reaches`, `cluster-admin`) scan the grants the rules derive; the scheduling
+`sched::` ones hand the question to Z3:
 
 | Command | Question |
 |---------|----------|
-| `\smt check_access <ns> <r> <v> [p...]` | Who has this access beyond the expected set? |
-| `\smt reaches <ns> <ag> <r> <v> [p...]` | Who can reach this access, counting escalation paths? |
-| `\smt cluster-admin [p...]` | Shorthand for reaching `*` on everything |
-| `\smt node_selector` | Which pods have a nodeSelector no node satisfies? |
-| `\smt anti_affinity` | Is there any valid placement, or proof that none exists? |
-| `\smt karpenter` | Where does Karpenter NodePool coverage leave gaps? |
+| `rbac::access <ns> <r> <v> [p...]` | Who has this access beyond the expected set? |
+| `rbac::reaches <ns> <ag> <r> <v> [p...]` | Who can reach this access, counting escalation paths? |
+| `rbac::cluster-admin [p...]` | Shorthand for reaching `*` on everything |
+| `sched::node-selector` | Which pods have a nodeSelector no node satisfies? |
+| `sched::anti-affinity` | Is there any valid placement, or proof that none exists? |
+| `sched::karpenter` | Where does Karpenter NodePool coverage leave gaps? |
 
 Built-in Kubernetes and EKS principals are hidden from SMT output by default
 (`--all` shows them). The list lives in `src/builtins.txt`.
@@ -93,15 +99,16 @@ Built-in Kubernetes and EKS principals are hidden from SMT output by default
 nicely into `jq` or DuckDB. `--script <file>` (`-` for stdin) runs one
 command per line without the REPL and stops at the first line that is not a
 command or whose command fails, so a typo'd path or command can't pass
-silently. It exits 0 when clean, 1 on findings (a failed `\smt` check, or
-`\access-diff` finding new permissions) and 2 on an error, so it can gate CI:
+silently. It exits 0 when clean, 1 on findings (a failed `rbac::`/`sched::`
+check, or `rbac::diff` finding new permissions) and 2 on an error, so it can
+gate CI:
 
 ```sh
 cat > check.pg <<'EOF'
 # The cluster is loaded at startup from the profile.
-\snapshot base
-\load-k8s rendered/head/
-\access-diff base
+snapshot base
+k8s::load rendered/head/
+rbac::diff base
 EOF
 pallograph --profile prod --script check.pg
 ```
@@ -125,8 +132,8 @@ escalation and the REPL commands that catch it:
   table, permissions borrowed through escalation, as a view.
 - [`cluster-admin-approved`](examples/cluster-admin-approved/): gate
   cluster-admins against a security-approved closure loaded as Mangle facts.
-- [`apply-delta`](examples/apply-delta/): review a PR end to end - snapshot the
-  live cluster, `\apply-delta` its base->head render, and inspect what changed.
+- [`k8s::apply-delta`](examples/apply-delta/): review a PR end to end - snapshot the
+  live cluster, `k8s::apply-delta` its base->head render, and inspect what changed.
 
 ## Configuration
 
@@ -147,7 +154,7 @@ Other flags worth knowing:
 
 - `--rules <dir>`: rule directory (default `rules/`).
 - `--backend interpreter|dd`: evaluation engine, see below.
-- `--provenance`: enable `\why` on the DD backend.
+- `--provenance`: enable `why` on the DD backend.
 - `--format default|compact|table|ndjson`: output format.
 - `--script <file>`: run commands from a file (`-` for stdin) instead of the
   REPL; see "Script it" above.
@@ -228,7 +235,7 @@ feature tag.
 The authorizer never runs ClusterRole aggregation: it reads each role's
 stored rules, which the aggregation controller writes. Pallograph and the
 oracle recompute aggregated roles from their selectors, so a what-if change
-(`\load` a role labelled `aggregate-to-admin`) reaches `admin`. The
+(`load` a role labelled `aggregate-to-admin`) reaches `admin`. The
 exception is a role on an aggregation cycle. There, what the controller
 leaves depends on the order it visits the roles and on what they held
 before, so both take the role's stored rules as they are, which is exact
@@ -308,7 +315,7 @@ Important groups in that target:
 - `small_smt_access/load_access_model`: build the finite RBAC access model from
   a pre-evaluated store.
 - `small_smt_access/load_permission_tables`: build the permission tables
-  `\access-diff` compares, for one snapshot. Named `assert_rbac_axioms_z3`
+  `rbac::diff` compares, for one snapshot. Named `assert_rbac_axioms_z3`
   before it stopped loading anything into Z3.
 - `small_smt_access/load_access_model_and_cluster_admin` and
   `small_smt_access/load_access_model_and_namespace_isolation`: include access

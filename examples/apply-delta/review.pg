@@ -1,9 +1,9 @@
 # Inspect what merging this PR would do to the live cluster.
-#   \apply-delta applies the base->head delta (add/update/retract/unchanged).
-#   \access-diff is the pass/fail check: any permission expansion exits 1.
-#   \diff-relation is a diagnostic view of one relation (never pass/fail).
-\source ../cluster-admin-approved/cluster-admin-approved.mg
-\snapshot base
-\apply-delta base/ head/
-\access-diff base
-\diff-relation base unexpected_cluster_admin
+#   k8s::apply-delta applies the base->head delta (add/update/retract/unchanged).
+#   rbac::diff is the pass/fail check: any permission expansion exits 1.
+#   diff-relation is a diagnostic view of one relation (never pass/fail).
+source ../cluster-admin-approved/cluster-admin-approved.mg
+snapshot base
+k8s::apply-delta base/ head/
+rbac::diff base
+diff-relation base unexpected_cluster_admin

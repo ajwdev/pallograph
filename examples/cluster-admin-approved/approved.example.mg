@@ -7,7 +7,7 @@
 #
 # Built-in platform principals (system:*, eks:*) are cluster-admin by the
 # platform and cannot be changed; list the specific ones your cluster has so
-# they do not flag. `\smt cluster-admin --all` prints the full roster to copy
+# they do not flag. `rbac::cluster-admin --all` prints the full roster to copy
 # from.
 #
 # Replace these with your cluster's approved set.

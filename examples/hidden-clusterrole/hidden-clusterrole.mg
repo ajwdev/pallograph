@@ -10,7 +10,7 @@
 # scope for review. Reviewers have no reason to audit it.
 #
 # pallograph evaluates the full current state of the cluster, not just the diff.
-# \access-diff surfaces the effective capability alice gains — including the token
+# rbac::diff surfaces the effective capability alice gains — including the token
 # creation permission that lives in ops-monitor's history, not today's change.
 #
 # Attack chain:
@@ -20,10 +20,10 @@
 #     --[cluster-admin CRB]----------------------------> all permissions
 #
 # Demo flow:
-#   \snapshot baseline
-#   \source examples/hidden-clusterrole/hidden-clusterrole.mg
-#   \access-diff baseline
-#   \smt cluster-admin
+#   snapshot baseline
+#   source examples/hidden-clusterrole/hidden-clusterrole.mg
+#   rbac::diff baseline
+#   rbac::cluster-admin
 
 # ops-monitor ClusterRole: pre-existing in the cluster, not part of today's PR.
 # Originally read-only; "serviceaccounts/token create" was added months ago.

@@ -25,11 +25,11 @@ baked into cluster state.
 
 pallograph evaluates the full current state of the cluster — not just the diff.
 
-`\access-diff` shows alice gaining `serviceaccounts/token create` in kube-system,
+`rbac::diff` shows alice gaining `serviceaccounts/token create` in kube-system,
 surfacing the effective capability of `ops-monitor` even though the ClusterRole
 definition isn't part of the PR.
 
-`\smt cluster-admin` confirms the escalation:
+`rbac::cluster-admin` confirms the escalation:
 
 ```
 alice
@@ -41,8 +41,8 @@ alice
 ## Demo
 
 ```
-\snapshot baseline
-\source examples/hidden-clusterrole/hidden-clusterrole.mg
-\access-diff baseline
-\smt cluster-admin
+snapshot baseline
+source examples/hidden-clusterrole/hidden-clusterrole.mg
+rbac::diff baseline
+rbac::cluster-admin
 ```

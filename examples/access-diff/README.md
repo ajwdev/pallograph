@@ -1,6 +1,6 @@
 # Access Diff: Expansion and Contraction
 
-Demonstrates `\access-diff` flagging RBAC expansion (bad) and contraction (good)
+Demonstrates `rbac::diff` flagging RBAC expansion (bad) and contraction (good)
 in a single diff: one principal is tightened while another is granted new
 access, and the escalation-aware analysis shows the new grant is far larger than
 it looks.
@@ -47,7 +47,7 @@ step can retract individual permissions with `-`.
 ### 2. Snapshot the current state
 
 ```
-\snapshot before
+snapshot before
 ```
 
 ### 3. Tighten alice (contraction) and add bob (expansion)
@@ -77,7 +77,7 @@ Add bob's on-call access:
 ### 4. Run the diff
 
 ```
-\access-diff before
+rbac::diff before
 ```
 
 ## Expected Output

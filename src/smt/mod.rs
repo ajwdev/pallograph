@@ -21,7 +21,7 @@ pub struct SmtEncoder<'ctx> {
     pub decls: HashMap<String, FuncDecl<'ctx>>,
     pub facts: HashMap<String, Vec<Vec<Value>>>,
     /// The RBAC tables loaded by `load_rbac_tables`, under the empty key.
-    /// `\access-diff` now compares `PermissionTables` directly (see
+    /// `rbac::diff` now compares `PermissionTables` directly (see
     /// `rbac::diff`), so this is only read by the `profile_smt_access` bin.
     pub permission_tables: HashMap<String, PermissionTables>,
 }

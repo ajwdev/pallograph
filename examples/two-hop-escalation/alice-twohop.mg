@@ -10,7 +10,7 @@
 #   create in kube-system for credential rotation.
 #
 # pallograph traces both hops via the controls_identity transitive closure.
-# Use \why on any controls_identity fact to see the shortest path explicitly.
+# Use why on any controls_identity fact to see the shortest path explicitly.
 #
 # Attack chain:
 #   alice
@@ -20,10 +20,10 @@
 #     --[cluster-admin CRB]-------------------> all permissions
 #
 # Demo flow:
-#   \snapshot baseline
-#   \source examples/two-hop-escalation/alice-twohop.mg
-#   \access-diff baseline
-#   \smt cluster-admin
+#   snapshot baseline
+#   source examples/two-hop-escalation/alice-twohop.mg
+#   rbac::diff baseline
+#   rbac::cluster-admin
 
 # Grant 1: alice gets pods/exec in the app namespace (today's PR)
 binding_subject("app", "rb-alice-app-exec", /user, "alice").

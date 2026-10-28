@@ -8,9 +8,11 @@ this file.
 Pallograph analyzes Kubernetes state (RBAC, pods, service accounts, nodes)
 with Datalog ([Mangle](https://github.com/google/mangle), via the `mangle-*`
 crates pinned in `Cargo.toml`) and the Z3 solver. It ships as a REPL
-(`src/repl.rs`) driven by `\` commands (`\why`, `\smt`, `\diff`, `\load`,
-`\define`, ...). The REPL rewrites `\cmd` to `::cmd` before dispatch, so the
-code matches on `::` and the older `::cmd` spelling still works.
+(`src/repl.rs`) driven by meta-commands written as bare `::`-separated paths
+(`why`, `rbac::reaches`, `diff`, `load`, `define`, ...). Analyses are grouped
+into subsystem namespaces (`rbac::`, `sched::`, `k8s::`); a leading `::` is the
+fully-qualified form, used to disambiguate (e.g. `::rbac::diff` vs `::diff`).
+Queries start with `?-`.
 
 Clarity beats cleverness.
 

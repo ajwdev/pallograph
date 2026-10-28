@@ -21,7 +21,7 @@
 //! rules and this module disagree, so it panics in tests and is reported on
 //! stderr otherwise, rather than being skipped silently. Outside tests such
 //! rows are not always a bug: a REPL user can add an old-shaped row with
-//! `+`, `\load` or `\define`.
+//! `+`, `load` or `define`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;

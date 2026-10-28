@@ -3,7 +3,7 @@
 #
 # Pallograph does not store this relation. It would copy a target's whole
 # grant set once per principal that controls it, which dominated the row
-# count on real clusters. This file rebuilds it as a view you can \source
+# count on real clusters. This file rebuilds it as a view you can source
 # into the REPL when you want the flat table.
 #
 # indirect_perm(Principal, Namespace, ApiGroup, Resource, Verb, Via): Principal
@@ -11,8 +11,8 @@
 # Via, a user or ServiceAccount it can become, or a group it can impersonate.
 #
 # Demo flow:
-#   \source examples/exec-escalation/alice-exec.mg
-#   \source examples/indirect-perm/indirect-perm.mg
+#   source examples/exec-escalation/alice-exec.mg
+#   source examples/indirect-perm/indirect-perm.mg
 #   ?- indirect_perm("alice", Ns, ApiGroup, Resource, Verb, Via)
 
 # Becoming an identity: its own grants plus the groups Kubernetes adds

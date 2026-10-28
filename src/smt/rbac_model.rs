@@ -9,7 +9,7 @@
 // counterparts). `PermissionTables` indexes them. Nothing is asserted into
 // the Z3 solver.
 //
-// `\access-diff` builds `PermissionTables` directly (see `rbac::diff`) and
+// `rbac::diff` builds `PermissionTables` directly (see `rbac::diff`) and
 // does not go through `SmtEncoder`.
 //
 // TODO(ajw): the RecFuncDecl builders for subject_grants, can and

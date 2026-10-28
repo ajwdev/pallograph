@@ -16,10 +16,10 @@
 # Token creation works as long as the SA exists — no pods needed. Quieter.
 #
 # Demo flow:
-#   \snapshot baseline
-#   \source examples/token-escalation/alice-sa-token.mg
-#   \access-diff baseline
-#   \smt cluster-admin
+#   snapshot baseline
+#   source examples/token-escalation/alice-sa-token.mg
+#   rbac::diff baseline
+#   rbac::cluster-admin
 
 binding_subject("kube-system", "rb-alice-token", /user, "alice").
 binding_roleref("kube-system", "rb-alice-token", "Role", "alice-token-creator").

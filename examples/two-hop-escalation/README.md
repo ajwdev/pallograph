@@ -33,16 +33,16 @@ by different teams at different times.
 
 ## What pallograph Shows
 
-`\access-diff` surfaces the new `pods/exec create` for alice in `app`.
+`rbac::diff` surfaces the new `pods/exec create` for alice in `app`.
 
-`\smt cluster-admin` traces the full two-hop chain. `\why` on any
+`rbac::cluster-admin` traces the full two-hop chain. `why` on any
 `controls_identity` fact shows the shortest path, making the chain explicit.
 
 ## Demo
 
 ```
-\snapshot baseline
-\source examples/two-hop-escalation/alice-twohop.mg
-\access-diff baseline
-\smt cluster-admin
+snapshot baseline
+source examples/two-hop-escalation/alice-twohop.mg
+rbac::diff baseline
+rbac::cluster-admin
 ```

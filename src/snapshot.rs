@@ -9,12 +9,12 @@ use mangle_common::Value;
 use crate::dd::session::FrozenLazyProvenance;
 use crate::engine::{EngineInputs, EvalStore, is_scratch_relation};
 
-/// A `\snapshot`'s saved state: a frozen copy of the eval store at the
-/// moment `\snapshot` ran, so later mutations to the live engine (`+`, `-`,
-/// `~`, `\rollback`) never change it, plus a copy of the engine's inputs
-/// (facts and rules) that `\rollback` restores.
+/// A `snapshot`'s saved state: a frozen copy of the eval store at the
+/// moment `snapshot` ran, so later mutations to the live engine (`+`, `-`,
+/// `~`, `rollback`) never change it, plus a copy of the engine's inputs
+/// (facts and rules) that `rollback` restores.
 ///
-/// `\why` under `\use` explains facts from the frozen state's own
+/// `why` under `use` explains facts from the frozen state's own
 /// provenance: `store.provenance` on the interpreter, or `lazy_provenance`
 /// on the DD backend. `lazy_provenance` is `None` when the snapshot was
 /// taken without a DD provenance session.
@@ -118,7 +118,7 @@ mod tests {
     }
 
     /// Build an `EvalStore` holding only the `can` relation's rows, mirroring
-    /// what a `\snapshot` scoped to one relation would freeze.
+    /// what a `snapshot` scoped to one relation would freeze.
     fn eval_with_can(can_facts: Vec<Vec<Value>>) -> EvalStore {
         let mut facts = HashMap::new();
         facts.insert("can".to_string(), can_facts);
