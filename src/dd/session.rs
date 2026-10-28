@@ -2087,6 +2087,33 @@ mod tests {
         assert_eq!(session.query("next").unwrap(), vec![vec![Value::Number(2)]]);
     }
 
+    /// `fn:time:now` is rejected at spawn: re-evaluating it on retraction
+    /// would give a new timestamp, so the retraction would not cancel.
+    /// Deterministic time functions still work.
+    #[test]
+    fn session_rejects_non_deterministic_let_function() {
+        let edb: Vec<(String, Vec<Value>)> = vec![("num".to_string(), vec![Value::Number(1)])];
+
+        let now_rules = vec![
+            "Decl num(X).\nDecl stamp(T).\nstamp(T) :- num(X) |> let T = fn:time:now()."
+                .to_string(),
+        ];
+        let err = DdSession::spawn(&edb, &now_rules)
+            .err()
+            .expect("fn:time:now should be rejected");
+        assert!(
+            format!("{err:#}").contains("non-deterministic function fn:time:now"),
+            "unexpected error: {err:#}"
+        );
+
+        let add_rules = vec![
+            "Decl num(X).\nDecl later(T).\n\
+             later(T) :- num(X) |> let T = fn:time:add(fn:time:from_unix_nanos(X), fn:duration:from_hours(1))."
+                .to_string(),
+        ];
+        DdSession::spawn(&edb, &add_rules).expect("fn:time:add should spawn");
+    }
+
     // -----------------------------------------------------------------------
     // Lazy provenance
     // -----------------------------------------------------------------------

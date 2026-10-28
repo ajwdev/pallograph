@@ -105,6 +105,11 @@ the `dd_matches_interpreter` test in `src/engine.rs` passing. Prefer adding a
 small feature-matrix case to `tests/dd_interp_parity.rs` when touching a
 specific Datalog feature.
 
+One deliberate difference: the DD backend rejects `fn:time:now` (see
+`NON_DETERMINISTIC_FUNCTIONS` in `src/dd/build.rs`). DD evaluates a `let`
+again on retraction, so a function that changes between calls would leave
+stale rows behind.
+
 Known upstream `mangle-rs` bugs, deliberately not patched here:
 
 - A typo'd `:builtin` atom silently becomes a join against an empty relation,

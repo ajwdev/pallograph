@@ -603,6 +603,12 @@ fn lower_inner(
                 Expr::Value(operand) => OwnedExpr::Value(resolve_operand(operand, ir, schema)?),
                 Expr::Call { function, args } => {
                     let func_name = ir.resolve_name(*function).to_string();
+                    if !crate::dd::build::is_deterministic_function(&func_name) {
+                        bail!(
+                            "DD backend does not support non-deterministic function \
+                             {func_name}: retractions would not cancel"
+                        );
+                    }
                     let slots: Result<Vec<_>> = args
                         .iter()
                         .map(|a| resolve_operand(a, ir, schema))
