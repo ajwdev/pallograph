@@ -1,0 +1,180 @@
+# Writing roles and bindings. The RBAC registry lets a principal write a
+# binding when it may bind the role (verb bind), and a role when it may
+# escalate (verb escalate), or in either case when it already holds every
+# rule granted; the authorizer must allow the plain create or update too.
+# TestRBACWriteDecisions in tools/rbac-oracle pins the decisions.
+
+# Roles to grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: pod-reader}
+rules:
+- {apiGroups: [""], resources: [pods], verbs: [get, list]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: secret-admin}
+rules:
+- {apiGroups: [""], resources: [secrets], verbs: ["*"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: configmap-editor, namespace: team-a}
+rules:
+- {apiGroups: [""], resources: [configmaps], verbs: [get, update]}
+---
+# An existing binding to add oneself to.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: auditors-secret-admin}
+subjects:
+- {kind: Group, name: auditors, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: secret-admin}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: auditors-configmap-editor, namespace: team-a}
+subjects:
+- {kind: Group, name: auditors, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: configmap-editor}
+---
+# bind on any ClusterRole: binds anything, including roles it lacks.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: binder}
+rules:
+- {apiGroups: [rbac.authorization.k8s.io], resources: [clusterrolebindings], verbs: [create, update]}
+- {apiGroups: [rbac.authorization.k8s.io], resources: [clusterroles], verbs: [bind]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: binder}
+subjects:
+- {kind: User, name: binder, apiGroup: rbac.authorization.k8s.io}
+- {kind: ServiceAccount, name: rbac-bot, namespace: team-a}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: binder}
+---
+# bind limited by resourceNames to pod-reader.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: named-binder}
+rules:
+- {apiGroups: [rbac.authorization.k8s.io], resources: [clusterrolebindings], verbs: [create]}
+- {apiGroups: [rbac.authorization.k8s.io], resources: [clusterroles], resourceNames: [pod-reader], verbs: [bind]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: named-binder}
+subjects:
+- {kind: User, name: named-binder, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: named-binder}
+---
+# Creating bindings without bind: only roles it already holds, here
+# pod-reader. That gains nothing, so Pallograph does not report it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: binding-creator}
+rules:
+- {apiGroups: [rbac.authorization.k8s.io], resources: [clusterrolebindings], verbs: [create]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: no-bind}
+subjects:
+- {kind: User, name: no-bind, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: binding-creator}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: no-bind-pod-reader}
+subjects:
+- {kind: User, name: no-bind, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: pod-reader}
+---
+# patch is enough to update a binding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: patcher}
+rules:
+- {apiGroups: [rbac.authorization.k8s.io], resources: [clusterrolebindings], verbs: [patch]}
+- {apiGroups: [rbac.authorization.k8s.io], resources: [clusterroles], verbs: [bind]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: patcher}
+subjects:
+- {kind: User, name: patcher, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: patcher}
+---
+# escalate and update on ClusterRoles: rewrites its own role into anything.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: escalator}
+rules:
+- {apiGroups: [rbac.authorization.k8s.io], resources: [clusterroles], verbs: [create, update, escalate]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: escalator}
+subjects:
+- {kind: User, name: escalator, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: escalator}
+---
+# update without escalate: the rewrite is refused.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: role-updater}
+rules:
+- {apiGroups: [rbac.authorization.k8s.io], resources: [clusterroles], verbs: [update]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: role-updater}
+subjects:
+- {kind: User, name: role-updater, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: role-updater}
+---
+# Every verb on every RBAC resource, granted to a group: bind and escalate
+# included.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: rbac-star}
+rules:
+- {apiGroups: [rbac.authorization.k8s.io], resources: ["*"], verbs: ["*"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: rbac-admins}
+subjects:
+- {kind: Group, name: rbac-admins, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: rbac-star}
+---
+# Binding in one namespace: RoleBindings in team-a only, and no
+# ClusterRoleBinding, which is a cluster-scoped request.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: ns-binder}
+rules:
+- {apiGroups: [rbac.authorization.k8s.io], resources: [rolebindings, clusterrolebindings], verbs: [create, update]}
+- {apiGroups: [rbac.authorization.k8s.io], resources: [clusterroles, roles], verbs: [bind]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ns-binder, namespace: team-a}
+subjects:
+- {kind: User, name: ns-binder, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: ns-binder}
+---
+# escalate on Roles in team-a, through a Role it can rewrite.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: role-escalator, namespace: team-a}
+rules:
+- {apiGroups: [rbac.authorization.k8s.io], resources: [roles], verbs: [create, update, escalate]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: role-escalator, namespace: team-a}
+subjects:
+- {kind: User, name: role-escalator, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: role-escalator}

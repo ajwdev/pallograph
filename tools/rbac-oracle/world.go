@@ -33,6 +33,11 @@ type World struct {
 	ClusterRoles        []*rbacv1.ClusterRole
 	ClusterRoleBindings []*rbacv1.ClusterRoleBinding
 
+	// ServiceAccounts are the world's ServiceAccount objects. The
+	// authorizer never reads them; they are the identities impersonation
+	// questions target (see impersonationTargets).
+	ServiceAccounts []*corev1.ServiceAccount
+
 	// AggregatedRoles names the ClusterRoles whose rules were filled in
 	// by aggregation, and AggregationCycleRoles those on an aggregation
 	// cycle, whose rules are kept as written (see aggregate). Used for
@@ -65,8 +70,8 @@ const (
 )
 
 // LoadWorld reads <dir>/rbac.yaml, a multi-document YAML file of RBAC
-// objects. Objects of any other kind are ignored, so a world can also carry
-// the Namespaces and ServiceAccounts a live cluster needs.
+// objects and ServiceAccounts. Objects of any other kind are ignored, so a
+// world can also carry the Namespaces a live cluster needs.
 func LoadWorld(dir string) (*World, error) {
 	return loadWorld(dir, kubernetesSemantics)
 }
@@ -212,6 +217,8 @@ func (w *World) add(object runtime.Object) error {
 			return fmt.Errorf("ClusterRoleBinding %s: %v", typed.Name, errs.ToAggregate())
 		}
 		w.ClusterRoleBindings = append(w.ClusterRoleBindings, typed)
+	case *corev1.ServiceAccount:
+		w.ServiceAccounts = append(w.ServiceAccounts, typed)
 	}
 	return nil
 }

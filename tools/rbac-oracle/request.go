@@ -8,15 +8,28 @@ import (
 	"os"
 	"strings"
 
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 )
 
-// Request is one authorization question, one line of requests.ndjson.
-// A non-empty Path makes it a non-resource request, and the resource
-// fields are then ignored.
+// Request is one question, one line of requests.ndjson. Kind says which:
+//
+//   - "" (accessKind): an authorization request, decided by the RBAC
+//     authorizer alone. A non-empty Path makes it a non-resource request,
+//     and the resource fields are then ignored.
+//   - "impersonate": may User impersonate the identity named by Resource
+//     (users, groups or serviceaccounts), Name and, for a ServiceAccount,
+//     Namespace? Decided by the API server's impersonation filter (see
+//     impersonation.go).
+//   - "write": may User create or update (Verb) the RBAC object of type
+//     Resource named Name in Namespace? A binding write carries the
+//     binding's RoleRef, a role write the role's Rules. Decided by the
+//     authorizer and the RBAC registry's escalation checks (see
+//     rbacwrite.go).
 type Request struct {
 	ID          int      `json:"id"`
+	Kind        string   `json:"kind,omitempty"`
 	User        string   `json:"user"`
 	Groups      []string `json:"groups"`
 	Namespace   string   `json:"namespace"`
@@ -26,7 +39,17 @@ type Request struct {
 	Name        string   `json:"name"`
 	Verb        string   `json:"verb"`
 	Path        string   `json:"path"`
+
+	RoleRef *rbacv1.RoleRef     `json:"roleRef,omitempty"`
+	Rules   []rbacv1.PolicyRule `json:"rules,omitempty"`
 }
+
+// The request kinds; see Request.
+const (
+	accessKind      = ""
+	impersonateKind = "impersonate"
+	writeKind       = "write"
+)
 
 // Decision is one line of oracle.ndjson.
 type Decision struct {

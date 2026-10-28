@@ -387,3 +387,120 @@ func TestAggregationCycleVisitOrder(t *testing.T) {
 		}
 	}
 }
+
+// impersonationRequest asks whether username may impersonate the identity
+// resource/name (namespace only for a ServiceAccount).
+func impersonationRequest(username, resource, namespace, name string, groups ...string) Request {
+	return Request{Kind: impersonateKind, User: username, Groups: authenticatedGroups(username, groups...),
+		Verb: "impersonate", Resource: resource, Namespace: namespace, Name: name}
+}
+
+func TestImpersonationDecisions(t *testing.T) {
+	user := func(username, target string) Request { return impersonationRequest(username, "users", "", target) }
+	group := func(username, target string) Request { return impersonationRequest(username, "groups", "", target) }
+	account := func(username, namespace, name string) Request {
+		return impersonationRequest(username, "serviceaccounts", namespace, name)
+	}
+	robot := serviceAccountUsername("team-a", "robot")
+	builder := serviceAccountUsername("team-b", "builder")
+	checkDecisions(t, "impersonation", []decisionCase{
+		{"cluster-wide user", user("cluster-impersonator", "alice"), true},
+		{"cluster-wide group", group("cluster-impersonator", "admins"), true},
+		{"cluster-wide serviceaccount", account("cluster-impersonator", "team-b", "builder"), true},
+		{"cluster-wide via a group", impersonationRequest("member-of-impersonators", "users", "", "alice", "impersonators"), true},
+		{"rolebinding allows no user", user("ns-impersonator", "alice"), false},
+		{"rolebinding allows no group", group("ns-impersonator", "admins"), false},
+		{"rolebinding allows its namespace's serviceaccount", account("ns-impersonator", "team-a", "deployer"), true},
+		{"rolebinding allows no other namespace's serviceaccount", account("ns-impersonator", "team-b", "builder"), false},
+		{"rolebinding serviceaccount subject", account(robot, "team-a", "deployer"), true},
+		{"rolebinding serviceaccount subject allows no user", user(robot, "alice"), false},
+		{"role allows no user", user("role-impersonator", "alice"), false},
+		{"role allows its namespace's serviceaccount", account("role-impersonator", "team-b", "builder"), true},
+		{"role via a serviceaccount group", account(builder, "team-b", "builder"), true},
+		{"serviceaccounts only", account("sa-impersonator", "team-a", "deployer"), true},
+		{"serviceaccounts only allows no user", user("sa-impersonator", "alice"), false},
+		{"resourceNames user", user("named-impersonator", "alice"), true},
+		{"resourceNames other user", user("named-impersonator", "cluster-impersonator"), false},
+		{"resourceNames group", group("named-impersonator", "admins"), true},
+		{"resourceNames other group", group("named-impersonator", "team-a-devs"), false},
+		{"resourceNames serviceaccount", account("named-impersonator", "team-b", "builder"), true},
+		{"resourceNames other serviceaccount", account("named-impersonator", "team-a", "deployer"), false},
+		{"wildcard verb", user("wildcard-verb", "alice"), true},
+		{"wildcard resource in a rolebinding allows no user", user("wildcard-resource", "alice"), false},
+		{"wildcard resource in a rolebinding", account("wildcard-resource", "team-a", "robot"), true},
+		{"wildcard group", group("wildcard-group", "team-a-devs"), true},
+		{"other API group", user("wrong-group", "alice"), false},
+		{"outsider", user(unboundUser, "alice"), false},
+	})
+}
+
+// writeRequest asks whether username may write a resource object.
+func writeRequest(username, verb, resource, namespace, name string, roleRef *rbacv1.RoleRef, rules []rbacv1.PolicyRule) Request {
+	return Request{Kind: writeKind, User: username, Groups: authenticatedGroups(username), Verb: verb,
+		APIGroup: rbacv1.GroupName, Resource: resource, Namespace: namespace, Name: name, RoleRef: roleRef, Rules: rules}
+}
+
+func TestRBACWriteDecisions(t *testing.T) {
+	world, err := LoadWorld("../../tests/rbac_compat/worlds/rbac-writes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oracle := NewOracle(world)
+	ref := func(kind, name string) *rbacv1.RoleRef {
+		return &rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kind, Name: name}
+	}
+	createCRB := func(username, role string) Request {
+		return writeRequest(username, "create", "clusterrolebindings", "", newBindingName, ref("ClusterRole", role), nil)
+	}
+	updateCRB := func(username, binding, role string) Request {
+		return writeRequest(username, "update", "clusterrolebindings", "", binding, ref("ClusterRole", role), nil)
+	}
+	createRB := func(username, namespace, kind, role string) Request {
+		return writeRequest(username, "create", "rolebindings", namespace, newBindingName, ref(kind, role), nil)
+	}
+	rewriteClusterRole := func(username, role string) Request {
+		return writeRequest(username, "update", "clusterroles", "", role, nil, everythingRules)
+	}
+	rewriteRole := func(username, namespace, role string) Request {
+		return writeRequest(username, "update", "roles", namespace, role, nil, everythingRules)
+	}
+	rbacAdmin := createCRB("member-of-rbac-admins", "secret-admin")
+	rbacAdmin.Groups = authenticatedGroups("member-of-rbac-admins", "rbac-admins")
+	tests := []struct {
+		name    string
+		request Request
+		tag     string // the write-* tag, which says how it was decided
+	}{
+		{"bind any role", createCRB("binder", "secret-admin"), "write-allowed-by-bind"},
+		{"bind any role as a serviceaccount", createCRB(serviceAccountUsername("team-a", "rbac-bot"), "secret-admin"), "write-allowed-by-bind"},
+		{"bind adds oneself to a binding", updateCRB("binder", "auditors-secret-admin", "secret-admin"), "write-allowed-by-bind"},
+		{"bind limited to pod-reader", createCRB("named-binder", "pod-reader"), "write-allowed-by-bind"},
+		{"bind limited to pod-reader, not secret-admin", createCRB("named-binder", "secret-admin"), "write-escalation-refused"},
+		{"no bind, a role it holds", createCRB("no-bind", "pod-reader"), "write-allowed-by-covering-rules"},
+		{"no bind, a role it lacks", createCRB("no-bind", "secret-admin"), "write-escalation-refused"},
+		{"no bind, no update", updateCRB("no-bind", "auditors-secret-admin", "secret-admin"), "write-missing-verb"},
+		{"patch updates a binding", updateCRB("patcher", "auditors-secret-admin", "secret-admin"), "write-allowed-by-bind"},
+		{"patch does not create", createCRB("patcher", "secret-admin"), "write-missing-verb"},
+		{"escalate rewrites its role", rewriteClusterRole("escalator", "escalator"), "write-allowed-by-escalate"},
+		{"update without escalate", rewriteClusterRole("role-updater", "role-updater"), "write-escalation-refused"},
+		{"rbac star via a group binds", rbacAdmin, "write-allowed-by-bind"},
+		{"rolebinding allows rolebindings", createRB("ns-binder", "team-a", "ClusterRole", "secret-admin"), "write-allowed-by-bind"},
+		{"rolebinding allows a Role", createRB("ns-binder", "team-a", "Role", "configmap-editor"), "write-allowed-by-bind"},
+		{"rolebinding allows no other namespace", createRB("ns-binder", "team-b", "ClusterRole", "secret-admin"), "write-missing-verb"},
+		{"rolebinding allows no clusterrolebinding", createCRB("ns-binder", "secret-admin"), "write-missing-verb"},
+		{"escalate rewrites a Role", rewriteRole("role-escalator", "team-a", "role-escalator"), "write-allowed-by-escalate"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decision, err := oracle.Decide(&test.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			allowed := strings.HasPrefix(test.tag, "write-allowed-by-")
+			if decision.Allowed != allowed || !slices.Contains(decision.Tags, test.tag) {
+				t.Errorf("allowed = %v with tags %v, want %v with %s (reason %q)",
+					decision.Allowed, decision.Tags, allowed, test.tag, decision.Reason)
+			}
+		})
+	}
+}

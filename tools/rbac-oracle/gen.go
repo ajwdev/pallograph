@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -41,13 +42,25 @@ type probe struct {
 // ClusterRoleBinding) and in an unrelated one, crossed with the probes of
 // its role's rules (see ruleProbes), both as written and as aggregation
 // leaves them, so rules aggregation discards are still probed. Outsiders no
-// binding names get every probe, as negatives. Duplicates are dropped and
-// the order is deterministic. If limit is positive and smaller than the
-// result, a seeded sample of limit requests is kept instead.
-func GenerateRequests(world *World, limit int, seed uint64) []Request {
+// binding names get every probe, as negatives. Then the impersonation and
+// RBAC write questions (GenerateImpersonationRequests,
+// GenerateWriteRequests). Duplicates are dropped and the order is
+// deterministic. If limit is positive and smaller than the result, a
+// seeded sample of limit requests is kept instead.
+func GenerateRequests(world *World, limit int, seed uint64) ([]Request, error) {
 	vocabulary := worldVocabulary(world)
 	var requests []Request
 	seen := sets.New[string]()
+	addRequest := func(request Request) {
+		key, err := json.Marshal(request)
+		if err != nil {
+			panic(err)
+		}
+		if !seen.Has(string(key)) {
+			seen.Insert(string(key))
+			requests = append(requests, request)
+		}
+	}
 	add := func(principal principal, namespace string, probe probe) {
 		if probe.path != "" {
 			// Non-resource requests are never namespaced.
@@ -64,11 +77,7 @@ func GenerateRequests(world *World, limit int, seed uint64) []Request {
 			Verb:        probe.verb,
 			Path:        probe.path,
 		}
-		key := fmt.Sprintf("%#v", request)
-		if !seen.Has(key) {
-			seen.Insert(key)
-			requests = append(requests, request)
-		}
+		addRequest(request)
 	}
 	probesOf := func(rules ...[]rbacv1.PolicyRule) []probe {
 		var probes []probe
@@ -140,6 +149,17 @@ func GenerateRequests(world *World, limit int, seed uint64) []Request {
 		}
 	}
 
+	for _, request := range GenerateImpersonationRequests(world) {
+		addRequest(request)
+	}
+	writes, err := GenerateWriteRequests(world)
+	if err != nil {
+		return nil, err
+	}
+	for _, request := range writes {
+		addRequest(request)
+	}
+
 	if limit > 0 && len(requests) > limit {
 		random := rand.New(rand.NewPCG(seed, 0))
 		random.Shuffle(len(requests), func(i, j int) {
@@ -150,7 +170,7 @@ func GenerateRequests(world *World, limit int, seed uint64) []Request {
 	for i := range requests {
 		requests[i].ID = i
 	}
-	return requests
+	return requests, nil
 }
 
 // subjectPrincipals returns principals a binding's subjects match, plus

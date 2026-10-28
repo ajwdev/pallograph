@@ -185,8 +185,11 @@ func verifyWorld(ctx context.Context, client kubernetes.Interface, dir string, s
 
 // decidedBeforeRBAC reports requests another authorizer in kind's chain
 // (Node, then RBAC) or the system:masters short circuit answers first.
+// Impersonation and write questions are not authorization requests, and a
+// SubjectAccessReview cannot ask them, so they are skipped too.
 func decidedBeforeRBAC(request Request) bool {
-	return strings.HasPrefix(request.User, "system:node:") ||
+	return request.Kind != accessKind ||
+		strings.HasPrefix(request.User, "system:node:") ||
 		slices.Contains(request.Groups, "system:masters") ||
 		slices.Contains(request.Groups, "system:nodes")
 }

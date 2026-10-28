@@ -13,21 +13,61 @@ import (
 	rbacauthorizer "k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac"
 )
 
-// Oracle answers requests with the kube-apiserver RBAC authorizer.
+// Oracle answers requests with the kube-apiserver RBAC authorizer and,
+// for impersonation and RBAC write questions, the API server code that
+// consults it.
 type Oracle struct {
-	world           *World
-	authorizer      *rbacauthorizer.RBACAuthorizer
-	resolver        *rbacregistryvalidation.DefaultRuleResolver
+	*decider
 	counterfactuals []counterfactual
 }
 
-// counterfactual is an authorizer over a deliberately altered copy of the
+// decider is the API server's RBAC machinery over one world: the
+// authorizer, the rule resolver the RBAC registry checks writes with, and
+// the impersonation filters built on the authorizer.
+type decider struct {
+	world              *World
+	authorizer         *rbacauthorizer.RBACAuthorizer
+	resolver           *rbacregistryvalidation.DefaultRuleResolver
+	impersonation      impersonationFilters
+	groupImpersonation impersonationFilters
+}
+
+func newDecider(world *World) *decider {
+	_, static := rbacregistryvalidation.NewTestRuleResolver(
+		world.Roles, world.RoleBindings, world.ClusterRoles, world.ClusterRoleBindings)
+	authorizer := rbacauthorizer.New(static, static, static, static)
+	return &decider{
+		world:              world,
+		authorizer:         authorizer,
+		resolver:           rbacregistryvalidation.NewDefaultRuleResolver(static, static, static, static),
+		impersonation:      newImpersonationFilters(authorizer),
+		groupImpersonation: newImpersonationFilters(placeholderAuthorizer{authorizer}),
+	}
+}
+
+// allowed decides request. The tags explain how a write question was
+// decided; other kinds get none.
+func (d *decider) allowed(request *Request) (bool, string, []string, error) {
+	switch request.Kind {
+	case accessKind:
+		verdict, reason, err := d.authorizer.Authorize(context.Background(), request.attributes())
+		return verdict == authorizer.DecisionAllow, reason, nil, err
+	case impersonateKind:
+		allowed, reason, err := d.impersonationAllowed(request)
+		return allowed, reason, nil, err
+	case writeKind:
+		return d.writeAllowed(request)
+	}
+	return false, "", nil, fmt.Errorf("request %d: unknown kind %q", request.ID, request.Kind)
+}
+
+// counterfactual is the API server over a deliberately altered copy of the
 // world. A denied request it would allow gets its tag, which names the
 // Kubernetes behavior responsible for the denial.
 type counterfactual struct {
-	tag        string
-	authorizer *rbacauthorizer.RBACAuthorizer
-	fallback   bool
+	tag      string
+	decider  *decider
+	fallback bool
 }
 
 // AddCounterfactual tags every denied request that world would allow with
@@ -36,38 +76,28 @@ type counterfactual struct {
 // only consulted when no earlier one explained the denial, so a combination
 // of behaviors is reported only when no single one suffices.
 func (o *Oracle) AddCounterfactual(tag string, world *World, fallback bool) {
-	_, static := rbacregistryvalidation.NewTestRuleResolver(
-		world.Roles, world.RoleBindings, world.ClusterRoles, world.ClusterRoleBindings)
-	o.counterfactuals = append(o.counterfactuals,
-		counterfactual{tag, rbacauthorizer.New(static, static, static, static), fallback})
+	o.counterfactuals = append(o.counterfactuals, counterfactual{tag, newDecider(world), fallback})
 }
 
 func NewOracle(world *World) *Oracle {
-	_, static := rbacregistryvalidation.NewTestRuleResolver(
-		world.Roles, world.RoleBindings, world.ClusterRoles, world.ClusterRoleBindings)
-	return &Oracle{
-		world:      world,
-		authorizer: rbacauthorizer.New(static, static, static, static),
-		resolver:   rbacregistryvalidation.NewDefaultRuleResolver(static, static, static, static),
-	}
+	return &Oracle{decider: newDecider(world)}
 }
 
-// Decide returns the authorizer's decision for request. The decision
-// itself comes only from RBACAuthorizer.Authorize; the second rule walk
-// exists to find the allowing rule so its features can be tagged.
+// Decide returns the API server's decision for request. The decision
+// itself comes only from the API server's code (see decider.allowed); the
+// second rule walk exists to find the allowing rule so its features can be
+// tagged.
 func (o *Oracle) Decide(request *Request) (Decision, error) {
-	attributes := request.attributes()
-	ctx := context.Background()
-	verdict, reason, err := o.authorizer.Authorize(ctx, attributes)
+	allowed, reason, kindTags, err := o.allowed(request)
 	if err != nil {
 		return Decision{}, err
 	}
 
 	decision := Decision{
 		ID:      request.ID,
-		Allowed: verdict == authorizer.DecisionAllow,
+		Allowed: allowed,
 		Reason:  reason,
-		Tags:    requestTags(request),
+		Tags:    append(requestTags(request), kindTags...),
 	}
 	if !decision.Allowed {
 		explained := false
@@ -75,11 +105,11 @@ func (o *Oracle) Decide(request *Request) (Decision, error) {
 			if counterfactual.fallback && explained {
 				continue
 			}
-			verdict, _, err := counterfactual.authorizer.Authorize(ctx, attributes)
+			allowed, _, _, err := counterfactual.decider.allowed(request)
 			if err != nil {
 				return Decision{}, err
 			}
-			if verdict == authorizer.DecisionAllow {
+			if allowed {
 				decision.Tags = append(decision.Tags, counterfactual.tag)
 				explained = true
 			}
@@ -88,9 +118,21 @@ func (o *Oracle) Decide(request *Request) (Decision, error) {
 		return decision, nil
 	}
 
+	var attributes authorizer.AttributesRecord
+	switch request.Kind {
+	case accessKind:
+		attributes = request.attributes()
+	case impersonateKind:
+		attributes = impersonationAttributes(request)
+	default:
+		// A write is allowed by several checks, named by its tags.
+		slices.Sort(decision.Tags)
+		return decision, nil
+	}
+
 	var allowingSource fmt.Stringer
 	var allowingRule *rbacv1.PolicyRule
-	o.resolver.VisitRulesFor(ctx, attributes.User, attributes.Namespace,
+	o.resolver.VisitRulesFor(context.Background(), attributes.User, attributes.Namespace,
 		func(source fmt.Stringer, rule *rbacv1.PolicyRule, err error) bool {
 			if rule != nil && rbacauthorizer.RuleAllows(attributes, rule) {
 				allowingSource, allowingRule = source, rule
@@ -114,6 +156,18 @@ func (o *Oracle) Decide(request *Request) (Decision, error) {
 
 func requestTags(request *Request) []string {
 	tags := []string{}
+	switch request.Kind {
+	case impersonateKind:
+		tags = append(tags, "request-impersonate-"+request.Resource)
+	case writeKind:
+		tags = append(tags, "request-write-"+request.Verb+"-"+request.Resource)
+	}
+	if request.Kind != accessKind {
+		if _, _, ok := splitServiceAccount(request.User); ok {
+			tags = append(tags, "principal-serviceaccount")
+		}
+		return tags
+	}
 	switch {
 	case request.Path != "":
 		tags = append(tags, "request-nonresource")
