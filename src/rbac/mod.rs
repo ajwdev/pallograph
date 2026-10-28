@@ -19,8 +19,8 @@ pub(crate) mod facts;
 mod resource_scope;
 
 use facts::{
-    Permission, ns_covers, parse_binding_subject, parse_strings, parse_subject_rows,
-    unexpected_row, value_covers,
+    Permission, RbacWrite, RoleKey, ns_covers, parse_binding_subject, parse_strings,
+    parse_subject_rows, value_covers,
 };
 pub use facts::{PermissionTables, Subject, SubjectKind};
 
@@ -56,8 +56,29 @@ const UNKNOWN_MECHANISM: &str = "unknown";
 /// RBAC objects.
 const NEW_OBJECT: &str = "(new)";
 
-/// A Role is keyed by (namespace, name); a ClusterRole by ("", name).
-type RoleKey = (&'static str, String, String);
+/// The path an `RbacWrite` adds after `hops`: the binding it creates or
+/// updates and the role, "(new)" where it writes a new one.
+fn write_path(write: &RbacWrite, hops: Vec<(Subject, String)>) -> AccessPath {
+    let or_new = |name: &str| {
+        if name.is_empty() {
+            NEW_OBJECT.to_string()
+        } else {
+            name.to_string()
+        }
+    };
+    AccessPath {
+        binding_kind: if write.namespace.is_empty() {
+            "ClusterRoleBinding"
+        } else {
+            "RoleBinding"
+        },
+        binding_namespace: write.namespace.clone(),
+        binding_name: or_new(&write.binding),
+        role_kind: write.role_kind,
+        role_name: or_new(&write.role),
+        hops,
+    }
+}
 
 /// Relations naming the ServiceAccounts one binding subject's grants reach
 /// by one mechanism, each `(Name, Kind, Namespace, ServiceAccount)`, with the
@@ -82,11 +103,13 @@ pub struct RbacAccessModel {
     subject_bindings: HashMap<Subject, Vec<(String, String)>>,
     /// `binding_roleref`: (role kind, role name) per binding.
     binding_roles: HashMap<(String, String), Vec<(String, String)>>,
-    /// The rules each role has and the permissions each rule grants.
-    role_rules: RoleRules,
     /// `subject_escalation_hop`: the identities (usernames) each binding
     /// subject's grants can assume in one hop.
     subject_hops: HashMap<Subject, BTreeSet<String>>,
+    /// `gained_escalation_hop`: the identities each binding subject can
+    /// assume in one hop through a role it can grant itself by writing RBAC
+    /// objects, with the mechanisms.
+    gained_hops: HashMap<Subject, BTreeMap<String, BTreeSet<String>>>,
     /// Per mechanism label, the (namespace, ServiceAccount) pairs each binding
     /// subject's grants reach.
     service_account_mechanisms: Vec<(&'static str, HashMap<Subject, HashSet<(String, String)>>)>,
@@ -117,13 +140,22 @@ impl RbacAccessModel {
                 .push((role_kind, role_name));
         }
 
-        let role_rules = RoleRules::from_scan(&scan);
-
         let mut subject_hops: HashMap<Subject, BTreeSet<String>> = HashMap::new();
         for (subject, [target]) in
             parse_subject_rows::<1>("subject_escalation_hop", &scan("subject_escalation_hop"))
         {
             subject_hops.entry(subject).or_default().insert(target);
+        }
+        let mut gained_hops: HashMap<Subject, BTreeMap<String, BTreeSet<String>>> = HashMap::new();
+        for (subject, [target, mechanism]) in
+            parse_subject_rows::<2>("gained_escalation_hop", &scan("gained_escalation_hop"))
+        {
+            gained_hops
+                .entry(subject)
+                .or_default()
+                .entry(target)
+                .or_default()
+                .insert(mechanism);
         }
 
         let service_account_mechanisms = SERVICE_ACCOUNT_MECHANISMS
@@ -142,21 +174,24 @@ impl RbacAccessModel {
             })
             .collect();
 
-        let mut granted_groups: Vec<Subject> = tables
+        // Groups that can grant themselves a role hold grants too
+        // (group_has_grant in rbac_write.mg).
+        let granted_groups: BTreeSet<Subject> = tables
             .grants
             .keys()
+            .chain(tables.rbac_writes.keys())
             .filter(|subject| subject.kind == SubjectKind::Group)
             .cloned()
             .collect();
-        granted_groups.sort();
+        let granted_groups: Vec<Subject> = granted_groups.into_iter().collect();
 
         Self {
             include_builtins: false,
             tables,
             subject_bindings,
             binding_roles,
-            role_rules,
             subject_hops,
+            gained_hops,
             service_account_mechanisms,
             granted_groups,
         }
@@ -286,7 +321,7 @@ impl RbacAccessModel {
     /// Like `check_access_invariant` but escalation-aware.
     /// Enumerates all principals that can reach `(namespace, apigroup, resource, verb)`
     /// via direct RBAC grants *or* via `controls_identity` and `controls_group`
-    /// escalation, or by writing RBAC objects (`rbac_write_perm`).
+    /// escalation, or by writing RBAC objects (`rbac_write_binding`).
     pub fn check_reaches(
         &self,
         namespace: &str,
@@ -410,6 +445,14 @@ impl RbacAccessModel {
             return paths;
         }
 
+        // Likewise for a role the principal can grant itself by writing RBAC
+        // objects: having it, the principal also reaches every other
+        // identity, so chains through them would be noise.
+        self.collect_rbac_write_paths(&subjects, &[], query, &mut paths);
+        if !paths.is_empty() {
+            return paths;
+        }
+
         // Principal only reaches the permission via escalation chains, to
         // identities and groups whose own grants (not what they reach through
         // escalation) match the query. This breaks mutual-impersonation
@@ -447,52 +490,51 @@ impl RbacAccessModel {
             self.collect_binding_paths(target_subjects, hops.clone(), perm_filter, &mut paths);
         }
 
-        self.collect_rbac_write_paths(principal, query, &mut paths);
+        // Roles a target at the end of a chain can grant itself by writing
+        // RBAC objects. A target whose own bindings grant the query is
+        // explained by them already.
+        for (target_subjects, hops) in &target_chains {
+            let bindings_cover = self
+                .tables
+                .grants_of(target_subjects.clone())
+                .any(|granted| permission_covers(granted, query));
+            if !bindings_cover {
+                self.collect_rbac_write_paths(target_subjects, hops, query, &mut paths);
+            }
+        }
         paths
     }
 
-    /// Append a path for each ClusterRole `principal` can grant itself by
-    /// writing RBAC objects (`rbac_write_perm`) whose permissions cover
-    /// `query`: one hop from `principal` itself, labeled with the verb that
-    /// lets the write through, to the binding it would create or update.
+    /// Append, for each of `subjects` that can grant itself a role covering
+    /// `query` by writing RBAC objects (`rbac_write_binding`), the path after
+    /// `hops`: a hop to the subject labeled with the verb that lets the
+    /// write through (bind or escalate), then the binding it would create
+    /// or update and the role.
+    ///
     fn collect_rbac_write_paths(
         &self,
-        principal: &Subject,
+        subjects: &[Subject],
+        hops: &[(Subject, String)],
         query: PermissionPattern<'_>,
         out: &mut Vec<AccessPath>,
     ) {
-        let found: BTreeSet<(&str, &str, &str)> = self
-            .tables
-            .rbac_writes
-            .get(principal)
-            .into_iter()
-            .flatten()
-            .filter(|write| permission_covers(&write.permission, query))
-            .map(|write| {
-                (
-                    write.mechanism.as_str(),
-                    write.binding.as_str(),
-                    write.role.as_str(),
-                )
-            })
-            .collect();
-        let or_new = |name: &str| {
-            if name.is_empty() {
-                NEW_OBJECT.to_string()
-            } else {
-                name.to_string()
+        let keys: BTreeSet<Subject> = subjects.iter().map(Subject::principal).collect();
+        for subject in keys {
+            let writes = self.tables.rbac_writes.get(&subject).into_iter().flatten();
+            for write in writes.filter(|write| self.write_covers(write, query)) {
+                let mut chain = hops.to_vec();
+                chain.push((subject.clone(), write.mechanism.clone()));
+                out.push(write_path(write, chain));
             }
-        };
-        for (mechanism, binding, role) in found {
-            out.push(AccessPath {
-                binding_kind: "ClusterRoleBinding",
-                binding_namespace: String::new(),
-                binding_name: or_new(binding),
-                role_kind: "ClusterRole",
-                role_name: or_new(role),
-                hops: vec![(principal.clone(), mechanism.to_string())],
-            });
         }
+    }
+
+    /// The permissions of `write` include one covering `query`.
+    fn write_covers(&self, write: &RbacWrite, query: PermissionPattern<'_>) -> bool {
+        write
+            .permissions(&self.tables.role_rules)
+            .iter()
+            .any(|granted| permission_covers(granted, query))
     }
 
     /// The shortest escalation chains from `principal`, as a tree: for each
@@ -524,6 +566,12 @@ impl RbacAccessModel {
                 .iter()
                 .filter_map(|subject| self.subject_hops.get(subject))
                 .flatten()
+                .chain(
+                    subjects
+                        .iter()
+                        .filter_map(|subject| self.gained_hops.get(subject))
+                        .flat_map(BTreeMap::keys),
+                )
                 .collect();
             let mut next: Vec<(Subject, String)> = identities
                 .into_iter()
@@ -539,6 +587,7 @@ impl RbacAccessModel {
                 && self
                     .tables
                     .grants_of(subjects.clone())
+                    .chain(self.tables.gained_of(subjects.clone()))
                     .any(Self::impersonates_groups)
             {
                 groups_reached = true;
@@ -563,8 +612,28 @@ impl RbacAccessModel {
     /// The mechanisms by which `subjects` assume `identity` in one hop,
     /// comma-separated, e.g. "pod-exec, token". A ServiceAccount is reached
     /// by the mechanisms whose `subject_*_sa` relation lists it; otherwise
-    /// the hop is user impersonation.
+    /// the hop is user impersonation. A hop only a role gained by writing
+    /// RBAC objects allows (`gained_escalation_hop`) says so, e.g.
+    /// "pod-create after RBAC write".
     fn mechanism(&self, subjects: &[Subject], identity: &Subject) -> String {
+        let direct = subjects.iter().any(|subject| {
+            self.subject_hops
+                .get(subject)
+                .is_some_and(|targets| targets.contains(&identity.name))
+        });
+        if !direct {
+            let gained: BTreeSet<&String> = subjects
+                .iter()
+                .filter_map(|subject| self.gained_hops.get(subject))
+                .filter_map(|targets| targets.get(&identity.name))
+                .flatten()
+                .collect();
+            if !gained.is_empty() {
+                let labels: Vec<&str> = gained.iter().map(|label| label.as_str()).collect();
+                return format!("{} after RBAC write", labels.join(", "));
+            }
+        }
+
         let service_account = identity
             .name
             .strip_prefix("system:serviceaccount:")
@@ -608,7 +677,8 @@ impl RbacAccessModel {
         query_resource: &str,
         query_verb: &str,
     ) -> bool {
-        self.role_rules
+        self.tables
+            .role_rules
             .permissions_of(key)
             .any(|(api_group, resource, verb)| {
                 value_covers(api_group, query_api_group)
@@ -716,73 +786,6 @@ impl RbacAccessModel {
                 hops: hops.clone(),
             });
         }
-    }
-}
-
-/// The rules of each Role and ClusterRole (role_rule and clusterrole_rule),
-/// after aggregation, and the (apigroup, resource, verb) each rule grants
-/// (policy_rule_perm, ResourceName dropped). As in rbac_roles.mg, a rule's
-/// permissions are stored once per distinct PolicyRule value and joined with
-/// a role on demand, not copied into every role that has the rule.
-#[derive(Default)]
-struct RoleRules {
-    rules: HashMap<RoleKey, Vec<Value>>,
-    permissions: HashMap<Value, Vec<(String, String, String)>>,
-}
-
-impl RoleRules {
-    fn from_scan(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Self {
-        let mut role_rules = Self::default();
-        for row in scan("policy_rule_perm") {
-            match row.as_slice() {
-                [
-                    rule,
-                    Value::String(api_group),
-                    Value::String(resource),
-                    Value::Name(_) | Value::String(_),
-                    Value::String(verb),
-                ] => role_rules
-                    .permissions
-                    .entry(rule.clone())
-                    .or_default()
-                    .push((api_group.clone(), resource.clone(), verb.clone())),
-                _ => unexpected_row("policy_rule_perm", &row),
-            }
-        }
-
-        let mut add = |key: RoleKey, rule: &Value| {
-            role_rules.rules.entry(key).or_default().push(rule.clone());
-        };
-        for row in scan("role_rule") {
-            match row.as_slice() {
-                [Value::String(namespace), Value::String(role), rule] => {
-                    add(("Role", namespace.clone(), role.clone()), rule)
-                }
-                _ => unexpected_row("role_rule", &row),
-            }
-        }
-        for row in scan("clusterrole_rule") {
-            match row.as_slice() {
-                [Value::String(role), rule] => {
-                    add(("ClusterRole", String::new(), role.clone()), rule)
-                }
-                _ => unexpected_row("clusterrole_rule", &row),
-            }
-        }
-        role_rules
-    }
-
-    /// (apigroup, resource, verb) the role `key` grants.
-    fn permissions_of<'a>(
-        &'a self,
-        key: &RoleKey,
-    ) -> impl Iterator<Item = &'a (String, String, String)> + use<'a> {
-        self.rules
-            .get(key)
-            .into_iter()
-            .flatten()
-            .filter_map(|rule| self.permissions.get(rule))
-            .flatten()
     }
 }
 
@@ -1296,6 +1299,7 @@ mod tests {
         assert!(!model.binding_roles.is_empty(), "binding_roleref");
         assert!(
             model
+                .tables
                 .role_rules
                 .rules
                 .keys()
@@ -1304,6 +1308,7 @@ mod tests {
         );
         assert!(
             model
+                .tables
                 .role_rules
                 .rules
                 .keys()
@@ -1476,6 +1481,114 @@ mod tests {
                 "cluster-admin",
                 vec![(sa_a.clone(), "bind".to_string())]
             )]
+        );
+    }
+
+    /// The paths shown for `principal` reaching `(namespace, *, *, *)`, as
+    /// (binding namespace, binding, role, hops).
+    fn shown_paths(
+        model: &RbacAccessModel,
+        principal: &Subject,
+        namespace: &str,
+    ) -> Option<Vec<(String, String, String, Vec<(Subject, String)>)>> {
+        let via = model.check_reaches(namespace, "*", "*", "*", &[], false);
+        let found = via.iter().find(|v| v.principal == *principal)?;
+        Some(
+            found
+                .paths
+                .iter()
+                .map(|p| {
+                    (
+                        p.binding_namespace.clone(),
+                        p.binding_name.clone(),
+                        p.role_name.clone(),
+                        p.hops.clone(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// The writes binding subject `name` holds through ClusterRole `role`
+    /// with `rules`, bound cluster-wide.
+    fn sa_grant(name: &str, role: &str, rules: &str) -> String {
+        format!(
+            concat!(
+                r#"{{"apiVersion":"v1","kind":"ServiceAccount","metadata":{{"name":"{name}","namespace":"ns1"}}}}"#,
+                "\n",
+                r#"{{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{{"name":"{role}"}},"rules":{rules}}}"#,
+                "\n",
+                r#"{{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{{"name":"{role}"}},"roleRef":{{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"{role}"}},"subjects":[{{"kind":"ServiceAccount","name":"{name}","namespace":"ns1"}}]}}"#,
+                "\n",
+            ),
+            name = name,
+            role = role,
+            rules = rules,
+        )
+    }
+
+    #[test]
+    fn creating_pods_as_an_rbac_writer_reaches_cluster_admin() {
+        // ns1:x can bind cluster-admin to itself. deployer may create pods
+        // in ns1, so it can run one as x: deployer reaches cluster-admin
+        // through x's bind, shown as a pod-create hop to x and then x's
+        // bind.
+        let mut extra = sa_grant(
+            "x",
+            "binder",
+            r#"[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterroles"],"verbs":["bind"]},{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterrolebindings"],"verbs":["create"]}]"#,
+        );
+        extra.push_str(concat!(
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"Role","metadata":{"name":"pod-creator","namespace":"ns1"},"rules":[{"apiGroups":[""],"resources":["pods"],"verbs":["create"]}]}"#,
+            "\n",
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"deployer","namespace":"ns1"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"pod-creator"},"subjects":[{"kind":"User","name":"deployer"}]}"#,
+            "\n",
+        ));
+        let eval = load_engine_with(&extra).evaluate().expect("evaluate");
+        let model = RbacAccessModel::from_store(&eval);
+        let x = Subject::username("system:serviceaccount:ns1:x");
+
+        assert_eq!(
+            shown_paths(&model, &Subject::username("deployer"), ""),
+            Some(vec![(
+                String::new(),
+                "(new)".to_string(),
+                "cluster-admin".to_string(),
+                vec![
+                    (x.clone(), "pod-create".to_string()),
+                    (x.clone(), "bind".to_string())
+                ]
+            )])
+        );
+    }
+
+    #[test]
+    fn rbac_writes_in_a_namespace_stay_there() {
+        // In ns1, sa-a may create RoleBindings and bind ClusterRoles: it
+        // reaches everything in ns1 through a new RoleBinding of
+        // cluster-admin, and nothing cluster-wide.
+        let extra = concat!(
+            r#"{"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"sa-a","namespace":"ns1"}}"#,
+            "\n",
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"Role","metadata":{"name":"ns-binder","namespace":"ns1"},"rules":[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterroles"],"verbs":["bind"]},{"apiGroups":["rbac.authorization.k8s.io"],"resources":["rolebindings"],"verbs":["create"]}]}"#,
+            "\n",
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"ns-binder","namespace":"ns1"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"ns-binder"},"subjects":[{"kind":"ServiceAccount","name":"sa-a","namespace":"ns1"}]}"#,
+            "\n",
+        );
+        let eval = load_engine_with(extra).evaluate().expect("evaluate");
+        let model = RbacAccessModel::from_store(&eval);
+        let sa_a = Subject::username("system:serviceaccount:ns1:sa-a");
+
+        assert_eq!(shown_paths(&model, &sa_a, ""), None);
+        assert_eq!(shown_paths(&model, &sa_a, "ns2"), None);
+        assert_eq!(
+            shown_paths(&model, &sa_a, "ns1"),
+            Some(vec![(
+                "ns1".to_string(),
+                "(new)".to_string(),
+                "cluster-admin".to_string(),
+                vec![(sa_a.clone(), "bind".to_string())]
+            )])
         );
     }
 

@@ -6,193 +6,603 @@
 # pkg/registry/rbac, documented under "Privilege escalation prevention and
 # bootstrapping" in the RBAC docs):
 #
-#   bind      - a ClusterRoleBinding may reference a ClusterRole the user
-#               may bind (verb bind on clusterroles, which resourceNames can
-#               limit to some roles).
-#   escalate  - a ClusterRole may hold rules the user does not, when the user
-#               has verb escalate on clusterroles.
+#   bind      - a binding may reference a role the user may bind: verb bind
+#               on roles or clusterroles (the roleRef's kind), checked in the
+#               binding's namespace ("" for a ClusterRoleBinding) and on the
+#               roleRef's name.
+#   escalate  - a role may hold rules the user does not, when the user has
+#               verb escalate on roles or clusterroles, checked on the role's
+#               name.
 #
-# So a principal that can write ClusterRoleBindings and bind a ClusterRole
-# gains that role cluster-wide, and one that can write ClusterRoles and
-# escalate gains whatever it writes into a role bound to it: everything.
-# Wildcards in apiGroups, resources and verbs count as usual.
+# Members of system:masters skip both checks (and authorization): they are
+# given every RBAC permission below.
 #
-# Paths modeled, cluster-wide only (grants with Namespace ""):
-#   bind      - create clusterrolebindings, bind ClusterRole R: a new
-#               ClusterRoleBinding of R. Or update/patch
-#               clusterrolebindings, bind R: add itself to an existing
-#               ClusterRoleBinding of R (roleRef cannot change).
-#   escalate  - escalate and update/patch clusterroles, already bound to
-#               ClusterRole R by a ClusterRoleBinding: rewrite R. Or
-#               escalate, create or update clusterroles, create
-#               clusterrolebindings and bind on any ClusterRole: write a
-#               role and bind it.
+# So a writer can grant itself a role by writing a binding that names it,
+# and with escalate can write any rules into a role it holds or can bind.
+# Paths modeled:
 #
-# Not modeled: RoleBindings and Roles (the same paths within a namespace,
-# including a RoleBinding that references a ClusterRole), and continuing an
-# escalation path (escalation.mg) through a role gained here, or from an
-# identity reached there. ResourceNames are ignored except on bind, which
-# over-approximates, the safe side for finding escalation paths.
+#   bind      - create a ClusterRoleBinding of a ClusterRole it may bind, or
+#               add itself to an existing one (update; roleRef cannot
+#               change). The same with RoleBindings in a namespace, of a Role
+#               there or of a ClusterRole, which then applies only in that
+#               namespace.
+#   escalate  - rewrite a ClusterRole or Role (update) it is bound to or can
+#               bind, or create a new one it can bind. Creating a ClusterRole
+#               whose labels match the aggregationRule of a ClusterRole
+#               extends that role too: the aggregation controller copies the
+#               rules in.
 #
-# Derived relations (IDB):
-#   rbac_write_role/5  - the ClusterRole a writer can grant itself, and how
-#   rbac_write_perm/8  - the permissions that grants
-
-# ---- Permission guards ----
+# Wildcards in apiGroups, resources and verbs count as usual. ResourceNames
+# are honored: an update, patch, bind or escalate is checked on the object's
+# name, and a create on the empty name, so only rules without resourceNames
+# (or with resourceNames: [""]) allow it. Any aggregationRule is taken to be
+# satisfiable, since the writer chooses the new role's labels.
 #
-# Cluster-wide grants on the rbac.authorization.k8s.io API group, then one
-# relation per permission, each checking wildcard and literal resource and
-# verb.
-
-grant_rbac_cluster(Name, Kind, Resource, ResourceName, Verb) :-
-    direct_perm(Name, Kind, "", "rbac.authorization.k8s.io", Resource, ResourceName, Verb).
-grant_rbac_cluster(Name, Kind, Resource, ResourceName, Verb) :-
-    direct_perm(Name, Kind, "", "*", Resource, ResourceName, Verb).
-
-grant_clusterrolebindings_create(Name, Kind) :- grant_rbac_cluster(Name, Kind, "clusterrolebindings", _, "create").
-grant_clusterrolebindings_create(Name, Kind) :- grant_rbac_cluster(Name, Kind, "clusterrolebindings", _, "*").
-grant_clusterrolebindings_create(Name, Kind) :- grant_rbac_cluster(Name, Kind, "*",                   _, "create").
-grant_clusterrolebindings_create(Name, Kind) :- grant_rbac_cluster(Name, Kind, "*",                   _, "*").
-
-grant_clusterrolebindings_update(Name, Kind) :- grant_rbac_cluster(Name, Kind, "clusterrolebindings", _, "update").
-grant_clusterrolebindings_update(Name, Kind) :- grant_rbac_cluster(Name, Kind, "clusterrolebindings", _, "patch").
-grant_clusterrolebindings_update(Name, Kind) :- grant_rbac_cluster(Name, Kind, "clusterrolebindings", _, "*").
-grant_clusterrolebindings_update(Name, Kind) :- grant_rbac_cluster(Name, Kind, "*",                   _, "update").
-grant_clusterrolebindings_update(Name, Kind) :- grant_rbac_cluster(Name, Kind, "*",                   _, "patch").
-grant_clusterrolebindings_update(Name, Kind) :- grant_rbac_cluster(Name, Kind, "*",                   _, "*").
-
-grant_clusterroles_create(Name, Kind) :- grant_rbac_cluster(Name, Kind, "clusterroles", _, "create").
-grant_clusterroles_create(Name, Kind) :- grant_rbac_cluster(Name, Kind, "clusterroles", _, "*").
-grant_clusterroles_create(Name, Kind) :- grant_rbac_cluster(Name, Kind, "*",            _, "create").
-grant_clusterroles_create(Name, Kind) :- grant_rbac_cluster(Name, Kind, "*",            _, "*").
-
-grant_clusterroles_update(Name, Kind) :- grant_rbac_cluster(Name, Kind, "clusterroles", _, "update").
-grant_clusterroles_update(Name, Kind) :- grant_rbac_cluster(Name, Kind, "clusterroles", _, "patch").
-grant_clusterroles_update(Name, Kind) :- grant_rbac_cluster(Name, Kind, "clusterroles", _, "*").
-grant_clusterroles_update(Name, Kind) :- grant_rbac_cluster(Name, Kind, "*",            _, "update").
-grant_clusterroles_update(Name, Kind) :- grant_rbac_cluster(Name, Kind, "*",            _, "patch").
-grant_clusterroles_update(Name, Kind) :- grant_rbac_cluster(Name, Kind, "*",            _, "*").
-
-grant_clusterroles_escalate(Name, Kind) :- grant_rbac_cluster(Name, Kind, "clusterroles", _, "escalate").
-grant_clusterroles_escalate(Name, Kind) :- grant_rbac_cluster(Name, Kind, "clusterroles", _, "*").
-grant_clusterroles_escalate(Name, Kind) :- grant_rbac_cluster(Name, Kind, "*",            _, "escalate").
-grant_clusterroles_escalate(Name, Kind) :- grant_rbac_cluster(Name, Kind, "*",            _, "*").
-
-# ResourceName is kept: it is /any, or the one ClusterRole bind applies to.
-grant_clusterroles_bind(Name, Kind, ResourceName) :- grant_rbac_cluster(Name, Kind, "clusterroles", ResourceName, "bind").
-grant_clusterroles_bind(Name, Kind, ResourceName) :- grant_rbac_cluster(Name, Kind, "clusterroles", ResourceName, "*").
-grant_clusterroles_bind(Name, Kind, ResourceName) :- grant_rbac_cluster(Name, Kind, "*",            ResourceName, "bind").
-grant_clusterroles_bind(Name, Kind, ResourceName) :- grant_rbac_cluster(Name, Kind, "*",            ResourceName, "*").
-
-# ---- Writers ----
+# ---- Writers and namespaces ----
 #
 # A writer is a known user or ServiceAccount, acting with all its subjects
 # (principal_subject), or a group, acting with its own grants: as in
-# escalation.mg, members of a group are mostly unknown, so a group is also
+# escalation.mg, a group's members are mostly unknown, so a group is also
 # where a path can start. The permissions a path needs may come from
-# different subjects of one writer.
+# different subjects of one writer. A writer that already holds every
+# permission cluster-wide gains nothing and is left out.
+#
+# What a writer gains is recorded against its own binding subject, the one
+# the binding it writes would name: (/user or /serviceaccount, username), or
+# (/group, group). Gains feed the escalation closure of escalation.mg
+# (controls_identity and the rest, through gained_escalation_hop), so a
+# role gained here can reach identities, and an identity reached there
+# brings what it can grant itself, because its subjects include its own.
+# escalation_hop and the grant_* guards stay as they are: they say what a
+# principal may do now, in one request.
+#
+# Gains do not feed back into the writer's own RBAC permissions, so a
+# chain of writes (bind a role that allows binding more) stops after the
+# first. That feedback would make every relation here one recursive
+# stratum, which made each evaluation of the small fixture about 2.5 times
+# slower in the interpreter.
+#
+# Recording gains against the writer's subject over-approximates for a user
+# whose writes need a user_groups group: assumed through impersonation, it
+# acts without that group, but is still credited with the gain.
+#
+# Namespace columns hold "" for cluster-wide (a ClusterRoleBinding), a
+# namespace, or "*" for every namespace: a writer allowed to create
+# RoleBindings anywhere gains a ClusterRole through a RoleBinding in each
+# namespace, which is not the same as cluster-wide (no cluster-scoped
+# resources), and naming each namespace would multiply rows by their count.
+# A namespaced RBAC permission counts at "*" when it was granted cluster-wide
+# or at "*", and also in each namespace the writer has a namespaced RBAC
+# permission in, so that two permissions held in different ways meet there.
+#
+# Derived relations (IDB):
+#   rbac_write_binding/7     - the roles a binding subject can grant itself
+#   rbac_role_writable/5     - the roles it can write any rules into
+#   rbac_write_anything/1    - principals that may write anything
+#   gained_escalation_hop/4  - escalation hops through gained roles
+#   rbac_write_role/5        - rbac_write_binding cluster-wide, by
+#                              principal, for tests/rbac_compat.rs
+#
+# What a gained role grants is joined on demand, as for direct_perm:
+#
+#   rbac_write_binding(Name, Kind, "bind", Ns, _, "ClusterRole", Role),
+#       clusterrole_rule(Role, Rule), policy_rule_perm(Rule, G, R, N, V)
+#   rbac_write_binding(Name, Kind, "bind", Ns, _, "Role", Role),
+#       role_rule(Ns, Role, Rule), policy_rule_perm(Rule, G, R, N, V)
+#   rbac_write_binding(Name, Kind, "escalate", Ns, ...): every permission in Ns
+
+# ---- Classifying RBAC permissions ----
+
+rbac_api_group("rbac.authorization.k8s.io").
+rbac_api_group("*").
+
+rbac_resource_class("clusterrolebindings", /clusterrolebindings).
+rbac_resource_class("clusterroles", /clusterroles).
+rbac_resource_class("rolebindings", /rolebindings).
+rbac_resource_class("roles", /roles).
+rbac_resource_class("*", Class) :- rbac_resource_class(_, Class).
+
+rbac_verb_class("create", /create).
+rbac_verb_class("update", /update).
+rbac_verb_class("patch", /update).
+rbac_verb_class("escalate", /escalate).
+rbac_verb_class("bind", /bind).
+rbac_verb_class("*", Class) :- rbac_verb_class(_, Class).
+
+any_namespace("").
+any_namespace("*").
+
+# A create request names no object: rules without resourceNames match it,
+# and so does resourceNames: [""].
+create_name(/any).
+create_name("").
+
+# ---- RBAC permissions per binding subject ----
+#
+# subject_rbac_power(Name, Kind, Ns, Resource, Verb, ResourceName): binding
+# subject (Kind, Name) may use Verb (a class above) on Resource (likewise)
+# in Ns, from its direct grants or as a member of system:masters.
+
+subject_rbac_grant(Name, Kind, Ns, Resource, ResourceName, Verb) :-
+    direct_perm(Name, Kind, Ns, ApiGroup, Resource, ResourceName, Verb),
+    rbac_api_group(ApiGroup).
+
+subject_rbac_grant("system:masters", /group, "", "*", /any, "*") :-
+    principal_group(_, "system:masters").
+
+subject_rbac_power(Name, Kind, Ns, ResourceClass, VerbClass, ResourceName) :-
+    subject_rbac_grant(Name, Kind, Ns, Resource, ResourceName, Verb),
+    rbac_resource_class(Resource, ResourceClass),
+    rbac_verb_class(Verb, VerbClass).
+
+rbac_subject(Name, Kind) :-
+    subject_rbac_power(Name, Kind, _, _, _, _).
+
+# ---- Writers ----
+
+# Holds every permission cluster-wide already, so gains nothing.
+subject_holds_everything(Name, Kind) :-
+    direct_perm(Name, Kind, "", "*", "*", /any, "*").
+
+principal_holds_everything(Username) :-
+    principal_subject(Username, Kind, Name),
+    subject_holds_everything(Name, Kind).
+
+rbac_writer(Username, /user) :-
+    principal_subject(Username, Kind, Name),
+    rbac_subject(Name, Kind),
+    known_principal(/user, Username),
+    !principal_holds_everything(Username).
+
+rbac_writer(Username, /serviceaccount) :-
+    principal_subject(Username, Kind, Name),
+    rbac_subject(Name, Kind),
+    known_principal(/serviceaccount, Username),
+    !principal_holds_everything(Username).
+
+rbac_writer(Group, /group) :-
+    rbac_subject(Group, /group),
+    !subject_holds_everything(Group, /group).
 
 Decl rbac_writer_subject(Writer, WriterKind, Kind, Name)
   descr [
-    doc("Binding subjects whose grants a writer of RBAC objects uses."),
+    doc("Binding subjects whose grants a writer of RBAC objects uses. The writer's own subject is (WriterKind, Writer)."),
     arg(Writer, "user name, system:serviceaccount:<ns>:<name>, or group name"),
-    arg(WriterKind, "/principal for a user or ServiceAccount, /group for a group"),
+    arg(WriterKind, "/user, /serviceaccount or /group"),
     arg(Kind, "/user, /group or /serviceaccount"),
     arg(Name, "subject name")
   ].
 
-rbac_writer_subject(Username, /principal, Kind, Name) :-
+rbac_writer_subject(Username, /user, Kind, Name) :-
+    rbac_writer(Username, /user),
+    principal_subject(Username, Kind, Name).
+
+rbac_writer_subject(Username, /serviceaccount, Kind, Name) :-
+    rbac_writer(Username, /serviceaccount),
     principal_subject(Username, Kind, Name).
 
 rbac_writer_subject(Group, /group, /group, Group) :-
-    grant_rbac_cluster(Group, /group, _, _, _).
+    rbac_writer(Group, /group).
 
-writer_creates_clusterrolebindings(Writer, WriterKind) :-
+writer_power(Writer, WriterKind, Ns, ResourceClass, VerbClass, ResourceName) :-
     rbac_writer_subject(Writer, WriterKind, Kind, Name),
-    grant_clusterrolebindings_create(Name, Kind).
+    subject_rbac_power(Name, Kind, Ns, ResourceClass, VerbClass, ResourceName).
 
-writer_updates_clusterrolebindings(Writer, WriterKind) :-
-    rbac_writer_subject(Writer, WriterKind, Kind, Name),
-    grant_clusterrolebindings_update(Name, Kind).
+# Cluster-scoped requests: ClusterRoleBindings, ClusterRoles.
+writer_cluster_power(Writer, WriterKind, ResourceClass, VerbClass, ResourceName) :-
+    writer_power(Writer, WriterKind, "", ResourceClass, VerbClass, ResourceName).
 
-writer_writes_clusterroles(Writer, WriterKind) :-
-    rbac_writer_subject(Writer, WriterKind, Kind, Name),
-    grant_clusterroles_create(Name, Kind).
+# Namespaced requests (RoleBindings, Roles, and bind checked for a
+# RoleBinding), at "*" or in a namespace; see the header.
+writer_ns_power(Writer, WriterKind, "*", ResourceClass, VerbClass, ResourceName) :-
+    writer_power(Writer, WriterKind, Ns, ResourceClass, VerbClass, ResourceName),
+    any_namespace(Ns).
 
-writer_writes_clusterroles(Writer, WriterKind) :-
-    writer_updates_clusterroles(Writer, WriterKind).
+writer_ns_power(Writer, WriterKind, Ns, ResourceClass, VerbClass, ResourceName) :-
+    writer_power(Writer, WriterKind, Ns, ResourceClass, VerbClass, ResourceName),
+    Ns != "",
+    Ns != "*".
 
-writer_updates_clusterroles(Writer, WriterKind) :-
-    rbac_writer_subject(Writer, WriterKind, Kind, Name),
-    grant_clusterroles_update(Name, Kind).
+writer_namespace(Writer, WriterKind, Ns) :-
+    writer_ns_power(Writer, WriterKind, Ns, _, _, _),
+    Ns != "*".
 
-writer_escalates_clusterroles(Writer, WriterKind) :-
-    rbac_writer_subject(Writer, WriterKind, Kind, Name),
-    grant_clusterroles_escalate(Name, Kind).
+writer_ns_power_at(Writer, WriterKind, Ns, ResourceClass, VerbClass, ResourceName) :-
+    writer_ns_power(Writer, WriterKind, Ns, ResourceClass, VerbClass, ResourceName).
 
-writer_binds_clusterroles(Writer, WriterKind, ResourceName) :-
-    rbac_writer_subject(Writer, WriterKind, Kind, Name),
-    grant_clusterroles_bind(Name, Kind, ResourceName).
+writer_ns_power_at(Writer, WriterKind, Ns, ResourceClass, VerbClass, ResourceName) :-
+    writer_ns_power(Writer, WriterKind, "*", ResourceClass, VerbClass, ResourceName),
+    writer_namespace(Writer, WriterKind, Ns).
 
-writer_bindable_clusterrole(Writer, WriterKind, Role) :-
-    writer_binds_clusterroles(Writer, WriterKind, /any),
+# ---- Permissions on named objects ----
+
+cluster_object(/clusterroles, Role) :- clusterrole(Role, _).
+cluster_object(/clusterrolebindings, Binding) :- binding_roleref("", Binding, _, _).
+
+namespaced_object(/roles, Ns, Role) :- role(Ns, Role, _).
+namespaced_object(/rolebindings, Ns, Binding) :-
+    binding_roleref(Ns, Binding, _, _),
+    Ns != "".
+
+# The writer may use Verb on the cluster-scoped object Name.
+writer_cluster_power_on(Writer, WriterKind, ResourceClass, VerbClass, Name) :-
+    writer_cluster_power(Writer, WriterKind, ResourceClass, VerbClass, /any),
+    cluster_object(ResourceClass, Name).
+
+writer_cluster_power_on(Writer, WriterKind, ResourceClass, VerbClass, Name) :-
+    writer_cluster_power(Writer, WriterKind, ResourceClass, VerbClass, Name),
+    cluster_object(ResourceClass, Name).
+
+# The writer may use Verb on object Name in namespace Ns.
+writer_ns_power_on(Writer, WriterKind, Ns, ResourceClass, VerbClass, Name) :-
+    writer_ns_power_at(Writer, WriterKind, Ns, ResourceClass, VerbClass, /any),
+    namespaced_object(ResourceClass, Ns, Name).
+
+writer_ns_power_on(Writer, WriterKind, Ns, ResourceClass, VerbClass, Name) :-
+    writer_ns_power_at(Writer, WriterKind, "*", ResourceClass, VerbClass, /any),
+    namespaced_object(ResourceClass, Ns, Name).
+
+writer_ns_power_on(Writer, WriterKind, Ns, ResourceClass, VerbClass, Name) :-
+    writer_ns_power_at(Writer, WriterKind, Ns, ResourceClass, VerbClass, Name),
+    namespaced_object(ResourceClass, Ns, Name).
+
+writer_ns_power_on(Writer, WriterKind, Ns, ResourceClass, VerbClass, Name) :-
+    writer_ns_power_at(Writer, WriterKind, "*", ResourceClass, VerbClass, Name),
+    namespaced_object(ResourceClass, Ns, Name).
+
+# The writer may use Verb on a new object (a create request).
+writer_cluster_power_new(Writer, WriterKind, ResourceClass, VerbClass) :-
+    writer_cluster_power(Writer, WriterKind, ResourceClass, VerbClass, ResourceName),
+    create_name(ResourceName).
+
+writer_ns_power_new(Writer, WriterKind, Scope, ResourceClass, VerbClass) :-
+    writer_ns_power_at(Writer, WriterKind, Scope, ResourceClass, VerbClass, ResourceName),
+    create_name(ResourceName).
+
+# ---- Roles a writer may bind ----
+
+# Scope "" for a ClusterRoleBinding, else as for writer_ns_power_at.
+writer_bindable_clusterrole(Writer, WriterKind, "", Role) :-
+    writer_cluster_power_on(Writer, WriterKind, /clusterroles, /bind, Role).
+
+writer_bindable_clusterrole(Writer, WriterKind, Scope, Role) :-
+    writer_ns_power_at(Writer, WriterKind, Scope, /clusterroles, /bind, /any),
     clusterrole(Role, _).
 
-writer_bindable_clusterrole(Writer, WriterKind, Role) :-
-    writer_binds_clusterroles(Writer, WriterKind, Role),
+writer_bindable_clusterrole(Writer, WriterKind, Scope, Role) :-
+    writer_ns_power_at(Writer, WriterKind, Scope, /clusterroles, /bind, Role),
     clusterrole(Role, _).
 
-# ---- What a writer can grant itself ----
+# A Role lives in one namespace, so Ns is always that namespace.
+writer_bindable_role(Writer, WriterKind, Ns, Role) :-
+    writer_ns_power_on(Writer, WriterKind, Ns, /roles, /bind, Role).
+
+writer_bindable_ref(Writer, WriterKind, Ns, "ClusterRole", Role) :-
+    writer_bindable_clusterrole(Writer, WriterKind, Ns, Role).
+
+writer_bindable_ref(Writer, WriterKind, Ns, "Role", Role) :-
+    writer_bindable_role(Writer, WriterKind, Ns, Role).
+
+# ---- Roles a writer may write any rules into ----
+#
+# writer_role_writable(Writer, WriterKind, Ns, RoleKind, Role): Role
+# empty for a new one; Ns "" for a ClusterRole, a namespace or "*" for a
+# Role.
+
+writer_role_writable(Writer, WriterKind, "", "ClusterRole", Role) :-
+    writer_cluster_power_on(Writer, WriterKind, /clusterroles, /escalate, Role),
+    writer_cluster_power_on(Writer, WriterKind, /clusterroles, /update, Role).
+
+writer_creates_any_clusterrole(Writer, WriterKind) :-
+    writer_cluster_power_new(Writer, WriterKind, /clusterroles, /escalate),
+    writer_cluster_power_new(Writer, WriterKind, /clusterroles, /create).
+
+writer_role_writable(Writer, WriterKind, "", "ClusterRole", "") :-
+    writer_creates_any_clusterrole(Writer, WriterKind).
+
+# Creating a ClusterRole that an aggregating role selects extends it.
+clusterrole_aggregating(Role) :-
+    clusterrole(Role, Data),
+    :match_field(Data, /aggregationRule, Rule),
+    :match_field(Rule, /clusterRoleSelectors, Selectors),
+    :list:member(_, Selectors).
+
+# A ClusterRole the writer can put any rules into: rewrite it, or, when it
+# aggregates, create a role it selects.
+writer_extends_clusterrole(Writer, WriterKind, Role) :-
+    writer_role_writable(Writer, WriterKind, "", "ClusterRole", Role),
+    Role != "".
+
+writer_extends_clusterrole(Writer, WriterKind, Role) :-
+    writer_creates_any_clusterrole(Writer, WriterKind),
+    clusterrole_aggregating(Role).
+
+writer_role_writable(Writer, WriterKind, Ns, "Role", Role) :-
+    writer_ns_power_on(Writer, WriterKind, Ns, /roles, /escalate, Role),
+    writer_ns_power_on(Writer, WriterKind, Ns, /roles, /update, Role).
+
+writer_role_writable(Writer, WriterKind, Scope, "Role", "") :-
+    writer_ns_power_new(Writer, WriterKind, Scope, /roles, /escalate),
+    writer_ns_power_new(Writer, WriterKind, Scope, /roles, /create).
+
+# ---- What a binding subject can grant itself ----
+
+Decl rbac_write_binding(Name, Kind, Mechanism, Namespace, Binding, RoleKind, Role)
+  descr [
+    doc("Binding subject (Kind, Name) can grant itself a role by writing RBAC objects: through a binding it creates or updates, of a role it may bind or write rules into."),
+    arg(Name, "user name, system:serviceaccount:<ns>:<name>, or group name"),
+    arg(Kind, "/user, /serviceaccount or /group"),
+    arg(Mechanism, "bind: bind the role as it is; escalate: every permission, written into the role"),
+    arg(Namespace, "where the role applies: empty for cluster-wide (ClusterRoleBinding), a namespace (RoleBinding), or * for a RoleBinding in every namespace"),
+    arg(Binding, "the existing binding used, or empty for a new one"),
+    arg(RoleKind, "ClusterRole or Role"),
+    arg(Role, "the role, or empty for a new one")
+  ].
+
+# bind, new ClusterRoleBinding.
+rbac_write_binding(Writer, WriterKind, "bind", "", "", "ClusterRole", Role) :-
+    writer_cluster_power_new(Writer, WriterKind, /clusterrolebindings, /create),
+    writer_bindable_clusterrole(Writer, WriterKind, "", Role).
+
+# bind, existing ClusterRoleBinding.
+rbac_write_binding(Writer, WriterKind, "bind", "", Binding, "ClusterRole", Role) :-
+    writer_cluster_power_on(Writer, WriterKind, /clusterrolebindings, /update, Binding),
+    binding_roleref("", Binding, "ClusterRole", Role),
+    writer_bindable_clusterrole(Writer, WriterKind, "", Role).
+
+# bind, new RoleBinding of a ClusterRole.
+rbac_write_binding(Writer, WriterKind, "bind", Scope, "", "ClusterRole", Role) :-
+    writer_ns_power_new(Writer, WriterKind, Scope, /rolebindings, /create),
+    writer_bindable_clusterrole(Writer, WriterKind, Scope, Role).
+
+# bind, new RoleBinding of a Role.
+rbac_write_binding(Writer, WriterKind, "bind", Ns, "", "Role", Role) :-
+    writer_bindable_role(Writer, WriterKind, Ns, Role),
+    writer_ns_power_new(Writer, WriterKind, Ns, /rolebindings, /create).
+
+rbac_write_binding(Writer, WriterKind, "bind", Ns, "", "Role", Role) :-
+    writer_bindable_role(Writer, WriterKind, Ns, Role),
+    writer_ns_power_new(Writer, WriterKind, "*", /rolebindings, /create).
+
+# bind, existing RoleBinding.
+rbac_write_binding(Writer, WriterKind, "bind", Ns, Binding, RoleKind, Role) :-
+    writer_ns_power_on(Writer, WriterKind, Ns, /rolebindings, /update, Binding),
+    binding_roleref(Ns, Binding, RoleKind, Role),
+    writer_bindable_ref(Writer, WriterKind, Ns, RoleKind, Role).
+
+rbac_write_binding(Writer, WriterKind, "bind", Ns, Binding, "ClusterRole", Role) :-
+    writer_ns_power_on(Writer, WriterKind, Ns, /rolebindings, /update, Binding),
+    binding_roleref(Ns, Binding, "ClusterRole", Role),
+    writer_bindable_clusterrole(Writer, WriterKind, "*", Role).
+
+# escalate, a role the writer holds through an existing binding: a
+# ClusterRole cluster-wide or in a RoleBinding's namespace, or a Role.
+rbac_write_binding(Writer, WriterKind, "escalate", Ns, Binding, "ClusterRole", Role) :-
+    writer_extends_clusterrole(Writer, WriterKind, Role),
+    binding_roleref(Ns, Binding, "ClusterRole", Role),
+    rbac_writer_subject(Writer, WriterKind, Kind, Name),
+    binding_subject(Ns, Binding, Kind, Name).
+
+rbac_write_binding(Writer, WriterKind, "escalate", Ns, Binding, "Role", Role) :-
+    writer_role_writable(Writer, WriterKind, Ns, "Role", Role),
+    Role != "",
+    rbac_writer_subject(Writer, WriterKind, Kind, Name),
+    binding_subject(Ns, Binding, Kind, Name),
+    binding_roleref(Ns, Binding, "Role", Role).
+
+# escalate, an existing role the writer can bind.
+rbac_write_binding(Writer, WriterKind, "escalate", Ns, Binding, "ClusterRole", Role) :-
+    writer_extends_clusterrole(Writer, WriterKind, Role),
+    rbac_write_binding(Writer, WriterKind, "bind", Ns, Binding, "ClusterRole", Role).
+
+rbac_write_binding(Writer, WriterKind, "escalate", Ns, Binding, "Role", Role) :-
+    writer_role_writable(Writer, WriterKind, Ns, "Role", Role),
+    Role != "",
+    rbac_write_binding(Writer, WriterKind, "bind", Ns, Binding, "Role", Role).
+
+# escalate, a new ClusterRole bound cluster-wide, or in RoleBindings; bind
+# is checked on the name the writer picks, so any bind grant will do.
+rbac_write_binding(Writer, WriterKind, "escalate", "", "", "ClusterRole", "") :-
+    writer_creates_any_clusterrole(Writer, WriterKind),
+    writer_cluster_power_new(Writer, WriterKind, /clusterrolebindings, /create),
+    writer_cluster_power(Writer, WriterKind, /clusterroles, /bind, _).
+
+rbac_write_binding(Writer, WriterKind, "escalate", Scope, "", "ClusterRole", "") :-
+    writer_creates_any_clusterrole(Writer, WriterKind),
+    writer_ns_power_new(Writer, WriterKind, Scope, /rolebindings, /create),
+    writer_ns_power_at(Writer, WriterKind, Scope, /clusterroles, /bind, _).
+
+# escalate, a new Role.
+rbac_write_binding(Writer, WriterKind, "escalate", Scope, "", "Role", "") :-
+    writer_role_writable(Writer, WriterKind, Scope, "Role", ""),
+    writer_ns_power_new(Writer, WriterKind, Scope, /rolebindings, /create),
+    writer_ns_power_at(Writer, WriterKind, Scope, /roles, /bind, _).
+
+# ---- Results ----
+
+Decl rbac_role_writable(Name, Kind, Namespace, RoleKind, Role)
+  descr [
+    doc("Writer (Kind, Name) may write any rules into a role, using escalate: update an existing role, or create a new one."),
+    arg(Name, "user name, system:serviceaccount:<ns>:<name>, or group name"),
+    arg(Kind, "/user, /serviceaccount or /group"),
+    arg(Namespace, "empty for a ClusterRole; for a Role its namespace, or * for every namespace"),
+    arg(RoleKind, "ClusterRole or Role"),
+    arg(Role, "the role, or empty for a new one")
+  ].
+
+rbac_role_writable(Name, Kind, Namespace, RoleKind, Role) :-
+    writer_role_writable(Name, Kind, Namespace, RoleKind, Role).
+
+Decl rbac_write_anything(Username)
+  descr [
+    doc("Principals that may write any RBAC object: members of system:masters, for whom the API server skips authorization and the escalation checks, and principals RBAC grants every permission cluster-wide. Listed here rather than in the write relations above, which leave out writers that already hold everything, as gaining nothing."),
+    arg(Username, "user name or system:serviceaccount:<ns>:<name>")
+  ].
+
+rbac_write_anything(Username) :-
+    principal_group(Username, "system:masters").
+
+rbac_write_anything(Username) :-
+    principal_holds_everything(Username).
 
 Decl rbac_write_role(Writer, WriterKind, Mechanism, Binding, Role)
   descr [
-    doc("Writer can grant itself ClusterRole Role cluster-wide by writing RBAC objects."),
+    doc("rbac_write_binding for ClusterRoleBindings of ClusterRoles, with users and ServiceAccounts as /principal. Kept for tests/rbac_compat.rs."),
     arg(Writer, "user name, system:serviceaccount:<ns>:<name>, or group name"),
     arg(WriterKind, "/principal for a user or ServiceAccount, /group for a group"),
-    arg(Mechanism, "bind: bind an existing role; escalate: write rules into a role"),
+    arg(Mechanism, "bind or escalate"),
     arg(Binding, "the existing ClusterRoleBinding used, or empty for a new one"),
-    arg(Role, "the ClusterRole granted, or empty for a new one")
+    arg(Role, "the ClusterRole, or empty for a new one")
   ].
 
-rbac_write_role(Writer, WriterKind, "bind", "", Role) :-
-    writer_creates_clusterrolebindings(Writer, WriterKind),
-    writer_bindable_clusterrole(Writer, WriterKind, Role).
+rbac_write_role(Writer, /principal, Mechanism, Binding, Role) :-
+    rbac_write_binding(Writer, /user, Mechanism, "", Binding, "ClusterRole", Role).
 
-rbac_write_role(Writer, WriterKind, "bind", Binding, Role) :-
-    writer_updates_clusterrolebindings(Writer, WriterKind),
-    writer_bindable_clusterrole(Writer, WriterKind, Role),
-    binding_roleref("", Binding, "ClusterRole", Role).
+rbac_write_role(Writer, /principal, Mechanism, Binding, Role) :-
+    rbac_write_binding(Writer, /serviceaccount, Mechanism, "", Binding, "ClusterRole", Role).
 
-rbac_write_role(Writer, WriterKind, "escalate", Binding, Role) :-
-    writer_escalates_clusterroles(Writer, WriterKind),
-    writer_updates_clusterroles(Writer, WriterKind),
-    rbac_writer_subject(Writer, WriterKind, Kind, Name),
-    binding_subject("", Binding, Kind, Name),
-    binding_roleref("", Binding, "ClusterRole", Role).
+rbac_write_role(Writer, /group, Mechanism, Binding, Role) :-
+    rbac_write_binding(Writer, /group, Mechanism, "", Binding, "ClusterRole", Role).
 
-rbac_write_role(Writer, WriterKind, "escalate", "", "") :-
-    writer_escalates_clusterroles(Writer, WriterKind),
-    writer_writes_clusterroles(Writer, WriterKind),
-    writer_creates_clusterrolebindings(Writer, WriterKind),
-    writer_binds_clusterroles(Writer, WriterKind, _).
+# ---- Feeding escalation.mg ----
+#
+# The permissions escalation.mg's mechanisms need, by resource and verb,
+# projected per role like clusterrole_rbac_perm.
 
-Decl rbac_write_perm(Writer, WriterKind, Mechanism, Binding, Role, ApiGroup, Resource, Verb)
+# (Action, Resource, Verb), each matched literally or by "*".
+escalation_action(/pods_create, "pods", "create").
+escalation_action(/pods_exec, "pods/exec", "create").
+escalation_action(/pods_attach, "pods/attach", "create").
+escalation_action(/sa_token, "serviceaccounts/token", "create").
+escalation_action(/sa_impersonate, "serviceaccounts", "impersonate").
+escalation_action(/user_impersonate, "users", "impersonate").
+escalation_action(/group_impersonate, "groups", "impersonate").
+
+escalation_matches(Resource, Verb, Action) :- escalation_action(Action, Resource, Verb).
+escalation_matches("*", Verb, Action) :- escalation_action(Action, _, Verb).
+escalation_matches(Resource, "*", Action) :- escalation_action(Action, Resource, _).
+escalation_matches("*", "*", Action) :- escalation_action(Action, _, _).
+
+core_api_group("").
+core_api_group("*").
+
+escalation_rule_action(Rule, Action) :-
+    policy_rule_perm(Rule, ApiGroup, Resource, _, Verb),
+    core_api_group(ApiGroup),
+    escalation_matches(Resource, Verb, Action).
+
+clusterrole_escalation_action(Role, Action) :-
+    escalation_rule_action(Rule, Action),
+    clusterrole_rule(Role, Rule).
+
+role_escalation_action(Ns, Role, Action) :-
+    escalation_rule_action(Rule, Action),
+    role_rule(Ns, Role, Rule).
+
+gained_action(Name, Kind, Ns, Action) :-
+    rbac_write_binding(Name, Kind, "bind", Ns, _, "ClusterRole", Role),
+    clusterrole_escalation_action(Role, Action).
+
+gained_action(Name, Kind, Ns, Action) :-
+    rbac_write_binding(Name, Kind, "bind", Ns, _, "Role", Role),
+    role_escalation_action(Ns, Role, Action).
+
+gained_action(Name, Kind, Ns, Action) :-
+    rbac_write_binding(Name, Kind, "escalate", Ns, _, _, _),
+    escalation_action(Action, _, _).
+
+# Pods and ServiceAccounts are namespaced, so a gain in every namespace
+# reaches them as a cluster-wide grant does.
+gained_namespaced_action(Name, Kind, Ns, Action) :-
+    gained_action(Name, Kind, Ns, Action),
+    Ns != "*".
+
+gained_namespaced_action(Name, Kind, "", Action) :-
+    gained_action(Name, Kind, "*", Action).
+
+# How each action reaches a ServiceAccount, with the mechanism labels
+# src/rbac uses: any ServiceAccount in the namespace, or one a pod there
+# runs as.
+action_reaches_serviceaccount(/pods_create, "pod-create").
+action_reaches_serviceaccount(/sa_token, "token").
+action_reaches_serviceaccount(/sa_impersonate, "impersonate").
+action_reaches_pod(/pods_exec, "pod-exec").
+action_reaches_pod(/pods_attach, "pod-exec").
+
+gained_reachable_sa(Name, Kind, SANs, SAName, Mechanism) :-
+    gained_namespaced_action(Name, Kind, SANs, Action),
+    action_reaches_serviceaccount(Action, Mechanism),
+    serviceaccount(SANs, SAName, _).
+
+gained_reachable_sa(Name, Kind, SANs, SAName, Mechanism) :-
+    gained_namespaced_action(Name, Kind, "", Action),
+    action_reaches_serviceaccount(Action, Mechanism),
+    serviceaccount(SANs, SAName, _).
+
+gained_reachable_sa(Name, Kind, PodNs, SAName, Mechanism) :-
+    gained_namespaced_action(Name, Kind, PodNs, Action),
+    action_reaches_pod(Action, Mechanism),
+    pod_sa(PodNs, _, SAName).
+
+gained_reachable_sa(Name, Kind, PodNs, SAName, Mechanism) :-
+    gained_namespaced_action(Name, Kind, "", Action),
+    action_reaches_pod(Action, Mechanism),
+    pod_sa(PodNs, _, SAName).
+
+Decl gained_escalation_hop(Name, Kind, Target, Mechanism)
   descr [
-    doc("Permissions Writer can grant itself cluster-wide through rbac_write_role. Through escalate that is every permission, written as * for apiGroup, resource and verb."),
-    arg(Writer, "user name, system:serviceaccount:<ns>:<name>, or group name"),
-    arg(WriterKind, "/principal for a user or ServiceAccount, /group for a group"),
-    arg(Mechanism, "bind or escalate, as in rbac_write_role"),
-    arg(Binding, "as in rbac_write_role"),
-    arg(Role, "as in rbac_write_role"),
-    arg(ApiGroup, "API group; * is a literal wildcard"),
-    arg(Resource, "resource or resource/subresource; * is a literal wildcard"),
-    arg(Verb, "verb; * is a literal wildcard")
+    doc("Like subject_escalation_hop, through a role binding subject (Kind, Name) can grant itself by writing RBAC objects (rbac_write_binding) rather than its own grants. Kept apart from escalation_hop, which answers what a principal may do now."),
+    arg(Name, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
+    arg(Kind, "/user, /group or /serviceaccount"),
+    arg(Target, "the user or ServiceAccount whose identity can then be assumed"),
+    arg(Mechanism, "pod-create, token, impersonate or pod-exec")
   ].
 
-rbac_write_perm(Writer, WriterKind, "bind", Binding, Role, ApiGroup, Resource, Verb) :-
-    rbac_write_role(Writer, WriterKind, "bind", Binding, Role),
-    clusterrole_rule(Role, Rule),
-    policy_rule_perm(Rule, ApiGroup, Resource, _, Verb).
+gained_escalation_hop(Name, Kind, Target, Mechanism) :-
+    gained_reachable_sa(Name, Kind, SANs, SAName, Mechanism)
+    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
 
-rbac_write_perm(Writer, WriterKind, "escalate", Binding, Role, "*", "*", "*") :-
-    rbac_write_role(Writer, WriterKind, "escalate", Binding, Role).
+# Users and groups are cluster-scoped: only a cluster-wide gain counts.
+gained_escalation_hop(Name, Kind, Target, "impersonate") :-
+    gained_action(Name, Kind, "", /user_impersonate),
+    user_has_own_grant(Target).
+
+gained_group_impersonate(Name, Kind) :-
+    gained_action(Name, Kind, "", /group_impersonate).
+
+# The escalation closure of escalation.mg, continued through these hops:
+# from a principal as it logs in, from an identity assumed on the way, and
+# from a group.
+controls_identity(P, Target) :-
+    principal_subject(P, Kind, Name),
+    gained_escalation_hop(Name, Kind, Target, _),
+    P != Target.
+
+assumed_escalation_hop(Identity, Target) :-
+    assumed_subject(Identity, Kind, Name),
+    gained_escalation_hop(Name, Kind, Target, _).
+
+group_escalation_hop(Group, Target) :-
+    gained_escalation_hop(Group, /group, Target, _).
+
+controls_group(P, Group) :-
+    principal_subject(P, Kind, Name),
+    gained_group_impersonate(Name, Kind),
+    group_has_grant(Group).
+
+assumed_group_impersonate(Identity) :-
+    assumed_subject(Identity, Kind, Name),
+    gained_group_impersonate(Name, Kind).
+
+group_controls_group(Group, Other) :-
+    gained_group_impersonate(Group, /group),
+    group_has_grant(Other),
+    Group != Other.
+
+# A user or group that can grant itself a role holds grants of its own,
+# which impersonating it brings.
+user_has_own_grant(Username) :-
+    rbac_write_binding(Username, /user, _, _, _, _, _).
+
+group_has_grant(Group) :-
+    rbac_write_binding(Group, /group, _, _, _, _, _).

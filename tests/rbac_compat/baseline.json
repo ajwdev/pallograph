@@ -5,18 +5,11 @@
   "aggregation-shapes": {},
   "aggregation-without-sources": {},
   "bootstrap-v1.37": {
-    "write under-grant: principal-serviceaccount": 45,
-    "write under-grant: request-write-create-clusterrolebindings": 73,
-    "write under-grant: request-write-create-clusterroles": 1,
-    "write under-grant: request-write-create-rolebindings": 153,
-    "write under-grant: request-write-create-roles": 2,
-    "write under-grant: request-write-update-clusterrolebindings": 89,
-    "write under-grant: request-write-update-clusterroles": 10,
-    "write under-grant: request-write-update-rolebindings": 11,
-    "write under-grant: total": 339,
-    "write under-grant: write-allowed-by-covering-rules": 39,
-    "write under-grant: write-allowed-by-escalate": 6,
-    "write under-grant: write-allowed-by-system-masters": 294
+    "write under-grant: principal-serviceaccount": 39,
+    "write under-grant: request-write-update-clusterrolebindings": 35,
+    "write under-grant: request-write-update-rolebindings": 4,
+    "write under-grant: total": 39,
+    "write under-grant: write-allowed-by-covering-rules": 39
   },
   "impersonation": {
     "impersonate over-grant: denied-by-resource-names": 14,
@@ -28,33 +21,11 @@
   "known-over-grants": {},
   "names-urls-subresources": {},
   "rbac-writes": {
-    "write under-grant: principal-serviceaccount": 19,
-    "write under-grant: request-write-create-clusterrolebindings": 35,
-    "write under-grant: request-write-create-clusterroles": 2,
-    "write under-grant: request-write-create-rolebindings": 24,
-    "write under-grant: request-write-create-roles": 2,
-    "write under-grant: request-write-update-clusterrolebindings": 36,
-    "write under-grant: request-write-update-clusterroles": 2,
-    "write under-grant: request-write-update-rolebindings": 6,
-    "write under-grant: request-write-update-roles": 1,
-    "write under-grant: total": 108,
-    "write under-grant: write-allowed-by-bind": 97,
-    "write under-grant: write-allowed-by-covering-rules": 4,
-    "write under-grant: write-allowed-by-escalate": 7
+    "write under-grant: request-write-create-clusterrolebindings": 4,
+    "write under-grant: total": 4,
+    "write under-grant: write-allowed-by-covering-rules": 4
   },
   "resource-names-and-aggregation": {},
-  "smoke": {
-    "write under-grant: principal-serviceaccount": 47,
-    "write under-grant: request-write-create-clusterrolebindings": 20,
-    "write under-grant: request-write-create-clusterroles": 2,
-    "write under-grant: request-write-create-rolebindings": 44,
-    "write under-grant: request-write-create-roles": 4,
-    "write under-grant: request-write-update-clusterrolebindings": 14,
-    "write under-grant: request-write-update-clusterroles": 4,
-    "write under-grant: request-write-update-rolebindings": 6,
-    "write under-grant: total": 94,
-    "write under-grant: write-allowed-by-bind": 84,
-    "write under-grant: write-allowed-by-escalate": 10
-  },
+  "smoke": {},
   "subjects-and-groups": {}
 }

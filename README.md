@@ -165,8 +165,8 @@ The rules live in [`rules/`](rules/) as plain Mangle files. `base.mg` projects
 raw objects into typed relations; the three `rbac_roles.mg`, `rbac_subjects.mg`
 and `rbac.mg` files model RBAC (see below); `escalation.mg` models identity
 theft paths (exec into a pod, mint a token, impersonate); `rbac_write.mg`
-models granting yourself a ClusterRole by writing RBAC objects (`bind`,
-`escalate`); `labels.mg` implements label selectors; `summary.mg` does
+models granting yourself a role by writing RBAC objects (`bind`,
+`escalate`) and continues those paths through it; `labels.mg` implements label selectors; `summary.mg` does
 inventory counts. `build.rs` compiles every rule file at build time, so a
 broken rule fails `cargo build` instead of your demo.
 
@@ -239,7 +239,8 @@ single-step relations of its escalation rules; the table in
   per world. Every authorization request matches the authorizer exactly.
   The known gaps are in the escalation questions: impersonation grants
   limited by resourceNames, which the escalation rules ignore, and RBAC
-  writes, which they do not model yet.
+  writes allowed because the writer already holds every rule written,
+  which gain it nothing and so are left out.
 - `hack/rbac-compat.sh -s SEED -n COUNT` is the fuzz tier: it generates
   random worlds from a seed, decides them with the oracle, and reports
   worlds whose mismatches the curated worlds do not cover.
