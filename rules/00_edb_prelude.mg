@@ -56,6 +56,13 @@ Decl user_groups(Username, Group)
   ]
   bound [/string, /string].
 
+Decl cluster_admin_allowed(Principal)
+  descr [
+    doc("Principals permitted to hold cluster-admin, supplied by the caller; empty by default, load an approval closure at runtime. A gate rule subtracts these so an approved admin is not flagged (see examples/cluster-admin-approved/)."),
+    arg(Principal, "a user name, or system:serviceaccount:<namespace>:<name> for a ServiceAccount")
+  ]
+  bound [/string].
+
 Decl access_request(Id, User, Namespace, ApiGroup, Resource, Subresource, Name, Verb, Path)
   descr [
     doc("Authorization requests to decide, as the kube-apiserver sees them; answered by rbac_allowed."),

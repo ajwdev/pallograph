@@ -428,3 +428,47 @@ fn diff_relation_unknown_relation_exits_2() {
         stderr(&out)
     );
 }
+
+// The cluster-admin approval view is not shipped; it is the
+// examples/cluster-admin-approved/ recipe, sourced here (relative to the
+// crate root, which is the script's working directory).
+const CA_VIEW: &str = "examples/cluster-admin-approved/cluster-admin-approved.mg";
+
+#[test]
+fn diff_relation_shows_unexpected_cluster_admin() {
+    // With an empty approval closure, the delta's new cluster-admin shows as
+    // an added row in the example's unexpected_cluster_admin view.
+    let ws = Workspace::new();
+    let admin = ws.manifests("admin", ADMIN_GRANT);
+    let out = ws.run_script(&format!(
+        "::source {CA_VIEW}\n\
+         ::snapshot base\n\
+         ::apply-delta - {admin}\n\
+         ::diff-relation base unexpected_cluster_admin\n"
+    ));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains("+ String(\"eve@example.com\")"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn diff_relation_approved_admin_absent() {
+    // Approving the principal in the closure keeps it out of
+    // unexpected_cluster_admin, so the relation diff shows no change.
+    let ws = Workspace::new();
+    let admin = ws.manifests("admin", ADMIN_GRANT);
+    let out = ws.run_script(&format!(
+        "+cluster_admin_allowed(\"eve@example.com\")\n\
+         ::source {CA_VIEW}\n\
+         ::snapshot base\n\
+         ::apply-delta - {admin}\n\
+         ::diff-relation base unexpected_cluster_admin\n"
+    ));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let stdout = stdout(&out);
+    assert!(stdout.contains("(no changes)"), "{stdout}");
+    assert!(!stdout.contains("eve@example.com"), "{stdout}");
+}

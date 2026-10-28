@@ -123,6 +123,8 @@ escalation and the REPL commands that catch it:
   NodePool can ever satisfy.
 - [`indirect-perm`](examples/indirect-perm/): rebuild the old `indirect_perm`
   table, permissions borrowed through escalation, as a view.
+- [`cluster-admin-approved`](examples/cluster-admin-approved/): gate
+  cluster-admins against a security-approved closure loaded as Mangle facts.
 
 ## Configuration
 

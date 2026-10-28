@@ -88,6 +88,12 @@ Decl user_is_cluster_admin(UserName)
 user_is_cluster_admin(UserName) :-
     direct_perm(UserName, /user, "", "*", "*", /any, "*").
 
+# The approval gate (unexpected_cluster_admin = cluster-admins minus the
+# cluster_admin_allowed closure) is not shipped: the closure and policy are
+# the operator's. The EDB hook cluster_admin_allowed is declared empty in
+# 00_edb_prelude.mg; load a closure and the view from Mangle files. See
+# examples/cluster-admin-approved/.
+
 # PolicyRules granting a wildcard verb. The two checks below look this up by
 # the Rule struct. The interpreter indexes a struct column by its field count
 # alone, so a lookup into all of policy_rule_perm would return nearly every
