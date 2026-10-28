@@ -1319,6 +1319,45 @@ impl DdSession {
                                 continue;
                             }
 
+                            // The layer dataflow can only read relations that are
+                            // already materialized (`traces`) or built by an earlier
+                            // stratum in this same batch. A rule that reads anything
+                            // else — most importantly a negated relation that was
+                            // never declared, derived, or given facts — has no input
+                            // on the layer. The spawn path registers every such
+                            // relation as an empty input (so an antijoin against it
+                            // keeps every row, matching the interpreter, which treats
+                            // a missing negated relation as empty); the layer cannot
+                            // create new persistent input handles, so it falls back to
+                            // a rebuild instead. The rebuild registers the relation as
+                            // an empty input and keeps it live, so facts added to it
+                            // afterwards update the antijoin incrementally. Without
+                            // this, `build_rule`'s antijoin step fails with "antijoin
+                            // relation not found" rather than matching the interpreter.
+                            let mut available: std::collections::HashSet<&str> =
+                                traces.keys().map(String::as_str).collect();
+                            for stratum in &to_layer {
+                                for rule in &stratum.rules {
+                                    available.insert(rule.head_rel.as_str());
+                                }
+                            }
+                            let all_inputs_available = to_layer.iter().all(|stratum| {
+                                stratum.rules.iter().all(|rule| {
+                                    rule.steps.iter().all(|step| match step {
+                                        Step::Scan { rel }
+                                        | Step::Join { rel, .. }
+                                        | Step::Antijoin { rel, .. } => {
+                                            available.contains(rel.as_str())
+                                        }
+                                        _ => true,
+                                    })
+                                })
+                            });
+                            if !all_inputs_available {
+                                let _ = ack.send(AddOutcome::NeedsRebuild);
+                                continue;
+                            }
+
                             // Layer a new dataflow that imports all current traces.
                             // This runs synchronously on the worker thread, so TraceAgent (!Send)
                             // is fine as a captured variable in the FnOnce closure.
