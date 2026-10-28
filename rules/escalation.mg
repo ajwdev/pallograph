@@ -55,6 +55,16 @@
 # The ResourceName column is ignored (_): a grant limited to some object names
 # still counts. That over-approximates, the safe side for finding escalation
 # paths.
+#
+# Impersonation is authorized per impersonated identity, as an impersonate
+# request on users, groups, uids, userextras or serviceaccounts (see
+# buildImpersonationRequests in k8s.io/apiserver's impersonation filter).
+# Only a ServiceAccount request carries a namespace, the ServiceAccount's
+# own, so subject_impersonatable_sa reaches ServiceAccounts in the grant's
+# namespace (every namespace for Ns = ""). The others are cluster-scoped
+# requests, which only a ClusterRoleBinding (Ns = "") matches, so the rules
+# below use grant_user_impersonate and grant_group_impersonate with Ns = ""
+# only. uids and userextras add nothing to a path and are not modeled.
 
 grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts/token", _, "create").
 grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts/token", _, "*").
@@ -219,8 +229,9 @@ subject_escalation_hop(Name, Kind, Target) :-
     subject_pod_creatable_sa(Name, Kind, SANs, SAName)
     |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
 
+# Cluster-wide grants only: impersonating a user is a cluster-scoped request.
 subject_escalation_hop(Name, Kind, Target) :-
-    grant_user_impersonate(Name, Kind, _),
+    grant_user_impersonate(Name, Kind, ""),
     user_has_own_grant(Target).
 
 # ---- Escalation from a principal ----
@@ -256,14 +267,15 @@ assumed_escalation_hop(Identity, Target) :-
     subject_escalation_hop(Name, Kind, Target).
 
 # Group impersonation, from a principal as it logs in and from an assumed
-# identity. Like user impersonation, the namespace of the grant is ignored.
+# identity. Like user impersonation, only a cluster-wide grant counts: a
+# RoleBinding allowing impersonate on groups allows nothing.
 perm_group_impersonate(P) :-
     principal_subject(P, Kind, Name),
-    grant_group_impersonate(Name, Kind, _).
+    grant_group_impersonate(Name, Kind, "").
 
 assumed_group_impersonate(Identity) :-
     assumed_subject(Identity, Kind, Name),
-    grant_group_impersonate(Name, Kind, _).
+    grant_group_impersonate(Name, Kind, "").
 
 group_has_grant(Group) :-
     direct_perm(Group, /group, _, _, _, _, _).
@@ -359,7 +371,7 @@ Decl group_controls_group(Group, Other)
   ].
 
 group_controls_group(Group, Other) :-
-    grant_group_impersonate(Group, /group, _),
+    grant_group_impersonate(Group, /group, ""),
     group_has_grant(Other),
     Group != Other.
 

@@ -357,11 +357,13 @@ impl RbacAccessModel {
             .any(|granted| permission_covers(granted, query))
     }
 
-    /// May impersonate groups, in any namespace, like
-    /// `perm_group_impersonate` in escalation.mg.
+    /// May impersonate groups, like `perm_group_impersonate` in
+    /// escalation.mg. Kubernetes checks this as a cluster-scoped request, so
+    /// only a cluster-wide grant (namespace "") counts.
     fn impersonates_groups(granted: &Permission) -> bool {
-        let (_, api_group, resource, verb) = granted;
-        value_covers(api_group, "")
+        let (namespace, api_group, resource, verb) = granted;
+        namespace.is_empty()
+            && value_covers(api_group, "")
             && value_covers(resource, "groups")
             && value_covers(verb, "impersonate")
     }
