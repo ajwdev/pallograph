@@ -43,7 +43,7 @@ Two ways to inspect it:
 - **Absolute** - "who is an un-approved cluster-admin right now":
   `?- unexpected_cluster_admin(P)` lists them.
 - **Per-PR** - "what did this change do to the un-approved set": after
-  `apply-delta base/ head/`, run
+  `k8s::apply-delta base/ head/`, run
   `diff-relation base unexpected_cluster_admin` to see the rows it added or
   removed.
 

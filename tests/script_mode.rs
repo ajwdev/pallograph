@@ -343,11 +343,11 @@ fn piped_repl_stays_forgiving() {
 
 #[test]
 fn apply_delta_add_then_access_diff_expands_exits_1() {
-    // Empty base, head adds mallory's grant: apply-delta onto live, then the
+    // Empty base, head adds mallory's grant: k8s::apply-delta onto live, then the
     // access-diff against the pre-delta snapshot finds the new permission.
     let ws = Workspace::new();
     let out = ws.run_script(&format!(
-        "::snapshot base\n::apply-delta - {}\nrbac::diff base\n",
+        "::snapshot base\nk8s::apply-delta - {}\nrbac::diff base\n",
         ws.rendered()
     ));
     assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
@@ -370,7 +370,7 @@ fn apply_delta_retracts_base_only_object_exits_0() {
     let out = ws.run_script(&format!(
         "k8s::load {rendered}\n\
          ::snapshot base\n\
-         ::apply-delta {rendered} -\n\
+         k8s::apply-delta {rendered} -\n\
          rbac::diff base\n",
         rendered = ws.rendered()
     ));
@@ -386,10 +386,10 @@ fn apply_delta_retracts_base_only_object_exits_0() {
 #[test]
 fn apply_delta_wrong_arity_exits_2() {
     let ws = Workspace::new();
-    let out = ws.run_script("::snapshot base\n::apply-delta onlyone\n");
+    let out = ws.run_script("::snapshot base\nk8s::apply-delta onlyone\n");
     assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
     assert!(
-        stderr(&out).contains("Usage: apply-delta"),
+        stderr(&out).contains("Usage: k8s::apply-delta"),
         "{}",
         stderr(&out)
     );
@@ -400,7 +400,7 @@ fn apply_delta_missing_side_exits_2() {
     let ws = Workspace::new();
     let missing = ws.dir.join("nonexistent");
     let out = ws.run_script(&format!(
-        "::snapshot base\n::apply-delta {} {}\n",
+        "::snapshot base\nk8s::apply-delta {} {}\n",
         ws.rendered(),
         missing.display()
     ));
@@ -416,7 +416,7 @@ fn diff_relation_shows_added_row() {
     let admin = ws.manifests("admin", ADMIN_GRANT);
     let out = ws.run_script(&format!(
         "::snapshot base\n\
-         ::apply-delta - {admin}\n\
+         k8s::apply-delta - {admin}\n\
          ::diff-relation base user_is_cluster_admin\n"
     ));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -433,7 +433,7 @@ fn diff_relation_no_change_reports_no_changes() {
     let admin = ws.manifests("admin", ADMIN_GRANT);
     let out = ws.run_script(&format!(
         "::snapshot base\n\
-         ::apply-delta - {admin}\n\
+         k8s::apply-delta - {admin}\n\
          ::diff-relation base sa_is_cluster_admin\n"
     ));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -467,7 +467,7 @@ fn diff_relation_shows_unexpected_cluster_admin() {
     let out = ws.run_script(&format!(
         "::source {CA_VIEW}\n\
          ::snapshot base\n\
-         ::apply-delta - {admin}\n\
+         k8s::apply-delta - {admin}\n\
          ::diff-relation base unexpected_cluster_admin\n"
     ));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -488,7 +488,7 @@ fn diff_relation_approved_admin_absent() {
         "+cluster_admin_allowed(\"eve@example.com\")\n\
          ::source {CA_VIEW}\n\
          ::snapshot base\n\
-         ::apply-delta - {admin}\n\
+         k8s::apply-delta - {admin}\n\
          ::diff-relation base unexpected_cluster_admin\n"
     ));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -553,6 +553,24 @@ fn rcfile_runs_before_the_script() {
         combined.contains("can reach") || combined.contains("effective_can"),
         "{combined}"
     );
+}
+
+#[test]
+fn bare_command_missing_args_shows_usage() {
+    // A known command invoked with no arguments is not "unknown": show its usage.
+    let ws = Workspace::new();
+    let out = ws.run_script("diff\n");
+    let combined = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(combined.contains("Usage: diff"), "{combined}");
+    assert!(!combined.contains("Unknown command: diff"), "{combined}");
+}
+
+#[test]
+fn bare_k8s_subcommand_missing_args_shows_usage() {
+    let ws = Workspace::new();
+    let out = ws.run_script("k8s::match\n");
+    let combined = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(combined.contains("Usage: k8s::match"), "{combined}");
 }
 
 #[test]

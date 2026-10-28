@@ -1,4 +1,4 @@
-# Recipe: review a PR with `apply-delta`
+# Recipe: review a PR with `k8s::apply-delta`
 
 A runnable end-to-end example of inspecting a PR against a tiny synthetic
 cluster: snapshot the live state, apply what merging the PR would do, and see
@@ -51,7 +51,7 @@ FAIL  7 new permission(s) granted
 
 Three distinct things:
 
-- **`apply-delta base/ head/`** applies the PR's effect to the live cluster:
+- **`k8s::apply-delta base/ head/`** applies the PR's effect to the live cluster:
   eve's binding added, pod-reader updated, bob's binding retracted,
   cluster-admin and alice-reader untouched (`+1 ~1 -1`, 2 unchanged).
 - **`rbac::diff base`** is the **pass/fail gate**: any permission expansion
@@ -71,7 +71,7 @@ closure.
 
 ## Things to try
 
-- **Brand-new chart** (empty base, everything is an add): `apply-delta - head/`.
-- **Chart deleted** (empty head, everything retracted): `apply-delta base/ -`.
+- **Brand-new chart** (empty base, everything is an add): `k8s::apply-delta - head/`.
+- **Chart deleted** (empty head, everything retracted): `k8s::apply-delta base/ -`.
 - **Scope the diagnostic** to any relation: `diff-relation base direct_perm`,
   or diff two snapshots: `diff-relation s1 s2 <relation>`.

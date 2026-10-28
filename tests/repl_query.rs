@@ -477,7 +477,7 @@ fn rollback_unknown_snapshot_is_refused() {
             "{args:?}: {stderr}"
         );
         assert!(
-            stderr.contains("Usage: ::rollback <name>"),
+            stderr.contains("Usage: rollback <name>"),
             "{args:?}: {stderr}"
         );
     }

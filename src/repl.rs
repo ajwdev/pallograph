@@ -52,7 +52,6 @@ fn command_completions() -> &'static [&'static str] {
         "smtlib",
         "alias",
         "unalias",
-        "apply-delta",
         "help",
         "quit",
         // Subsystem namespaces (a bare `rbac` completes to `rbac::`).
@@ -71,7 +70,33 @@ fn command_completions() -> &'static [&'static str] {
         "k8s::load",
         "k8s::match",
         "k8s::match-all",
+        "k8s::apply-delta",
     ]
+}
+
+/// Usage text for commands that take arguments, shown when one is invoked with
+/// no arguments (so a bare `diff` prints how to use it instead of "unknown
+/// command"). Subsystem rbac::/sched:: commands print their own usage via
+/// `rbac_command` / `sched_command`, so they are not listed here.
+fn command_usage(head: &str) -> Option<&'static str> {
+    Some(match head {
+        "why" => "why <pred>(<args>...)",
+        "query" => "query <body>   (or ?- <body>)",
+        "define" => "define <rule>.",
+        "source" => "source <src>",
+        "load" => "load <relation> <source>   (source is a file path or ! <cmd>)",
+        "snapshot" => "snapshot <name>",
+        "diff" => "diff <name>   or   diff <name1> <name2>",
+        "diff-relation" => "diff-relation <name> [name2] <relation>",
+        "smtlib" => "smtlib <relation> [relation ...]",
+        "k8s::load" => "k8s::load <src>   (a dir, .json file, or ! <kubectl args>)",
+        "k8s::match" => "k8s::match <Kind> <namespace> <selector>",
+        "k8s::match-all" => "k8s::match-all <namespace> <selector>",
+        "k8s::apply-delta" => {
+            "k8s::apply-delta <base> <head>   (a dir, .json file, or - for an empty side)"
+        }
+        _ => return None,
+    })
 }
 
 fn completion_pair(s: String) -> Pair {
@@ -463,6 +488,9 @@ fn print_subsystem_help(ns: &str) {
             );
             println!(
                 "  k8s::match-all <ns> <selector>         - objects of any Kind matching a kubectl selector"
+            );
+            println!(
+                "  k8s::apply-delta <base> <head>         - apply a PR's base->head object delta onto live"
             );
         }
         _ => {}
@@ -1404,7 +1432,7 @@ fn session(
                     }
                     let name = line.strip_prefix("::rollback").unwrap_or("").trim();
                     if name.is_empty() {
-                        command_error!("Usage: ::rollback <name>");
+                        command_error!("Usage: rollback <name>");
                         continue;
                     }
                     let Some(frozen) = snapshots.get(name) else {
@@ -1459,7 +1487,7 @@ fn session(
                             (s1, Some(s2))
                         }
                         _ => {
-                            command_error!("Usage: ::diff <name>  or  ::diff <name1> <name2>");
+                            command_error!("Usage: diff <name>  or  diff <name1> <name2>");
                             continue;
                         }
                     };
@@ -1533,7 +1561,7 @@ fn session(
                         [name1, name2, relation] => (*name1, Some(*name2), *relation),
                         _ => {
                             command_error!(
-                                "Usage: ::diff-relation <name> <relation>  or  ::diff-relation <name1> <name2> <relation>"
+                                "Usage: diff-relation <name> <relation>  or  diff-relation <name1> <name2> <relation>"
                             );
                             continue;
                         }
@@ -1651,14 +1679,14 @@ fn session(
                     continue;
                 }
 
-                if let Some(rest) = line.strip_prefix("::apply-delta ") {
+                if let Some(rest) = line.strip_prefix("::k8s::apply-delta ") {
                     if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
                     let args: Vec<&str> = rest.split_whitespace().collect();
                     let [base_arg, head_arg] = args.as_slice() else {
                         command_error!(
-                            "Usage: apply-delta <base> <head> (a dir, .json file, or - for an empty side)"
+                            "Usage: k8s::apply-delta <base> <head> (a dir, .json file, or - for an empty side)"
                         );
                         continue;
                     };
@@ -1706,7 +1734,7 @@ fn session(
                         Some(idx) => (&rest[..idx], rest[idx + 1..].trim()),
                         None => {
                             command_error!(
-                                "Usage: ::load <relation> <source>  (source is a file path or ! <cmd>)"
+                                "Usage: load <relation> <source>  (source is a file path or ! <cmd>)"
                             );
                             continue;
                         }
@@ -1921,19 +1949,31 @@ fn session(
                     }
                     continue;
                 }
-                if line.strip_prefix("::k8s::").is_some() {
-                    command_error!(
-                        "Unknown k8s command. Available: k8s::load, k8s::match, k8s::match-all."
-                    );
+                if let Some(rest) = line.strip_prefix("::k8s::") {
+                    // A known k8s command invoked with no arguments: show usage.
+                    let head = format!("k8s::{}", rest.split_whitespace().next().unwrap_or(""));
+                    if let Some(usage) = command_usage(&head) {
+                        command_error!("Usage: {usage}");
+                    } else {
+                        command_error!(
+                            "Unknown k8s command. Available: k8s::load, k8s::match, k8s::match-all, k8s::apply-delta."
+                        );
+                    }
                     continue;
                 }
 
-                // Not a known command. Commands are bare paths (see `help`);
-                // queries go through `?-`.
+                // Not matched above. If the first path token is a known command
+                // that takes arguments, it was invoked with none: show its usage.
+                // Otherwise it is genuinely unknown.
                 let shown = line.strip_prefix("::").unwrap_or(&line);
-                command_error!(
-                    "Unknown command: {shown}. Type `help` for commands, or `?- {shown}` to run it as a query."
-                );
+                let head = shown.split_whitespace().next().unwrap_or(shown);
+                if let Some(usage) = command_usage(head) {
+                    command_error!("Usage: {usage}");
+                } else {
+                    command_error!(
+                        "Unknown command: {shown}. Type `help` for commands, or `?- {shown}` to run it as a query."
+                    );
+                }
             }
             Err(ReadlineError::Interrupted) => continue,
             Err(ReadlineError::Eof) => break,
