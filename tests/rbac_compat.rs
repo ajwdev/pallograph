@@ -54,12 +54,17 @@
 //! | impersonate group G                    | `perm_group_impersonate(P)`, `group_has_grant(G)`       |
 //! | create ClusterRoleBinding of R         | `rbac_write_role(P, /principal, "bind", "", R)`         |
 //! | update ClusterRoleBinding B (of R)     | `rbac_write_role(P, /principal, "bind", B, R)`          |
-//! | update ClusterRole R, bound to P       | `rbac_write_role(P, /principal, "escalate", _, R)`      |
-//! | any other write                        | never: not modeled                                      |
+//! | create RoleBinding in ns of K R        | `rbac_write_binding_direct(P, _, "bind", ns, "", K, R)`, or `*` for ns when K is ClusterRole |
+//! | update RoleBinding ns/B (of K R)       | `rbac_write_binding_direct(P, _, "bind", ns, B, K, R)`  |
+//! | create ClusterRole                     | `rbac_role_writable(P, _, "", "ClusterRole", "")` |
+//! | update ClusterRole R                   | `rbac_role_writable(P, _, "", "ClusterRole", R)` |
+//! | create Role in ns                      | `rbac_role_writable(P, _, ns, "Role", "")`, or `*` for ns |
+//! | update Role ns/R                       | `rbac_role_writable(P, _, ns, "Role", R)`        |
+//! | any write, P in system:masters or holding every permission | `rbac_write_anything(P)`             |
 //!
-//! `rbac_write_role` comes from rules/rbac_write.mg; without that file
-//! every write is answered "no", so its absence shows as write
-//! under-grants in the baseline rather than an error. Buckets of these
+//! P's rows are those with Name P and Kind /user or /serviceaccount.
+//!
+//! The write relations come from rules/rbac_write.mg. Buckets of these
 //! kinds are prefixed with the kind, e.g. "impersonate over-grant: total".
 //! A write the principal's own rules already cover is allowed by
 //! Kubernetes (tagged write-allowed-by-covering-rules) but gains nothing,
@@ -170,6 +175,14 @@ fn read_ndjson(path: &Path) -> Result<Vec<Json>> {
 
 fn string_field(row: &Json, field: &str) -> String {
     row[field].as_str().unwrap_or_default().to_string()
+}
+
+/// (kind, name) of a write question's roleRef.
+fn role_ref_of(row: &Json) -> (String, String) {
+    (
+        string_field(&row["roleRef"], "kind"),
+        string_field(&row["roleRef"], "name"),
+    )
 }
 
 fn id_field(row: &Json) -> Result<i64> {
@@ -352,12 +365,48 @@ fn decide_escalation(
             })
             .collect();
 
+    // (writer, mechanism, namespace, binding, role kind, role) and
+    // (writer, namespace, role kind, role) for users and ServiceAccounts.
+    let write_bindings: BTreeSet<[String; 6]> =
+        text_rows(&results, "rbac_write_binding_direct", 7)?
+            .into_iter()
+            .filter(|row| row[1] == "/user" || row[1] == "/serviceaccount")
+            .map(|row| {
+                [
+                    row[0].clone(),
+                    row[2].clone(),
+                    row[3].clone(),
+                    row[4].clone(),
+                    row[5].clone(),
+                    row[6].clone(),
+                ]
+            })
+            .collect();
+    let writable_roles: BTreeSet<[String; 4]> = text_rows(&results, "rbac_role_writable", 5)?
+        .into_iter()
+        .filter(|row| row[1] == "/user" || row[1] == "/serviceaccount")
+        .map(|row| {
+            [
+                row[0].clone(),
+                row[2].clone(),
+                row[3].clone(),
+                row[4].clone(),
+            ]
+        })
+        .collect();
+
+    let write_anything: BTreeSet<String> = text_rows(&results, "rbac_write_anything", 1)?
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect();
+
     let mut allowed = BTreeSet::new();
     for question in questions {
         let user = string_field(question, "user");
         let name = string_field(question, "name");
         let resource = string_field(question, "resource");
         let verb = string_field(question, "verb");
+        let namespace = string_field(question, "namespace");
         let role_ref = || string_field(&question["roleRef"], "name");
         let writes = |mechanism: &str, binding: &str, role: &str| {
             write_roles.contains(&(user.clone(), mechanism.into(), binding.into(), role.into()))
@@ -373,14 +422,41 @@ fn decide_escalation(
                 group_impersonators.contains(&user) && groups_with_grants.contains(&name)
             }
             ("impersonate", other, _) => bail!("cannot impersonate {other}"),
+            ("write", _, _) if write_anything.contains(&user) => true,
             ("write", "clusterrolebindings", "create") => writes("bind", "", &role_ref()),
             ("write", "clusterrolebindings", "update") => writes("bind", &name, &role_ref()),
-            ("write", "clusterroles", "update") => {
-                write_roles.iter().any(|(writer, mechanism, _, role)| {
-                    *writer == user && mechanism == "escalate" && *role == name
-                })
+            ("write", "rolebindings", verb) => {
+                let binding = if verb == "update" { name.as_str() } else { "" };
+                let (kind, role) = role_ref_of(question);
+                let binds = |ns: &str| {
+                    write_bindings.contains(&[
+                        user.clone(),
+                        "bind".into(),
+                        ns.into(),
+                        binding.into(),
+                        kind.clone(),
+                        role.clone(),
+                    ])
+                };
+                binds(&namespace) || (binding.is_empty() && kind == "ClusterRole" && binds("*"))
             }
-            ("write", _, _) => false,
+            ("write", "clusterroles", verb) => {
+                let role = if verb == "update" { name.as_str() } else { "" };
+                writable_roles.contains(&[
+                    user.clone(),
+                    "".into(),
+                    "ClusterRole".into(),
+                    role.into(),
+                ])
+            }
+            ("write", "roles", verb) => {
+                let role = if verb == "update" { name.as_str() } else { "" };
+                let writable = |ns: &str| {
+                    writable_roles.contains(&[user.clone(), ns.into(), "Role".into(), role.into()])
+                };
+                writable(&namespace) || (role.is_empty() && writable("*"))
+            }
+            ("write", other, _) => bail!("cannot write {other}"),
             (other, _, _) => bail!("unexpected question kind {other:?}"),
         };
         if answer {

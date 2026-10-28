@@ -13,7 +13,9 @@
 //!
 //! It also indexes who reaches whom through escalation: `controls_identity`
 //! and `controls_group`, and from a group's own grants
-//! `group_controls_identity` and `group_controls_group`. ResourceName is
+//! `group_controls_identity` and `group_controls_group`, and the roles each
+//! binding subject can grant itself by writing RBAC objects
+//! (`rbac_write_binding`). ResourceName is
 //! projected away: these consumers have no object-name dimension, so a grant
 //! limited to some names still counts.
 //!
@@ -190,9 +192,13 @@ impl fmt::Display for SubjectDisplay<'_> {
 pub type Permission = (String, String, String, String);
 
 /// A permission entry's namespace covers a queried one when it is cluster-wide
-/// ("") or equal.
+/// (""), equal, or "*" and the query names a namespace. "*" is every
+/// namespace but not cluster-wide: only a role gained through RoleBindings in
+/// every namespace (`rbac_write_binding`) has it.
 pub fn ns_covers(entry_namespace: &str, query_namespace: &str) -> bool {
-    entry_namespace.is_empty() || entry_namespace == query_namespace
+    entry_namespace.is_empty()
+        || entry_namespace == query_namespace
+        || (entry_namespace == "*" && !query_namespace.is_empty())
 }
 
 /// A permission field covers a queried value when it is `*` (grants all) or an
@@ -208,6 +214,218 @@ pub fn grant_covers(granted: &Permission, query: &Permission) -> bool {
         && value_covers(&granted.1, &query.1)
         && value_covers(&granted.2, &query.2)
         && value_covers(&granted.3, &query.3)
+}
+
+/// A Role is keyed by ("Role", namespace, name); a ClusterRole by
+/// ("ClusterRole", "", name).
+pub type RoleKey = (&'static str, String, String);
+
+/// A role a binding subject can grant itself by writing RBAC objects
+/// (`rbac_write_binding` in rules/rbac_write.mg).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RbacWrite {
+    /// "bind" or "escalate", the verb that lets the write through.
+    pub mechanism: String,
+    /// Where the role applies: "" cluster-wide (a ClusterRoleBinding), a
+    /// namespace, or "*" for a RoleBinding in every namespace.
+    pub namespace: String,
+    /// The existing binding used, or empty for a new one.
+    pub binding: String,
+    /// "Role" or "ClusterRole".
+    pub role_kind: &'static str,
+    /// The role, or empty for a new one.
+    pub role: String,
+}
+
+impl RbacWrite {
+    /// The permissions this write grants: every permission for escalate,
+    /// else the role's, in `namespace`.
+    pub fn permissions(&self, role_rules: &RoleRules) -> Vec<Permission> {
+        if self.mechanism == "escalate" {
+            return vec![(
+                self.namespace.clone(),
+                "*".to_string(),
+                "*".to_string(),
+                "*".to_string(),
+            )];
+        }
+        let role_namespace = if self.role_kind == "Role" {
+            self.namespace.clone()
+        } else {
+            String::new()
+        };
+        role_rules
+            .permissions_of(&(self.role_kind, role_namespace, self.role.clone()))
+            .map(|(api_group, resource, verb)| {
+                (
+                    self.namespace.clone(),
+                    api_group.clone(),
+                    resource.clone(),
+                    verb.clone(),
+                )
+            })
+            .collect()
+    }
+}
+
+/// Who can make an RBAC write: a binding subject (keyed by
+/// `Subject::principal`) as it logs in or, for a group, with its own grants;
+/// or, with `assumed`, a user with `user_groups` groups as it acts when
+/// assumed through escalation, without them (writer kind `/assumed_user` in
+/// rules/rbac_write.mg).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Writer {
+    pub subject: Subject,
+    pub assumed: bool,
+}
+
+impl Writer {
+    pub fn login(subject: &Subject) -> Self {
+        Self {
+            subject: subject.principal(),
+            assumed: false,
+        }
+    }
+}
+
+/// Rows of `relation` that start with a writer, `(Name, Kind, ...)` with
+/// Kind a subject kind or `/assumed_user`, followed by N strings.
+pub fn parse_writer_rows<const N: usize>(
+    relation: &str,
+    rows: &[Vec<Value>],
+) -> Vec<(Writer, [String; N])> {
+    rows.iter()
+        .filter_map(|row| {
+            let parsed = match row.as_slice() {
+                [Value::String(name), kind, rest @ ..] if rest.len() == N => (|| {
+                    let writer = match kind {
+                        Value::Name(kind) if kind.as_str() == "/assumed_user" => Writer {
+                            subject: Subject::username(name.as_str()),
+                            assumed: true,
+                        },
+                        kind => Writer::login(&Subject::new(
+                            SubjectKind::from_value(kind)?,
+                            name.clone(),
+                        )),
+                    };
+                    let rest: Vec<String> = rest
+                        .iter()
+                        .map(|value| string(value).cloned())
+                        .collect::<Option<_>>()?;
+                    Some((writer, rest.try_into().ok()?))
+                })(),
+                _ => None,
+            };
+            if parsed.is_none() {
+                unexpected_row(relation, row);
+            }
+            parsed
+        })
+        .collect()
+}
+
+/// `rbac_write_binding(Name, Kind, Mechanism, Namespace, Binding,
+/// RoleKind, Role)` rows, or those of `rbac_write_binding_direct`, as
+/// (writer, write).
+pub fn parse_rbac_write_binding(relation: &str, rows: &[Vec<Value>]) -> Vec<(Writer, RbacWrite)> {
+    parse_writer_rows::<5>(relation, rows)
+        .into_iter()
+        .filter_map(
+            |(writer, [mechanism, namespace, binding, role_kind, role])| {
+                let role_kind = match role_kind.as_str() {
+                    "Role" => "Role",
+                    "ClusterRole" => "ClusterRole",
+                    _ => {
+                        unexpected_row(
+                            relation,
+                            &[
+                                Value::String(writer.subject.name.clone()),
+                                Value::String(role_kind),
+                            ],
+                        );
+                        return None;
+                    }
+                };
+                Some((
+                    writer,
+                    RbacWrite {
+                        mechanism,
+                        namespace,
+                        binding,
+                        role_kind,
+                        role,
+                    },
+                ))
+            },
+        )
+        .collect()
+}
+
+/// The rules of each Role and ClusterRole (role_rule and clusterrole_rule),
+/// after aggregation, and the (apigroup, resource, verb) each rule grants
+/// (policy_rule_perm, ResourceName dropped). As in rbac_roles.mg, a rule's
+/// permissions are stored once per distinct PolicyRule value and joined with
+/// a role on demand, not copied into every role that has the rule.
+#[derive(Default)]
+pub struct RoleRules {
+    pub rules: HashMap<RoleKey, Vec<Value>>,
+    permissions: HashMap<Value, Vec<(String, String, String)>>,
+}
+
+impl RoleRules {
+    pub fn from_scan(scan: &dyn Fn(&str) -> Vec<Vec<Value>>) -> Self {
+        let mut role_rules = Self::default();
+        for row in scan("policy_rule_perm") {
+            match row.as_slice() {
+                [
+                    rule,
+                    Value::String(api_group),
+                    Value::String(resource),
+                    Value::Name(_) | Value::String(_),
+                    Value::String(verb),
+                ] => role_rules
+                    .permissions
+                    .entry(rule.clone())
+                    .or_default()
+                    .push((api_group.clone(), resource.clone(), verb.clone())),
+                _ => unexpected_row("policy_rule_perm", &row),
+            }
+        }
+
+        let mut add = |key: RoleKey, rule: &Value| {
+            role_rules.rules.entry(key).or_default().push(rule.clone());
+        };
+        for row in scan("role_rule") {
+            match row.as_slice() {
+                [Value::String(namespace), Value::String(role), rule] => {
+                    add(("Role", namespace.clone(), role.clone()), rule)
+                }
+                _ => unexpected_row("role_rule", &row),
+            }
+        }
+        for row in scan("clusterrole_rule") {
+            match row.as_slice() {
+                [Value::String(role), rule] => {
+                    add(("ClusterRole", String::new(), role.clone()), rule)
+                }
+                _ => unexpected_row("clusterrole_rule", &row),
+            }
+        }
+        role_rules
+    }
+
+    /// (apigroup, resource, verb) the role `key` grants.
+    pub fn permissions_of<'a>(
+        &'a self,
+        key: &RoleKey,
+    ) -> impl Iterator<Item = &'a (String, String, String)> + use<'a> {
+        self.rules
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter_map(|rule| self.permissions.get(rule))
+            .flatten()
+    }
 }
 
 /// Report a row whose shape does not match what the rules declare.
@@ -373,7 +591,9 @@ pub fn parse_strings<const N: usize>(relation: &str, rows: &[Vec<Value>]) -> Vec
 /// A principal's direct grants are those of every subject it acts as: a
 /// known user or ServiceAccount its own and its groups', a group its own.
 /// Its effective grants add the grants of every identity and group it
-/// controls through escalation. Neither is materialized per principal: with
+/// controls through escalation, and those any subject it acts as can grant
+/// itself by writing RBAC objects (`gained`). An identity or group reached
+/// through escalation brings its gained grants along with its own. Neither is materialized per principal: with
 /// many clusters, copying each group's grants to every member and each
 /// target's grants to every controller multiplies, so the tables keep grants
 /// per binding subject and the edges between principals, and consumers
@@ -394,6 +614,16 @@ pub struct PermissionTables {
     /// The identities (by username) and groups each principal controls
     /// through escalation. Never contains the principal itself.
     pub escalation_targets: HashMap<Subject, BTreeSet<Subject>>,
+    /// The roles each binding subject can grant itself by writing RBAC
+    /// objects, keyed like `grants`.
+    pub rbac_writes: HashMap<Writer, BTreeSet<RbacWrite>>,
+    /// The permissions those roles grant, per binding subject.
+    pub gained: HashMap<Writer, HashSet<Permission>>,
+    /// Users with `user_groups` groups, who act without them when assumed
+    /// through escalation.
+    users_with_groups: HashSet<String>,
+    /// The rules each role has and the permissions each rule grants.
+    pub role_rules: RoleRules,
     /// `direct_entries` and `effective_entries`, built on first use.
     direct_entries: OnceLock<HashSet<PermissionEntry>>,
     effective_entries: OnceLock<HashSet<PermissionEntry>>,
@@ -462,12 +692,36 @@ impl PermissionTables {
             add_target(Subject::group(group), Subject::group(other));
         }
 
+        let role_rules = RoleRules::from_scan(scan);
+        let mut rbac_writes: HashMap<Writer, BTreeSet<RbacWrite>> = HashMap::new();
+        let mut gained: HashMap<Writer, HashSet<Permission>> = HashMap::new();
+        for (writer, write) in
+            parse_rbac_write_binding("rbac_write_binding", &scan("rbac_write_binding"))
+        {
+            gained
+                .entry(writer.clone())
+                .or_default()
+                .extend(write.permissions(&role_rules));
+            rbac_writes.entry(writer).or_default().insert(write);
+        }
+        let users_with_groups: HashSet<String> = scan("user_groups")
+            .into_iter()
+            .filter_map(|row| match row.first() {
+                Some(Value::String(user)) => Some(user.clone()),
+                _ => None,
+            })
+            .collect();
+
         Self {
             grants,
             principal_subjects,
             assumed_subjects,
             group_members,
             escalation_targets,
+            rbac_writes,
+            gained,
+            users_with_groups,
+            role_rules,
             ..Self::default()
         }
     }
@@ -526,12 +780,69 @@ impl PermissionTables {
         self.grants_of(self.subjects_of(principal))
     }
 
-    /// The grants an escalation `target` brings (see `target_subjects`).
+    /// The writers `principal` acts as when it logs in: its subjects.
+    pub fn login_writers(&self, principal: &Subject) -> Vec<Writer> {
+        let writers: BTreeSet<Writer> = self
+            .subjects_of(principal)
+            .iter()
+            .map(Writer::login)
+            .collect();
+        writers.into_iter().collect()
+    }
+
+    /// The writers an escalation `target` acts as (see `target_subjects`):
+    /// a group itself, or an identity's groups and the identity, as it acts
+    /// when assumed if it has `user_groups` groups.
+    pub fn target_writers(&self, target: &Subject) -> Vec<Writer> {
+        let writers: BTreeSet<Writer> = self
+            .target_subjects(target)
+            .iter()
+            .map(|subject| {
+                let assumed = subject.kind != SubjectKind::Group
+                    && subject.principal() == *target
+                    && self.users_with_groups.contains(&target.name);
+                if assumed {
+                    Writer {
+                        subject: target.clone(),
+                        assumed: true,
+                    }
+                } else {
+                    Writer::login(subject)
+                }
+            })
+            .collect();
+        writers.into_iter().collect()
+    }
+
+    /// What `writers` can grant themselves by writing RBAC objects.
+    pub fn gained_of<'a>(
+        &'a self,
+        writers: Vec<Writer>,
+    ) -> impl Iterator<Item = &'a Permission> + use<'a> {
+        writers
+            .into_iter()
+            .filter_map(|writer| self.gained.get(&writer))
+            .flatten()
+    }
+
+    /// What `principal` can grant itself, through any subject it acts as,
+    /// by writing RBAC objects.
+    pub fn own_gained_grants<'a>(
+        &'a self,
+        principal: &Subject,
+    ) -> impl Iterator<Item = &'a Permission> + use<'a> {
+        self.gained_of(self.login_writers(principal))
+    }
+
+    /// The grants an escalation `target` brings (see `target_subjects`):
+    /// its own and what it can grant itself by writing RBAC objects, as it
+    /// acts when assumed (`target_writers`).
     pub fn target_grants<'a>(
         &'a self,
         target: &Subject,
     ) -> impl Iterator<Item = &'a Permission> + use<'a> {
         self.grants_of(self.target_subjects(target))
+            .chain(self.gained_of(self.target_writers(target)))
     }
 
     /// The principals that hold the grants of binding subject `subject`
@@ -584,6 +895,11 @@ impl PermissionTables {
                 principals.insert(principal.clone());
             }
         }
+        for (writer, permissions) in &self.gained {
+            if !writer.assumed && permissions.iter().any(&matches) {
+                principals.extend(self.holders(&writer.subject));
+            }
+        }
         principals
     }
 
@@ -597,6 +913,12 @@ impl PermissionTables {
                 .map(|username| Subject::username(username.as_str())),
         );
         principals.extend(self.escalation_targets.keys().cloned());
+        principals.extend(
+            self.gained
+                .keys()
+                .filter(|writer| !writer.assumed)
+                .map(|writer| writer.subject.clone()),
+        );
         principals
     }
 
@@ -626,18 +948,25 @@ impl PermissionTables {
                     }
                 }
             }
+            for principal in self.principals() {
+                for permission in self.own_gained_grants(&principal) {
+                    entries.insert(entry(&principal, permission));
+                }
+            }
             entries
         })
     }
 
     /// The grants `principal` holds: its direct grants, and with
-    /// `effective` also those of every identity and group it controls.
+    /// `effective` also those of every identity and group it controls and
+    /// those it can grant itself by writing RBAC objects.
     pub fn held_grants(&self, principal: &Subject, effective: bool) -> Vec<&Permission> {
         let mut held: Vec<&Permission> = self.direct_grants(principal).collect();
         if effective {
             for target in self.escalation_targets.get(principal).into_iter().flatten() {
                 held.extend(self.target_grants(target));
             }
+            held.extend(self.own_gained_grants(principal));
         }
         held
     }
