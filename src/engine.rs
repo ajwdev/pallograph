@@ -1543,6 +1543,86 @@ mod tests {
         assert_eq!(engine.rebuild_count, 4);
     }
 
+    /// Non-scratch relations of two engines' evaluations must match. Used by
+    /// the incremental-negation parity tests below, which compare the live DD
+    /// session (`evaluate` snapshots it) against the interpreter's recompute.
+    fn assert_same_facts(dd: &Engine, interp: &Engine) {
+        let keep = |store: EvalStore| -> Vec<(String, Vec<Vec<Value>>)> {
+            sorted_store(store)
+                .into_iter()
+                .filter(|(rel, _)| !is_scratch_relation(rel))
+                .collect()
+        };
+        let actual = keep(dd.evaluate().unwrap());
+        let expected = keep(interp.evaluate().unwrap());
+        assert_eq!(actual, expected);
+    }
+
+    /// A rule with a negated body atom, added to a
+    /// live DD session while the negated relation has no input yet, used to
+    /// fail the layering path with "antijoin relation not found". The
+    /// interpreter treats the missing negated relation as empty, so the rule
+    /// fires for every row. The batch path `assert_parity` exercises is
+    /// already correct; only the incremental layering path regressed.
+    #[test]
+    fn incremental_negation_rule_without_negated_relation() {
+        let edb = vec![
+            ("item".to_string(), vec![s("a")]),
+            ("item".to_string(), vec![s("b")]),
+            ("item".to_string(), vec![s("c")]),
+        ];
+        let rule = "blocked(X) :- item(X), !allow(X).".to_string();
+
+        let mut interp =
+            Engine::from_parts(edb.clone(), vec![], Box::new(InterpreterBackend)).unwrap();
+        let mut dd =
+            Engine::from_parts(edb, vec![], Box::new(DdBackend { provenance: false })).unwrap();
+        interp.add_rule(rule.clone()).unwrap();
+        // Before the fix this returns Err("antijoin relation `allow` not found").
+        dd.add_rule(rule).unwrap();
+
+        assert_same_facts(&dd, &interp);
+        let mut blocked = dd.query_live("blocked").unwrap();
+        blocked.sort();
+        assert_eq!(blocked, vec![vec![s("a")], vec![s("b")], vec![s("c")]]);
+    }
+
+    /// Once a negation rule is in place, facts added incrementally to the
+    /// negated relation must update the antijoin. After the fix
+    /// tested in incremental_negation_rule_without_negated_relation,
+    /// the first such fact rebuilds the session (registering the relation as
+    /// a live empty input), and later facts feed it as deltas; the derived
+    /// relation must shrink to match the interpreter.
+    #[test]
+    fn incremental_facts_added_to_negated_relation() {
+        let edb = vec![
+            ("item".to_string(), vec![s("a")]),
+            ("item".to_string(), vec![s("b")]),
+            ("item".to_string(), vec![s("c")]),
+        ];
+        let rule = "blocked(X) :- item(X), !allow(X).".to_string();
+
+        let mut interp =
+            Engine::from_parts(edb.clone(), vec![], Box::new(InterpreterBackend)).unwrap();
+        let mut dd =
+            Engine::from_parts(edb, vec![], Box::new(DdBackend { provenance: false })).unwrap();
+        interp.add_rule(rule.clone()).unwrap();
+        dd.add_rule(rule).unwrap();
+
+        let more = vec![
+            ("allow".to_string(), vec![s("a")]),
+            ("allow".to_string(), vec![s("b")]),
+        ];
+        assert_eq!(interp.add_facts(more.clone()), 2);
+        assert_eq!(dd.add_facts(more), 2);
+
+        assert_same_facts(&dd, &interp);
+        let mut allow = dd.query_live("allow").unwrap();
+        allow.sort();
+        assert_eq!(allow, vec![vec![s("a")], vec![s("b")]], "both facts kept");
+        assert_eq!(dd.query_live("blocked").unwrap(), vec![vec![s("c")]]);
+    }
+
     /// Retracting one of two copies of a fact keeps it in the duplicate
     /// index, so re-adding it is still a no-op until the last copy goes.
     #[test]
