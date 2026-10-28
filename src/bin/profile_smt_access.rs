@@ -6,9 +6,9 @@
 //! Example:
 //!
 //! ```text
-//! cargo build --release --bin profile_smt_access
-//! samply record target/release/profile_smt_access --scenario cluster-admin --iters 1000
-//! samply record target/release/profile_smt_access --scenario load-permission-tables --iters 100
+//! cargo build --profile profiling --bin profile_smt_access
+//! samply record target/profiling/profile_smt_access --scenario cluster-admin --iters 1000
+//! samply record target/profiling/profile_smt_access --scenario load-permission-tables --iters 100
 //! ```
 
 use std::hint::black_box;

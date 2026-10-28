@@ -11,8 +11,8 @@
 //!   cargo bench --bench smt_access
 //!
 //! Profile the same code path with samply:
-//!   cargo build --release --bin profile_smt_access
-//!   samply record target/release/profile_smt_access --scenario cluster-admin --iters 1000
+//!   cargo build --profile profiling --bin profile_smt_access
+//!   samply record target/profiling/profile_smt_access --scenario cluster-admin --iters 1000
 
 use std::time::Duration;
 
