@@ -39,6 +39,9 @@ fn n(x: i64) -> Value {
 fn s(x: &str) -> Value {
     Value::String(x.to_string())
 }
+fn f(x: f64) -> Value {
+    Value::Float(x)
+}
 
 fn edb(facts: &[(&str, Vec<Value>)]) -> Edb {
     facts
@@ -659,6 +662,141 @@ fn comparison_neq() {
         "Decl val(N).\nDecl not_ten(N).\n\
          not_ten(N) :- val(N), N != 10.",
     );
+}
+
+#[test]
+fn aggregate_float_sum_max_min() {
+    // Category b mixes a Number into a float group; fn:float:sum widens it.
+    let e = edb(&[
+        ("reading", vec![s("a"), f(1.5)]),
+        ("reading", vec![s("a"), f(-2.25)]),
+        ("reading", vec![s("a"), f(4.0)]),
+        ("reading", vec![s("b"), f(0.5)]),
+        ("reading", vec![s("b"), n(2)]),
+    ]);
+    assert_parity(
+        "float_aggregates",
+        &e,
+        "Decl reading(Cat, V).\nDecl total(Cat, S).\nDecl hi(Cat, M).\nDecl lo(Cat, M).\n\
+         total(Cat, S) :- reading(Cat, V) |> do fn:group_by(Cat), let S = fn:float:sum(V).\n\
+         hi(Cat, M) :- reading(Cat, V), Cat = \"a\" |> do fn:group_by(Cat), let M = fn:float:max(V).\n\
+         lo(Cat, M) :- reading(Cat, V), Cat = \"a\" |> do fn:group_by(Cat), let M = fn:float:min(V).",
+    );
+}
+
+#[test]
+fn positive_list_member() {
+    // The bound-element form iterates the list (IterateList); an empty list
+    // and a non-list contribute nothing.
+    let e = edb(&[
+        ("role", vec![n(1), string_list(&["get", "list"])]),
+        ("role", vec![n(2), string_list(&[])]),
+        ("role", vec![n(3), string_list(&["get", "get"])]),
+        ("role", vec![n(4), s("not a list")]),
+    ]);
+    assert_parity(
+        "positive_list_member",
+        &e,
+        "Decl role(I, Verbs).\nDecl grants(I, V).\n\
+         grants(I, V) :- role(I, Verbs), :list:member(V, Verbs).",
+    );
+}
+
+#[test]
+fn positive_match_field() {
+    // The bound-value form reads the field (MatchField); a struct without the
+    // field and a non-struct contribute nothing.
+    let e = edb(&[
+        (
+            "rule",
+            vec![
+                n(1),
+                record(&[("verbs", string_list(&["get"])), ("apiGroup", s(""))]),
+            ],
+        ),
+        (
+            "rule",
+            vec![n(2), record(&[("verbs", string_list(&["list"]))])],
+        ),
+        ("rule", vec![n(3), s("not a struct")]),
+    ]);
+    assert_parity(
+        "positive_match_field",
+        &e,
+        "Decl rule(I, R).\nDecl verbs(I, V).\nDecl group(I, G).\n\
+         verbs(I, V) :- rule(I, R), :match_field(R, /verbs, V).\n\
+         group(I, G) :- rule(I, R), :match_field(R, /apiGroup, G).",
+    );
+}
+
+#[test]
+fn struct_pair_map_list_functions() {
+    // Builds compound values with fn:* and reads them back, so both the
+    // constructors and the accessors round-trip through Val.
+    let e = edb(&[("kv", vec![s("a"), n(1)]), ("kv", vec![s("b"), n(2)])]);
+    assert_parity(
+        "compound_functions",
+        &e,
+        "Decl kv(K, V).\nDecl built(K, St, P, M, L).\nDecl read(K, A, B, C, D, Len).\n\
+         built(K, St, P, M, L) :- kv(K, V)\n\
+           |> let St = fn:struct(/key, K, /value, V),\n\
+              let P = fn:pair(K, V),\n\
+              let M = fn:map(K, V),\n\
+              let L = fn:list(V, K, V).\n\
+         read(K, A, B, C, D, Len) :- built(K, St, P, M, L)\n\
+           |> let A = fn:struct:get(St, /value),\n\
+              let B = fn:pair:first(P),\n\
+              let C = fn:map:get(M, K),\n\
+              let D = fn:list:get(L, 1),\n\
+              let Len = fn:list:len(L).",
+    );
+}
+
+#[test]
+fn time_and_duration_values() {
+    // Time and Duration facts, time arithmetic, and comparisons on both.
+    let hour = 3_600_000_000_000;
+    let e = edb(&[
+        ("issued", vec![s("t1"), Value::Time(0)]),
+        ("issued", vec![s("t2"), Value::Time(5 * hour)]),
+        ("ttl", vec![s("t1"), Value::Duration(hour)]),
+        ("ttl", vec![s("t2"), Value::Duration(10 * hour)]),
+        ("now", vec![Value::Time(3 * hour)]),
+    ]);
+    assert_parity(
+        "time_duration",
+        &e,
+        "Decl issued(Tok, T).\nDecl ttl(Tok, D).\nDecl now(N).\n\
+         Decl expires(Tok, E).\nDecl expired(Tok).\nDecl ttl_limit(Tok, D, L).\nDecl long_lived(Tok).\n\
+         expires(Tok, E) :- issued(Tok, T), ttl(Tok, D) |> let E = fn:time:add(T, D).\n\
+         expired(Tok) :- expires(Tok, E), now(N), E < N.\n\
+         ttl_limit(Tok, D, L) :- ttl(Tok, D) |> let L = fn:duration:from_hours(2).\n\
+         long_lived(Tok) :- ttl_limit(Tok, D, L), D > L.",
+    );
+}
+
+#[test]
+fn let_function_error_fails_both_backends() {
+    // A type error inside a `let` fails evaluation on both backends rather
+    // than dropping the row on one of them.
+    let e = edb(&[("num", vec![n(1)]), ("num", vec![s("x")])]);
+    let rules = vec![
+        "Decl num(X).\nDecl next(Y).\nnext(Y) :- num(X) |> let Y = fn:plus(X, 1).".to_string(),
+    ];
+    let interp = InterpreterBackend
+        .evaluate(&e, &rules)
+        .err()
+        .expect("interpreter should fail");
+    let dd = DdBackend { provenance: false }
+        .evaluate(&e, &rules)
+        .err()
+        .expect("dd should fail");
+    for err in [interp, dd] {
+        assert!(
+            format!("{err:#}").contains("fn:plus: expected integer"),
+            "unexpected error: {err:#}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

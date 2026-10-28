@@ -164,6 +164,21 @@ const SUPPORTED_CALL_FILTERS: &[&str] = &[
     ":match_field",
 ];
 
+/// `let` functions the DD backend refuses because they are not pure.
+///
+/// DD evaluates a `let` again when its input row is retracted and expects the
+/// same output, so the retraction cancels the earlier insertion. A function
+/// whose result changes between calls would leave a stale row behind. Every
+/// other `fn:*` goes to the interpreter's `eval_function`, so recheck its list
+/// for new non-deterministic functions on each mangle bump.
+const NON_DETERMINISTIC_FUNCTIONS: &[&str] = &["fn:time:now"];
+
+/// True if `func` returns the same result for the same arguments, so the DD
+/// backend can evaluate it in a `let`.
+pub fn is_deterministic_function(func: &str) -> bool {
+    !NON_DETERMINISTIC_FUNCTIONS.contains(&func)
+}
+
 /// True if `func` is a `CallFilter` builtin the DD backend can evaluate.
 pub fn is_supported_call_filter(func: &str) -> bool {
     SUPPORTED_CALL_FILTERS.contains(&func)
