@@ -40,6 +40,31 @@ subjects:
   name: mallory@example.com
 "#;
 
+/// A ClusterRole granting everything and a ClusterRoleBinding handing it to
+/// a user, i.e. a fresh cluster-admin, as a PR might mint.
+const ADMIN_GRANT: &str = r#"apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pr-admin
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pr-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pr-admin
+subjects:
+- kind: User
+  apiGroup: rbac.authorization.k8s.io
+  name: eve@example.com
+"#;
+
 /// A scratch directory with a config for the small fixture and a
 /// `rendered/` directory holding [`EXEC_GRANT`]. Removed on drop.
 struct Workspace {
@@ -73,6 +98,15 @@ impl Workspace {
 
     fn rendered(&self) -> String {
         self.dir.join("rendered").to_string_lossy().into_owned()
+    }
+
+    /// Write `yaml` into a fresh subdirectory and return its path, for a
+    /// second rendered side.
+    fn manifests(&self, subdir: &str, yaml: &str) -> String {
+        let dir = self.dir.join(subdir);
+        std::fs::create_dir_all(&dir).expect("create manifests dir");
+        std::fs::write(dir.join("manifests.yaml"), yaml).expect("write manifests");
+        dir.to_string_lossy().into_owned()
     }
 
     /// Write `script` to a file and run it with `--script <file>`.
@@ -281,4 +315,160 @@ fn piped_repl_stays_forgiving() {
     let out = ws.run(&[], "bogus line\n::snapshot base\n");
     assert_eq!(out.status.code(), Some(0));
     assert!(stdout(&out).contains("Saved snapshot 'base'"));
+}
+
+#[test]
+fn apply_delta_add_then_access_diff_expands_exits_1() {
+    // Empty base, head adds mallory's grant: apply-delta onto live, then the
+    // access-diff against the pre-delta snapshot finds the new permission.
+    let ws = Workspace::new();
+    let out = ws.run_script(&format!(
+        "::snapshot base\n::apply-delta - {}\n::access-diff base\n",
+        ws.rendered()
+    ));
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    let stdout = stdout(&out);
+    assert!(stdout.contains("FAIL  "), "{stdout}");
+    assert!(stdout.contains("mallory@example.com"), "{stdout}");
+    assert!(
+        stderr(&out).contains("Applied delta: +2 ~0 -0"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn apply_delta_retracts_base_only_object_exits_0() {
+    // The motivating case: the grant is live (loaded as if from the cluster)
+    // and in the base render, but head drops it. The delta retracts it, so
+    // the access-diff against the pre-delta snapshot only loses permissions.
+    let ws = Workspace::new();
+    let out = ws.run_script(&format!(
+        "::load-k8s {rendered}\n\
+         ::snapshot base\n\
+         ::apply-delta {rendered} -\n\
+         ::access-diff base\n",
+        rendered = ws.rendered()
+    ));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(stdout(&out).contains("none added"), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("Applied delta: +0 ~0 -2"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn apply_delta_wrong_arity_exits_2() {
+    let ws = Workspace::new();
+    let out = ws.run_script("::snapshot base\n::apply-delta onlyone\n");
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Usage: \\apply-delta"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn apply_delta_missing_side_exits_2() {
+    let ws = Workspace::new();
+    let missing = ws.dir.join("nonexistent");
+    let out = ws.run_script(&format!(
+        "::snapshot base\n::apply-delta {} {}\n",
+        ws.rendered(),
+        missing.display()
+    ));
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("Delta error"), "{}", stderr(&out));
+}
+
+#[test]
+fn diff_relation_shows_added_row() {
+    // \diff-relation is a diagnostic diff, not a gate: it shows the row the
+    // delta added to user_is_cluster_admin and exits 0 either way.
+    let ws = Workspace::new();
+    let admin = ws.manifests("admin", ADMIN_GRANT);
+    let out = ws.run_script(&format!(
+        "::snapshot base\n\
+         ::apply-delta - {admin}\n\
+         ::diff-relation base user_is_cluster_admin\n"
+    ));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let stdout = stdout(&out);
+    assert!(stdout.contains("user_is_cluster_admin  (+1"), "{stdout}");
+    assert!(stdout.contains("+ String(\"eve@example.com\")"), "{stdout}");
+}
+
+#[test]
+fn diff_relation_no_change_reports_no_changes() {
+    // The delta leaves sa_is_cluster_admin untouched, so the relation diff is
+    // empty and prints (no changes). Still exit 0.
+    let ws = Workspace::new();
+    let admin = ws.manifests("admin", ADMIN_GRANT);
+    let out = ws.run_script(&format!(
+        "::snapshot base\n\
+         ::apply-delta - {admin}\n\
+         ::diff-relation base sa_is_cluster_admin\n"
+    ));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(stdout(&out).contains("(no changes)"), "{}", stdout(&out));
+}
+
+#[test]
+fn diff_relation_unknown_relation_exits_2() {
+    // An unknown relation is a usage error (exit 2), not a silent empty diff.
+    let ws = Workspace::new();
+    let out = ws.run_script("::snapshot base\n::diff-relation base user_is_clustr_admin\n");
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Unknown relation 'user_is_clustr_admin'"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+// The cluster-admin approval view is not shipped; it is the
+// examples/cluster-admin-approved/ recipe, sourced here (relative to the
+// crate root, which is the script's working directory).
+const CA_VIEW: &str = "examples/cluster-admin-approved/cluster-admin-approved.mg";
+
+#[test]
+fn diff_relation_shows_unexpected_cluster_admin() {
+    // With an empty approval closure, the delta's new cluster-admin shows as
+    // an added row in the example's unexpected_cluster_admin view.
+    let ws = Workspace::new();
+    let admin = ws.manifests("admin", ADMIN_GRANT);
+    let out = ws.run_script(&format!(
+        "::source {CA_VIEW}\n\
+         ::snapshot base\n\
+         ::apply-delta - {admin}\n\
+         ::diff-relation base unexpected_cluster_admin\n"
+    ));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains("+ String(\"eve@example.com\")"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn diff_relation_approved_admin_absent() {
+    // Approving the principal in the closure keeps it out of
+    // unexpected_cluster_admin, so the relation diff shows no change.
+    let ws = Workspace::new();
+    let admin = ws.manifests("admin", ADMIN_GRANT);
+    let out = ws.run_script(&format!(
+        "+cluster_admin_allowed(\"eve@example.com\")\n\
+         ::source {CA_VIEW}\n\
+         ::snapshot base\n\
+         ::apply-delta - {admin}\n\
+         ::diff-relation base unexpected_cluster_admin\n"
+    ));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let stdout = stdout(&out);
+    assert!(stdout.contains("(no changes)"), "{stdout}");
+    assert!(!stdout.contains("eve@example.com"), "{stdout}");
 }

@@ -1,0 +1,52 @@
+# head = the PR merged into the target branch. Four changes vs base:
+#   - cluster-admin ClusterRole: unchanged
+#   - pod-reader Role: gains "watch"            -> update  (~)
+#   - alice-reader RoleBinding: unchanged
+#   - legacy-admin (bob) ClusterRoleBinding: gone -> retract (-)
+#   - new-admin (eve) ClusterRoleBinding: added   -> add     (+)
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-admin
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-reader
+  namespace: app
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alice-reader
+  namespace: app
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pod-reader
+subjects:
+- kind: User
+  apiGroup: rbac.authorization.k8s.io
+  name: alice@example.com
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: new-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: User
+  apiGroup: rbac.authorization.k8s.io
+  name: eve@example.com

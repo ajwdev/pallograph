@@ -502,6 +502,26 @@ fn negation_over_lower_recursive_stratum() {
 }
 
 #[test]
+fn negation_over_empty_input_relation() {
+    // The unexpected_cluster_admin shape: subtract an allow-list (a declared
+    // EDB input) that is empty by default. Both backends must treat a
+    // declared relation with no rows as the empty set under negation, not as
+    // a missing relation. With a row present, that principal is filtered out.
+    let rules = "Decl admin(P).\nDecl allowed(P).\nDecl unexpected(P).\n\
+         unexpected(P) :- admin(P), !allowed(P).";
+
+    let empty_list = edb(&[("admin", vec![s("alice")]), ("admin", vec![s("bob")])]);
+    assert_parity("negation_over_empty_allowlist", &empty_list, rules);
+
+    let with_row = edb(&[
+        ("admin", vec![s("alice")]),
+        ("admin", vec![s("bob")]),
+        ("allowed", vec![s("bob")]),
+    ]);
+    assert_parity("negation_over_nonempty_allowlist", &with_row, rules);
+}
+
+#[test]
 fn join_on_struct_column() {
     // Equal structs built separately must join. A struct with the same
     // fields in another order, or another value, must compare the same way

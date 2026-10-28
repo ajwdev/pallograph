@@ -1,0 +1,19 @@
+default_profile = "dev"
+
+# The "live cluster": what Argo currently has deployed. Loaded at startup.
+[datasources.cluster]
+source = "file"
+paths = ["cluster/"]
+content = "k8s-manifests"
+
+# The cluster-admin allow-list: principals approved to hold cluster-admin.
+# Loaded at startup (before the snapshot) into the cluster_admin_allowed EDB
+# relation, which is declared empty by default in rules/00_edb_prelude.mg.
+[datasources.admin-allowlist]
+source = "file"
+paths = ["cluster-admin-allowlist.json"]
+content = "json-tuples"
+relation = "cluster_admin_allowed"
+
+[profiles.dev]
+sources = ["cluster", "admin-allowlist"]
