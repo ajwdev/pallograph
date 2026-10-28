@@ -132,8 +132,13 @@ pub struct RbacAccessModel {
     /// Per mechanism label, the (namespace, ServiceAccount) pairs each binding
     /// subject's grants reach.
     service_account_mechanisms: Vec<(&'static str, HashMap<Subject, HashSet<(String, String)>>)>,
-    /// Groups holding a grant, which impersonating groups reaches. Sorted.
-    granted_groups: Vec<Subject>,
+    /// `subject_impersonatable_group`: the groups each binding subject's
+    /// grants can impersonate. Sorted.
+    subject_groups: HashMap<Subject, BTreeSet<String>>,
+    /// `gained_impersonatable_group`: the groups each writer can
+    /// impersonate through a role it can grant itself by writing RBAC
+    /// objects. Sorted.
+    gained_groups: HashMap<Writer, BTreeSet<String>>,
 }
 
 impl RbacAccessModel {
@@ -193,23 +198,28 @@ impl RbacAccessModel {
             })
             .collect();
 
-        // Groups that can grant themselves a role hold grants too
-        // (group_has_grant in rbac_write.mg).
-        let granted_groups: BTreeSet<Subject> = tables
-            .grants
-            .keys()
-            .chain(tables.rbac_writes.keys().map(|writer| &writer.subject))
-            .filter(|subject| subject.kind == SubjectKind::Group)
-            .cloned()
-            .collect();
-        let granted_groups: Vec<Subject> = granted_groups.into_iter().collect();
-
         let mut rbac_writes_direct: HashMap<Writer, HashSet<RbacWrite>> = HashMap::new();
         for (writer, write) in facts::parse_rbac_write_binding(
             "rbac_write_binding_direct",
             &scan("rbac_write_binding_direct"),
         ) {
             rbac_writes_direct.entry(writer).or_default().insert(write);
+        }
+
+        let mut subject_groups: HashMap<Subject, BTreeSet<String>> = HashMap::new();
+        for (subject, [group]) in parse_subject_rows::<1>(
+            "subject_impersonatable_group",
+            &scan("subject_impersonatable_group"),
+        ) {
+            subject_groups.entry(subject).or_default().insert(group);
+        }
+
+        let mut gained_groups: HashMap<Writer, BTreeSet<String>> = HashMap::new();
+        for (writer, [group]) in facts::parse_writer_rows::<1>(
+            "gained_impersonatable_group",
+            &scan("gained_impersonatable_group"),
+        ) {
+            gained_groups.entry(writer).or_default().insert(group);
         }
 
         Self {
@@ -221,7 +231,8 @@ impl RbacAccessModel {
             gained_hops,
             rbac_writes_direct,
             service_account_mechanisms,
-            granted_groups,
+            subject_groups,
+            gained_groups,
         }
     }
 
@@ -424,17 +435,6 @@ impl RbacAccessModel {
             .any(|granted| permission_covers(granted, query))
     }
 
-    /// May impersonate groups, like `perm_group_impersonate` in
-    /// escalation.mg. Kubernetes checks this as a cluster-scoped request, so
-    /// only a cluster-wide grant (namespace "") counts.
-    fn impersonates_groups(granted: &Permission) -> bool {
-        let (namespace, api_group, resource, verb) = granted;
-        namespace.is_empty()
-            && value_covers(api_group, "")
-            && value_covers(resource, "groups")
-            && value_covers(verb, "impersonate")
-    }
-
     /// Return binding/role paths for `principal`.
     ///
     /// Direct bindings are always included. Escalation via-paths are included only
@@ -617,11 +617,12 @@ impl RbacAccessModel {
     /// identity reached on the way only with its `assumed_subject`
     /// subjects, and a group with its own grants. From each, a hop is a
     /// `subject_escalation_hop` of one of those subjects, or impersonating
-    /// any group that holds a grant.
+    /// a group, `subject_impersonatable_group`, and the same through roles
+    /// its writers can grant themselves (`gained_escalation_hop`,
+    /// `gained_impersonatable_group`).
     fn escalation_tree(&self, principal: &Subject) -> HashMap<Subject, (Subject, String)> {
         let mut tree: HashMap<Subject, (Subject, String)> = HashMap::new();
         let mut queue = VecDeque::from([principal.clone()]);
-        let mut groups_reached = false;
 
         while let Some(node) = queue.pop_front() {
             let (subjects, writers) = if node == *principal {
@@ -657,22 +658,21 @@ impl RbacAccessModel {
                     (identity, mechanism)
                 })
                 .collect();
-            // Every group is one impersonation away from the first node that
-            // may impersonate groups, so later nodes add nothing.
-            if !groups_reached
-                && self
-                    .tables
-                    .grants_of(subjects.clone())
-                    .chain(self.tables.gained_of(writers.clone()))
-                    .any(Self::impersonates_groups)
-            {
-                groups_reached = true;
-                next.extend(
-                    self.granted_groups
+            let groups: BTreeSet<&String> = subjects
+                .iter()
+                .filter_map(|subject| self.subject_groups.get(subject))
+                .chain(
+                    writers
                         .iter()
-                        .map(|group| (group.clone(), "impersonate".to_string())),
-                );
-            }
+                        .filter_map(|writer| self.gained_groups.get(writer)),
+                )
+                .flatten()
+                .collect();
+            next.extend(
+                groups
+                    .into_iter()
+                    .map(|group| (Subject::group(group.as_str()), "impersonate".to_string())),
+            );
 
             for (target, mechanism) in next {
                 if target == *principal || tree.contains_key(&target) {
@@ -1816,6 +1816,44 @@ mod tests {
             ]
         );
         assert_eq!(Subject::group("twin").to_string(), "twin (group)");
+    }
+
+    #[test]
+    fn hop_chains_reach_a_named_group_through_whoever_may_impersonate_it() {
+        // imp may impersonate the user bob and the group ops. bob holds a
+        // grant of his own: impersonate the group admins, which may read
+        // secrets. So imp reaches admins through bob, not directly.
+        let extra = [
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"imp"},"rules":[{"apiGroups":[""],"resources":["users"],"resourceNames":["bob"],"verbs":["impersonate"]},{"apiGroups":[""],"resources":["groups"],"resourceNames":["ops"],"verbs":["impersonate"]}]}"#.to_string(),
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"imp"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"imp"},"subjects":[{"kind":"User","name":"imp"}]}"#.to_string(),
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"bob"},"rules":[{"apiGroups":[""],"resources":["groups"],"resourceNames":["admins"],"verbs":["impersonate"]}]}"#.to_string(),
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"bob"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"bob"},"subjects":[{"kind":"User","name":"bob"}]}"#.to_string(),
+            bound_clusterrole(
+                "admins-secrets",
+                "secrets",
+                "get",
+                r#"{"kind":"Group","name":"admins"}"#,
+            ),
+            bound_clusterrole("ops-nodes", "nodes", "get", r#"{"kind":"Group","name":"ops"}"#),
+        ]
+        .join("\n");
+        let eval = load_engine_with(&extra).evaluate().expect("evaluate");
+        let model = RbacAccessModel::from_store(&eval);
+
+        let paths =
+            model.paths_for_principal(&Subject::username("imp"), Some(("", "", "secrets", "get")));
+        let shown: Vec<Vec<(Subject, String)>> = paths
+            .iter()
+            .filter(|p| p.binding_name == "admins-secrets")
+            .map(|p| p.hops.clone())
+            .collect();
+        assert_eq!(
+            shown,
+            [vec![
+                (Subject::username("bob"), "impersonate".to_string()),
+                (Subject::group("admins"), "impersonate".to_string()),
+            ]]
+        );
     }
 
     #[test]

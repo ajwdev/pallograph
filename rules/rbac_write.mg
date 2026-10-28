@@ -610,6 +610,27 @@ role_escalation_action(Ns, Role, Action) :-
     escalation_rule_action(Rule, Action),
     role_rule(Ns, Role, Rule).
 
+# Impersonation is checked on the impersonated identity's name, so for the
+# impersonate actions the rule's ResourceName is kept (/any without
+# resourceNames), as escalation.mg's impersonate guards do.
+impersonate_action(/sa_impersonate).
+impersonate_action(/user_impersonate).
+impersonate_action(/group_impersonate).
+
+impersonate_rule_action(Rule, Action, ResourceName) :-
+    policy_rule_perm(Rule, ApiGroup, Resource, ResourceName, Verb),
+    core_api_group(ApiGroup),
+    escalation_matches(Resource, Verb, Action),
+    impersonate_action(Action).
+
+clusterrole_impersonate_action(Role, Action, ResourceName) :-
+    impersonate_rule_action(Rule, Action, ResourceName),
+    clusterrole_rule(Role, Rule).
+
+role_impersonate_action(Ns, Role, Action, ResourceName) :-
+    impersonate_rule_action(Rule, Action, ResourceName),
+    role_rule(Ns, Role, Rule).
+
 gained_action(Name, Kind, Ns, Action) :-
     rbac_write_binding(Name, Kind, "bind", Ns, _, "ClusterRole", Role),
     clusterrole_escalation_action(Role, Action).
@@ -621,6 +642,21 @@ gained_action(Name, Kind, Ns, Action) :-
 gained_action(Name, Kind, Ns, Action) :-
     rbac_write_binding(Name, Kind, "escalate", Ns, _, _, _),
     escalation_action(Action, _, _).
+
+# The same for the impersonate actions, with the identity name a gained
+# role allows impersonating. A role the writer can escalate takes any rule,
+# so it allows every name.
+gained_impersonate(Name, Kind, Ns, Action, ResourceName) :-
+    rbac_write_binding(Name, Kind, "bind", Ns, _, "ClusterRole", Role),
+    clusterrole_impersonate_action(Role, Action, ResourceName).
+
+gained_impersonate(Name, Kind, Ns, Action, ResourceName) :-
+    rbac_write_binding(Name, Kind, "bind", Ns, _, "Role", Role),
+    role_impersonate_action(Ns, Role, Action, ResourceName).
+
+gained_impersonate(Name, Kind, Ns, Action, /any) :-
+    rbac_write_binding(Name, Kind, "escalate", Ns, _, _, _),
+    impersonate_action(Action).
 
 # Pods and ServiceAccounts are namespaced, so a gain in every namespace
 # reaches them as a cluster-wide grant does.
@@ -636,7 +672,6 @@ gained_namespaced_action(Name, Kind, "", Action) :-
 # runs as.
 action_reaches_serviceaccount(/pods_create, "pod-create").
 action_reaches_serviceaccount(/sa_token, "token").
-action_reaches_serviceaccount(/sa_impersonate, "impersonate").
 action_reaches_pod(/pods_exec, "pod-exec").
 action_reaches_pod(/pods_attach, "pod-exec").
 
@@ -660,6 +695,33 @@ gained_reachable_sa(Name, Kind, PodNs, SAName, Mechanism) :-
     action_reaches_pod(Action, Mechanism),
     pod_sa(PodNs, _, SAName).
 
+# ServiceAccount impersonation reaches the ServiceAccounts of the namespace
+# the role allows impersonating by name, or all of them (/any). As for
+# gained_namespaced_action, a gain in every namespace ("*") counts as
+# cluster-wide.
+gained_namespaced_impersonate(Name, Kind, Ns, Action, ResourceName) :-
+    gained_impersonate(Name, Kind, Ns, Action, ResourceName),
+    Ns != "*".
+
+gained_namespaced_impersonate(Name, Kind, "", Action, ResourceName) :-
+    gained_impersonate(Name, Kind, "*", Action, ResourceName).
+
+gained_reachable_sa(Name, Kind, SANs, SAName, "impersonate") :-
+    gained_namespaced_impersonate(Name, Kind, SANs, /sa_impersonate, /any),
+    serviceaccount(SANs, SAName, _).
+
+gained_reachable_sa(Name, Kind, SANs, SAName, "impersonate") :-
+    gained_namespaced_impersonate(Name, Kind, SANs, /sa_impersonate, SAName),
+    serviceaccount(SANs, SAName, _).
+
+gained_reachable_sa(Name, Kind, SANs, SAName, "impersonate") :-
+    gained_namespaced_impersonate(Name, Kind, "", /sa_impersonate, /any),
+    serviceaccount(SANs, SAName, _).
+
+gained_reachable_sa(Name, Kind, SANs, SAName, "impersonate") :-
+    gained_namespaced_impersonate(Name, Kind, "", /sa_impersonate, SAName),
+    serviceaccount(SANs, SAName, _).
+
 Decl gained_escalation_hop(Name, Kind, Target, Mechanism)
   descr [
     doc("Like subject_escalation_hop, through a role binding subject (Kind, Name) can grant itself by writing RBAC objects (rbac_write_binding) rather than its own grants. Kept apart from escalation_hop, which answers what a principal may do now."),
@@ -673,13 +735,31 @@ gained_escalation_hop(Name, Kind, Target, Mechanism) :-
     gained_reachable_sa(Name, Kind, SANs, SAName, Mechanism)
     |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
 
-# Users and groups are cluster-scoped: only a cluster-wide gain counts.
+# Users and groups are cluster-scoped: only a cluster-wide gain counts, and
+# a named one reaches only the users or groups it names.
 gained_escalation_hop(Name, Kind, Target, "impersonate") :-
-    gained_action(Name, Kind, "", /user_impersonate),
+    gained_impersonate(Name, Kind, "", /user_impersonate, /any),
     user_has_own_grant(Target).
 
-gained_group_impersonate(Name, Kind) :-
-    gained_action(Name, Kind, "", /group_impersonate).
+gained_escalation_hop(Name, Kind, Target, "impersonate") :-
+    gained_impersonate(Name, Kind, "", /user_impersonate, Target),
+    user_has_own_grant(Target).
+
+Decl gained_impersonatable_group(Name, Kind, Group)
+  descr [
+    doc("Like subject_impersonatable_group, through a role binding subject (Kind, Name) can grant itself by writing RBAC objects: it can then impersonate Group, which holds grants."),
+    arg(Name, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
+    arg(Kind, "/user, /group, /serviceaccount or /assumed_user"),
+    arg(Group, "group whose grants the impersonator can use")
+  ].
+
+gained_impersonatable_group(Name, Kind, Group) :-
+    gained_impersonate(Name, Kind, "", /group_impersonate, /any),
+    group_has_grant(Group).
+
+gained_impersonatable_group(Name, Kind, Group) :-
+    gained_impersonate(Name, Kind, "", /group_impersonate, Group),
+    group_has_grant(Group).
 
 # The escalation closure of escalation.mg, continued through these hops:
 # from a principal as it logs in, from an identity assumed on the way, and
@@ -713,16 +793,14 @@ group_escalation_hop(Group, Target) :-
 
 controls_group(P, Group) :-
     principal_subject(P, Kind, Name),
-    gained_group_impersonate(Name, Kind),
-    group_has_grant(Group).
+    gained_impersonatable_group(Name, Kind, Group).
 
-assumed_group_impersonate(Identity) :-
+assumed_group_impersonate(Identity, Group) :-
     assumed_gains_subject(Identity, Kind, Name),
-    gained_group_impersonate(Name, Kind).
+    gained_impersonatable_group(Name, Kind, Group).
 
 group_controls_group(Group, Other) :-
-    gained_group_impersonate(Group, /group),
-    group_has_grant(Other),
+    gained_impersonatable_group(Group, /group, Other),
     Group != Other.
 
 # A user or group that can grant itself a role holds grants of its own,

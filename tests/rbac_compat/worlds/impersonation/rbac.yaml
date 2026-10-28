@@ -101,9 +101,8 @@ subjects:
 - {kind: User, name: sa-impersonator, apiGroup: rbac.authorization.k8s.io}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: serviceaccount-impersonator}
 ---
-# resourceNames limit impersonation to the named identities. Pallograph
-# ignores them for impersonation (rules/escalation.mg), which
-# over-approximates: denied-by-resource-names.
+# resourceNames limit impersonation to the named identities: alice, admins
+# and ServiceAccounts named builder, in any namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata: {name: named-impersonator}

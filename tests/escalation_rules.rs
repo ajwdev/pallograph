@@ -348,3 +348,163 @@ fn namespaced_service_account_impersonation_stays_in_its_namespace() {
         );
     }
 }
+
+// ---- Impersonation limited by resourceNames ----
+//
+// The impersonation filter asks the authorizer about each impersonated
+// identity by name: the username, the group, or the ServiceAccount's name
+// in its namespace. So a grant with resourceNames only reaches the
+// identities it names.
+
+/// Users bob and carol, groups admins and ops, and ServiceAccounts
+/// team-a:admin, team-b:admin and team-a:other, each holding a grant of its
+/// own, plus team-a:imp, which the caller grants the ClusterRole impersonator with
+/// `rules`, bound by `binding`.
+fn impersonation_targets(rules: &str, binding: String) -> Vec<String> {
+    vec![
+        cluster_role(
+            "node-reader",
+            r#"[{"apiGroups":[""],"resources":["nodes"],"verbs":["get"]}]"#,
+        ),
+        r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"targets"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"node-reader"},"subjects":[{"kind":"User","name":"bob"},{"kind":"User","name":"carol"},{"kind":"Group","name":"admins"},{"kind":"Group","name":"ops"},{"kind":"ServiceAccount","name":"admin","namespace":"team-a"},{"kind":"ServiceAccount","name":"admin","namespace":"team-b"},{"kind":"ServiceAccount","name":"other","namespace":"team-a"}]}"#.into(),
+        service_account("team-a", "admin"),
+        service_account("team-b", "admin"),
+        service_account("team-a", "other"),
+        service_account("team-a", "imp"),
+        cluster_role("impersonator", rules),
+        binding,
+    ]
+}
+
+const IMP: &str = "system:serviceaccount:team-a:imp";
+
+fn bind_imp_cluster_wide() -> String {
+    r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"imp"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"impersonator"},"subjects":[{"kind":"ServiceAccount","name":"imp","namespace":"team-a"}]}"#.into()
+}
+
+/// The identities imp reaches in one impersonation hop: users and
+/// ServiceAccounts (escalation_hop) and groups (controls_group).
+fn imp_reaches(result: &EvalStore) -> Vec<String> {
+    let imp = Value::String(IMP.into());
+    let mut reached: Vec<String> = ["escalation_hop", "controls_group"]
+        .iter()
+        .flat_map(|relation| result.scan(relation))
+        .filter(|row| row[0] == imp)
+        .filter_map(|row| match &row[1] {
+            Value::String(target) => Some(target.clone()),
+            _ => None,
+        })
+        .collect();
+    reached.sort();
+    reached
+}
+
+#[test]
+fn named_user_impersonation_reaches_only_the_named_user() {
+    let manifests = impersonation_targets(
+        r#"[{"apiGroups":[""],"resources":["users"],"resourceNames":["bob"],"verbs":["impersonate"]}]"#,
+        bind_imp_cluster_wide(),
+    );
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert_eq!(imp_reaches(&result), ["bob"], "{backend}");
+    }
+}
+
+#[test]
+fn named_group_impersonation_reaches_only_the_named_group() {
+    let manifests = impersonation_targets(
+        r#"[{"apiGroups":[""],"resources":["groups"],"resourceNames":["admins"],"verbs":["impersonate"]}]"#,
+        bind_imp_cluster_wide(),
+    );
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert_eq!(imp_reaches(&result), ["admins"], "{backend}");
+    }
+}
+
+// The same grant held by a group: members of imps reach admins, not ops.
+#[test]
+fn named_group_impersonation_from_a_group_reaches_only_the_named_group() {
+    let manifests = impersonation_targets(
+        r#"[{"apiGroups":[""],"resources":["groups"],"resourceNames":["admins"],"verbs":["impersonate"]}]"#,
+        cluster_role_binding("imps", "impersonator", "Group", "imps"),
+    );
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert!(
+            has_row(&result, "group_controls_group", &["imps", "admins"]),
+            "{backend}: imps controls admins"
+        );
+        assert!(
+            !has_row(&result, "group_controls_group", &["imps", "ops"]),
+            "{backend}: imps does not control ops, got {:?}",
+            result.scan("group_controls_group")
+        );
+    }
+}
+
+// A ServiceAccount is named without system:serviceaccount:<ns>:, so a
+// cluster-wide grant naming admin reaches the admin ServiceAccount of every
+// namespace, and one in a RoleBinding only that of its namespace.
+#[test]
+fn named_service_account_impersonation_reaches_only_the_named_accounts() {
+    let rules = r#"[{"apiGroups":[""],"resources":["serviceaccounts"],"resourceNames":["admin"],"verbs":["impersonate"]}]"#;
+
+    let manifests = impersonation_targets(rules, bind_imp_cluster_wide());
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert_eq!(
+            imp_reaches(&result),
+            [
+                "system:serviceaccount:team-a:admin",
+                "system:serviceaccount:team-b:admin"
+            ],
+            "{backend}: cluster-wide"
+        );
+    }
+
+    let manifests = impersonation_targets(
+        rules,
+        role_binding_to_sa("team-a", "imp", "impersonator", "imp"),
+    );
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert_eq!(
+            imp_reaches(&result),
+            ["system:serviceaccount:team-a:admin"],
+            "{backend}: in team-a"
+        );
+    }
+}
+
+// Without resourceNames the grant reaches every user, group and
+// ServiceAccount holding a grant.
+#[test]
+fn unnamed_impersonation_reaches_every_identity() {
+    let manifests = impersonation_targets(
+        r#"[{"apiGroups":[""],"resources":["users","groups","serviceaccounts"],"verbs":["impersonate"]}]"#,
+        bind_imp_cluster_wide(),
+    );
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert_eq!(
+            imp_reaches(&result),
+            [
+                "admins",
+                "bob",
+                "carol",
+                "ops",
+                "system:serviceaccount:team-a:admin",
+                "system:serviceaccount:team-a:imp",
+                "system:serviceaccount:team-a:other",
+                "system:serviceaccount:team-b:admin",
+            ],
+            "{backend}"
+        );
+    }
+}

@@ -728,3 +728,151 @@ fn an_assumed_user_writes_without_its_user_groups() {
         );
     }
 }
+
+// ---- Gained impersonation limited by resourceNames ----
+//
+// A role gained by writing RBAC objects allows impersonating only the
+// identities its resourceNames name, as a role held directly does
+// (tests/escalation_rules.rs).
+
+/// Users bob and carol, groups admins and ops, and ServiceAccounts
+/// ns1/admin, ns2/admin and ns1/sa-b, each holding view, plus the
+/// ClusterRole impersonator with `rules`. sa-a may bind only impersonator
+/// and create ClusterRoleBindings.
+fn gained_impersonation(rules: &str) -> Vec<String> {
+    let mut manifests = base_cluster();
+    manifests.extend([
+        r#"{"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"admin","namespace":"ns1"}}"#.into(),
+        r#"{"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"admin","namespace":"ns2"}}"#.into(),
+        cluster_role_binding(
+            "targets",
+            "view",
+            r#"{"kind":"User","name":"bob"},{"kind":"User","name":"carol"},{"kind":"Group","name":"admins"},{"kind":"Group","name":"ops"}"#,
+        ),
+        cluster_role("impersonator", rules),
+    ]);
+    grant(
+        &mut manifests,
+        "sa-a",
+        "impersonator-binder",
+        r#"[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterroles"],"resourceNames":["impersonator"],"verbs":["bind"]},
+            {"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterrolebindings"],"verbs":["create"]}]"#,
+    );
+    manifests
+}
+
+/// The identities and groups `principal` controls, sorted.
+fn controlled(result: &EvalStore, principal: &str) -> Vec<String> {
+    let principal = Value::String(principal.into());
+    let mut reached: Vec<String> = ["controls_identity", "controls_group"]
+        .iter()
+        .flat_map(|relation| result.scan(relation))
+        .filter(|row| row[0] == principal)
+        .filter_map(|row| match &row[1] {
+            Value::String(target) => Some(target.clone()),
+            _ => None,
+        })
+        .collect();
+    reached.sort();
+    reached
+}
+
+#[test]
+fn gained_named_impersonation_reaches_only_the_named_identities() {
+    let manifests = gained_impersonation(
+        r#"[{"apiGroups":[""],"resources":["users"],"resourceNames":["bob"],"verbs":["impersonate"]},
+            {"apiGroups":[""],"resources":["groups"],"resourceNames":["admins"],"verbs":["impersonate"]},
+            {"apiGroups":[""],"resources":["serviceaccounts"],"resourceNames":["admin"],"verbs":["impersonate"]}]"#,
+    );
+
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert_eq!(
+            controlled(&result, SA_A),
+            ["admins", "bob", ADMIN_SA, "system:serviceaccount:ns2:admin"],
+            "{backend}"
+        );
+    }
+}
+
+#[test]
+fn gained_unnamed_impersonation_reaches_every_identity() {
+    let manifests = gained_impersonation(
+        r#"[{"apiGroups":[""],"resources":["users","groups","serviceaccounts"],"verbs":["impersonate"]}]"#,
+    );
+
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert_eq!(
+            controlled(&result, SA_A),
+            [
+                "admins",
+                "bob",
+                "carol",
+                "ops",
+                ADMIN_SA,
+                SA_B,
+                "system:serviceaccount:ns2:admin"
+            ],
+            "{backend}"
+        );
+    }
+}
+
+// A role bound in ns1 only allows impersonating ServiceAccounts there, and
+// by name: ns1/admin, not ns2/admin or ns1/sa-b.
+#[test]
+fn gained_named_service_account_impersonation_stays_in_its_namespace() {
+    let mut manifests = gained_impersonation(
+        r#"[{"apiGroups":[""],"resources":["serviceaccounts"],"resourceNames":["admin"],"verbs":["impersonate"]}]"#,
+    );
+    grant_in_ns1(
+        &mut manifests,
+        "sa-b",
+        "ns-binder",
+        r#"[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterroles"],"resourceNames":["impersonator"],"verbs":["bind"]},
+            {"apiGroups":["rbac.authorization.k8s.io"],"resources":["rolebindings"],"verbs":["create"]}]"#,
+    );
+
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert_eq!(controlled(&result, SA_B), [ADMIN_SA], "{backend}");
+    }
+}
+
+// The same through an assumed user. alice is in staff through user_groups,
+// so as an impersonated identity she writes as /assumed_user. Her own
+// binding lets her bind impersonator, which allows impersonating admins
+// only. imp may impersonate alice alone, so imp reaches alice and through
+// her admins, not ops.
+#[test]
+fn gained_named_group_impersonation_through_an_assumed_user() {
+    let mut manifests = gained_impersonation(
+        r#"[{"apiGroups":[""],"resources":["groups"],"resourceNames":["admins"],"verbs":["impersonate"]}]"#,
+    );
+    manifests.push(cluster_role(
+        "alice-binder",
+        r#"[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterroles"],"resourceNames":["impersonator"],"verbs":["bind"]},
+            {"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterrolebindings"],"verbs":["create"]}]"#,
+    ));
+    manifests.push(cluster_role_binding(
+        "alice-binder",
+        "alice-binder",
+        r#"{"kind":"User","name":"alice"}"#,
+    ));
+    manifests.push(cluster_role(
+        "alice-impersonator",
+        r#"[{"apiGroups":[""],"resources":["users"],"resourceNames":["alice"],"verbs":["impersonate"]}]"#,
+    ));
+    manifests.push(cluster_role_binding(
+        "imp",
+        "alice-impersonator",
+        r#"{"kind":"User","name":"imp"}"#,
+    ));
+
+    for (backend, result) in evaluate(&manifests, &[("alice", "staff")]) {
+        assert!(
+            has_row(&result, "assumed_group_impersonate", &["alice", "admins"]),
+            "{backend}: assumed alice can impersonate admins, got {:?}",
+            result.scan("assumed_group_impersonate")
+        );
+        assert_eq!(controlled(&result, "imp"), ["admins", "alice"], "{backend}");
+    }
+}

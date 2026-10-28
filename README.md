@@ -237,10 +237,9 @@ single-step relations of its escalation rules; the table in
   generates their requests and decisions into `target/rbac-compat/`.
 - `tests/rbac_compat/baseline.json` is a ratchet of known mismatch counts
   per world. Every authorization request matches the authorizer exactly.
-  The known gaps are in the escalation questions: impersonation grants
-  limited by resourceNames, which the escalation rules ignore, and RBAC
-  writes allowed because the writer already holds every rule written,
-  which gain it nothing and so are left out.
+  The known gaps are in the escalation questions: RBAC writes allowed
+  because the writer already holds every rule written, which gain it
+  nothing and so are left out.
 - `hack/rbac-compat.sh -s SEED -n COUNT` is the fuzz tier: it generates
   random worlds from a seed, decides them with the oracle, and reports
   worlds whose mismatches the curated worlds do not cover.
