@@ -52,9 +52,9 @@
 # are filtered here, per subject, before principal_subject or
 # assumed_subject expands them to the identities that hold them.
 #
-# The ResourceName column is ignored (_): a grant limited to some object names
-# still counts. That over-approximates, the safe side for finding escalation
-# paths.
+# Except for impersonation, the ResourceName column is ignored (_): a grant
+# limited to some object names still counts. That over-approximates, the
+# safe side for finding escalation paths.
 #
 # Impersonation is authorized per impersonated identity, as an impersonate
 # request on users, groups, uids, userextras or serviceaccounts (see
@@ -65,6 +65,12 @@
 # requests, which only a ClusterRoleBinding (Ns = "") matches, so the rules
 # below use grant_user_impersonate and grant_group_impersonate with Ns = ""
 # only. uids and userextras add nothing to a path and are not modeled.
+#
+# Each request names the identity: the username, the group, or the
+# ServiceAccount's name (without system:serviceaccount:<ns>:). So the
+# impersonate guards keep the ResourceName column, grant_X(Name, Kind, Ns,
+# ResourceName), and a grant with resourceNames only reaches the identities
+# it names. ResourceName /any (no resourceNames) reaches every identity.
 
 grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts/token", _, "create").
 grant_sa_token_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts/token", _, "*").
@@ -102,32 +108,32 @@ grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "pods", _,
 grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",    _, "create").
 grant_pods_create(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",    _, "*").
 
-grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts", _, "impersonate").
-grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts", _, "*").
-grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",               _, "impersonate").
-grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",               _, "*").
-grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "serviceaccounts", _, "impersonate").
-grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "serviceaccounts", _, "*").
-grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",               _, "impersonate").
-grant_sa_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",               _, "*").
+grant_sa_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts", ResourceName, "impersonate").
+grant_sa_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "",  "serviceaccounts", ResourceName, "*").
+grant_sa_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "",  "*",               ResourceName, "impersonate").
+grant_sa_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "",  "*",               ResourceName, "*").
+grant_sa_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "*", "serviceaccounts", ResourceName, "impersonate").
+grant_sa_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "*", "serviceaccounts", ResourceName, "*").
+grant_sa_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "*", "*",               ResourceName, "impersonate").
+grant_sa_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "*", "*",               ResourceName, "*").
 
-grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "users", _, "impersonate").
-grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "users", _, "*").
-grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",     _, "impersonate").
-grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",     _, "*").
-grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "users", _, "impersonate").
-grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "users", _, "*").
-grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",     _, "impersonate").
-grant_user_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",     _, "*").
+grant_user_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "",  "users", ResourceName, "impersonate").
+grant_user_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "",  "users", ResourceName, "*").
+grant_user_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "",  "*",     ResourceName, "impersonate").
+grant_user_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "",  "*",     ResourceName, "*").
+grant_user_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "*", "users", ResourceName, "impersonate").
+grant_user_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "*", "users", ResourceName, "*").
+grant_user_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "*", "*",     ResourceName, "impersonate").
+grant_user_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "*", "*",     ResourceName, "*").
 
-grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "groups", _, "impersonate").
-grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "groups", _, "*").
-grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",      _, "impersonate").
-grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "",  "*",      _, "*").
-grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "groups", _, "impersonate").
-grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "groups", _, "*").
-grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",      _, "impersonate").
-grant_group_impersonate(Name, Kind, Ns) :- direct_perm(Name, Kind, Ns, "*", "*",      _, "*").
+grant_group_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "",  "groups", ResourceName, "impersonate").
+grant_group_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "",  "groups", ResourceName, "*").
+grant_group_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "",  "*",      ResourceName, "impersonate").
+grant_group_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "",  "*",      ResourceName, "*").
+grant_group_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "*", "groups", ResourceName, "impersonate").
+grant_group_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "*", "groups", ResourceName, "*").
+grant_group_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "*", "*",      ResourceName, "impersonate").
+grant_group_impersonate(Name, Kind, Ns, ResourceName) :- direct_perm(Name, Kind, Ns, "*", "*",      ResourceName, "*").
 
 # ---- Subjects of an assumed identity ----
 
@@ -191,12 +197,21 @@ subject_pod_creatable_sa(Name, Kind, SANs, SAName) :-
     grant_pods_create(Name, Kind, ""),
     serviceaccount(SANs, SAName, _).
 
+# A named grant reaches only the ServiceAccounts with that name.
 subject_impersonatable_sa(Name, Kind, SANs, SAName) :-
-    grant_sa_impersonate(Name, Kind, SANs),
+    grant_sa_impersonate(Name, Kind, SANs, /any),
     serviceaccount(SANs, SAName, _).
 
 subject_impersonatable_sa(Name, Kind, SANs, SAName) :-
-    grant_sa_impersonate(Name, Kind, ""),
+    grant_sa_impersonate(Name, Kind, SANs, SAName),
+    serviceaccount(SANs, SAName, _).
+
+subject_impersonatable_sa(Name, Kind, SANs, SAName) :-
+    grant_sa_impersonate(Name, Kind, "", /any),
+    serviceaccount(SANs, SAName, _).
+
+subject_impersonatable_sa(Name, Kind, SANs, SAName) :-
+    grant_sa_impersonate(Name, Kind, "", SAName),
     serviceaccount(SANs, SAName, _).
 
 # An impersonated user acts as itself plus system:authenticated, and the
@@ -230,8 +245,13 @@ subject_escalation_hop(Name, Kind, Target) :-
     |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
 
 # Cluster-wide grants only: impersonating a user is a cluster-scoped request.
+# A named grant reaches only the users it names.
 subject_escalation_hop(Name, Kind, Target) :-
-    grant_user_impersonate(Name, Kind, ""),
+    grant_user_impersonate(Name, Kind, "", /any),
+    user_has_own_grant(Target).
+
+subject_escalation_hop(Name, Kind, Target) :-
+    grant_user_impersonate(Name, Kind, "", Target),
     user_has_own_grant(Target).
 
 # ---- Escalation from a principal ----
@@ -266,19 +286,37 @@ assumed_escalation_hop(Identity, Target) :-
     assumed_subject(Identity, Kind, Name),
     subject_escalation_hop(Name, Kind, Target).
 
-# Group impersonation, from a principal as it logs in and from an assumed
-# identity. Like user impersonation, only a cluster-wide grant counts: a
-# RoleBinding allowing impersonate on groups allows nothing.
-perm_group_impersonate(P) :-
-    principal_subject(P, Kind, Name),
-    grant_group_impersonate(Name, Kind, "").
-
-assumed_group_impersonate(Identity) :-
-    assumed_subject(Identity, Kind, Name),
-    grant_group_impersonate(Name, Kind, "").
-
 group_has_grant(Group) :-
     direct_perm(Group, /group, _, _, _, _, _).
+
+# Group impersonation, from a binding subject's grants. Like user
+# impersonation, only a cluster-wide grant counts: a RoleBinding allowing
+# impersonate on groups allows nothing. A named grant reaches only the
+# groups it names, and only a group that holds a grant gains anything.
+Decl subject_impersonatable_group(Name, Kind, Group)
+  descr [
+    doc("Whoever acts as binding subject (Kind, Name) can impersonate Group, which holds grants."),
+    arg(Name, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
+    arg(Kind, "/user, /group or /serviceaccount"),
+    arg(Group, "group whose direct_perm grants the impersonator can use")
+  ].
+
+subject_impersonatable_group(Name, Kind, Group) :-
+    grant_group_impersonate(Name, Kind, "", /any),
+    group_has_grant(Group).
+
+subject_impersonatable_group(Name, Kind, Group) :-
+    grant_group_impersonate(Name, Kind, "", Group),
+    group_has_grant(Group).
+
+# The same from a principal as it logs in and from an assumed identity.
+perm_group_impersonate(P, Group) :-
+    principal_subject(P, Kind, Name),
+    subject_impersonatable_group(Name, Kind, Group).
+
+assumed_group_impersonate(Identity, Group) :-
+    assumed_subject(Identity, Kind, Name),
+    subject_impersonatable_group(Name, Kind, Group).
 
 # ---- controls_identity and controls_group ----
 #
@@ -307,7 +345,6 @@ controls_identity(P, Target) :-
     group_escalation_hop(Group, Target),
     P != Target.
 
-# Group impersonation reaches every group that holds a grant.
 Decl controls_group(Principal, Group)
   descr [
     doc("Principal, or an identity it controls, can impersonate Group, which holds grants."),
@@ -316,13 +353,11 @@ Decl controls_group(Principal, Group)
   ].
 
 controls_group(P, Group) :-
-    perm_group_impersonate(P),
-    group_has_grant(Group).
+    perm_group_impersonate(P, Group).
 
 controls_group(P, Group) :-
     controls_identity(P, Mid),
-    assumed_group_impersonate(Mid),
-    group_has_grant(Group).
+    assumed_group_impersonate(Mid, Group).
 
 # ---- Escalation from groups ----
 #
@@ -371,12 +406,10 @@ Decl group_controls_group(Group, Other)
   ].
 
 group_controls_group(Group, Other) :-
-    grant_group_impersonate(Group, /group, ""),
-    group_has_grant(Other),
+    subject_impersonatable_group(Group, /group, Other),
     Group != Other.
 
 group_controls_group(Group, Other) :-
     group_controls_identity(Group, Mid),
-    assumed_group_impersonate(Mid),
-    group_has_grant(Other),
+    assumed_group_impersonate(Mid, Other),
     Group != Other.

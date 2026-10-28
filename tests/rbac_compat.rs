@@ -51,7 +51,7 @@
 //! |----------------------------------------|---------------------------------------------------------|
 //! | impersonate user U                     | `escalation_hop(P, U)`                                  |
 //! | impersonate ServiceAccount ns/name     | `principal_subject(P, K, N)`, `subject_impersonatable_sa(N, K, ns, name)` |
-//! | impersonate group G                    | `perm_group_impersonate(P)`, `group_has_grant(G)`       |
+//! | impersonate group G                    | `perm_group_impersonate(P, G)`                          |
 //! | create ClusterRoleBinding of R         | `rbac_write_role(P, /principal, "bind", "", R)`         |
 //! | update ClusterRoleBinding B (of R)     | `rbac_write_role(P, /principal, "bind", B, R)`          |
 //! | create RoleBinding in ns of K R        | `rbac_write_binding_direct(P, _, "bind", ns, "", K, R)`, or `*` for ns when K is ClusterRole |
@@ -342,14 +342,11 @@ fn decide_escalation(
             impersonatable_accounts.insert((principal.clone(), row[2].clone(), row[3].clone()));
         }
     }
-    let group_impersonators: BTreeSet<String> = text_rows(&results, "perm_group_impersonate", 1)?
-        .into_iter()
-        .map(|row| row[0].clone())
-        .collect();
-    let groups_with_grants: BTreeSet<String> = text_rows(&results, "group_has_grant", 1)?
-        .into_iter()
-        .map(|row| row[0].clone())
-        .collect();
+    let impersonatable_groups: BTreeSet<(String, String)> =
+        text_rows(&results, "perm_group_impersonate", 2)?
+            .into_iter()
+            .map(|row| (row[0].clone(), row[1].clone()))
+            .collect();
     // (writer, mechanism, binding, role) for users and ServiceAccounts.
     let write_roles: BTreeSet<(String, String, String, String)> =
         text_rows(&results, "rbac_write_role", 5)?
@@ -419,7 +416,7 @@ fn decide_escalation(
                 name.clone(),
             )),
             ("impersonate", "groups", _) => {
-                group_impersonators.contains(&user) && groups_with_grants.contains(&name)
+                impersonatable_groups.contains(&(user.clone(), name.clone()))
             }
             ("impersonate", other, _) => bail!("cannot impersonate {other}"),
             ("write", _, _) if write_anything.contains(&user) => true,

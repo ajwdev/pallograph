@@ -11,13 +11,7 @@
     "write under-grant: total": 39,
     "write under-grant: write-allowed-by-covering-rules": 39
   },
-  "impersonation": {
-    "impersonate over-grant: denied-by-resource-names": 14,
-    "impersonate over-grant: request-impersonate-groups": 3,
-    "impersonate over-grant: request-impersonate-serviceaccounts": 2,
-    "impersonate over-grant: request-impersonate-users": 9,
-    "impersonate over-grant: total": 14
-  },
+  "impersonation": {},
   "known-over-grants": {},
   "names-urls-subresources": {},
   "rbac-writes": {
