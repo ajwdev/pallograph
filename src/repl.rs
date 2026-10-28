@@ -3510,7 +3510,7 @@ mod source_tests {
             "Decl thing(Name) descr [doc(\"a thing\")].\n",
             "thing(\"a\").\n",
             "role_rule(\"ns\", \"r\", {/apiGroups: [\"\"], /resources: [\"pods\"], /verbs: [\"get\"]}).\n",
-            "role_count(N) :- role_rule(_, _, _) |> do fn:group_by(), let N = fn:count().\n",
+            "role_count(N) :- role_rule(Ns, _, _) |> do fn:group_by(), let N = fn:count(Ns).\n",
             "thing_twice(X, X) :- thing(X).\n",
         );
         for (name, backend) in backends() {

@@ -115,12 +115,10 @@ Known upstream `mangle-rs` bugs, deliberately not patched here:
 - A typo'd `:builtin` atom silently becomes a join against an empty relation,
   on both backends (`dd_call_filter_guard_rejects_unsupported` in
   `src/dd/session.rs`).
-- `fn:collect_distinct` fails on both backends (comment in
-  `tests/dd_interp_parity.rs`).
-- A variable repeated in one atom (`edge(X, X)`) loses its equality check,
-  and the two backends return different wrong answers
-  (`repeated_variable_in_atom`, an ignored test in
-  `tests/dd_interp_parity.rs`).
+- The bounds checker rejects a zero-argument `fn:count()` ("reducer function
+  fn:count expects at least one argument"). mangle-go is the reverse: it
+  declares `fn:count` with arity 0 and rejects `fn:count(X)`. No form works
+  on both, so rules here write `fn:count(X)` with a body variable.
 - Multiple GroupBy rules in one ruleset collide on a shared temp relation in
   the interpreter only, so `rules/summary.mg` keeps a single GroupBy rule.
 - The interpreter indexes a struct-valued column by its field count alone

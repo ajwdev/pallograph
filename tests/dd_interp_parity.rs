@@ -297,22 +297,24 @@ fn aggregate_collect() {
     );
 }
 
-// NOTE: `fn:collect_distinct` is intentionally not tested because both backends
-// currently reject it. The mangle planner's aggregate allow-list
-// (`try_parse_aggregate` in mangle-analysis/src/planner.rs) includes `fn:collect`
-// but not `fn:collect_distinct`, so it is never routed as an aggregate and falls
-// through to the shared scalar `eval_function`, which errors "Unknown function"
-// on both backends. The `eval_aggregate` arms for it (interpreter + DD) are dead
-// code until the planner allow-list is updated upstream; this is not a
-// DD-vs-interpreter divergence.
-
-// A variable repeated within one body atom (`edge(X, X)`) loses its equality
-// check in the mangle planner: `bound_vars` in mangle-analysis planner.rs is
-// only updated after the scan, so no `Eq` constraint is emitted. The backends
-// then misbind differently (interpreter yields 2, 3; DD yields 1, 3), where
-// the correct answer is 3 alone. Ignored until fixed upstream.
 #[test]
-#[ignore = "upstream mangle planner drops the repeated-variable equality check"]
+fn aggregate_collect_distinct() {
+    let e = edb(&[
+        ("item", vec![s("a"), n(1)]),
+        ("item", vec![s("a"), n(1)]),
+        ("item", vec![s("a"), n(2)]),
+        ("item", vec![s("b"), n(5)]),
+    ]);
+    assert_parity_unordered(
+        "collect_distinct",
+        &e,
+        "Decl item(Cat, Val).\nDecl grouped(Cat, L).\n\
+         grouped(Cat, L) :- item(Cat, Val) |> do fn:group_by(Cat), let L = fn:collect_distinct(Val).",
+    );
+}
+
+// A variable repeated within one body atom must match only equal arguments.
+#[test]
 fn repeated_variable_in_atom() {
     let e = edb(&[("edge", vec![n(1), n(2)]), ("edge", vec![n(3), n(3)])]);
     assert_parity(
@@ -769,9 +771,9 @@ fn time_and_duration_values() {
         "Decl issued(Tok, T).\nDecl ttl(Tok, D).\nDecl now(N).\n\
          Decl expires(Tok, E).\nDecl expired(Tok).\nDecl ttl_limit(Tok, D, L).\nDecl long_lived(Tok).\n\
          expires(Tok, E) :- issued(Tok, T), ttl(Tok, D) |> let E = fn:time:add(T, D).\n\
-         expired(Tok) :- expires(Tok, E), now(N), E < N.\n\
+         expired(Tok) :- expires(Tok, E), now(N), :time:lt(E, N).\n\
          ttl_limit(Tok, D, L) :- ttl(Tok, D) |> let L = fn:duration:from_hours(2).\n\
-         long_lived(Tok) :- ttl_limit(Tok, D, L), D > L.",
+         long_lived(Tok) :- ttl_limit(Tok, D, L), :duration:gt(D, L).",
     );
 }
 
