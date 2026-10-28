@@ -52,6 +52,10 @@ pub struct Violation {
 /// the rules and this module disagree.
 const UNKNOWN_MECHANISM: &str = "unknown";
 
+/// Binding or role name shown for one a principal would create by writing
+/// RBAC objects.
+const NEW_OBJECT: &str = "(new)";
+
 /// A Role is keyed by (namespace, name); a ClusterRole by ("", name).
 type RoleKey = (&'static str, String, String);
 
@@ -282,7 +286,7 @@ impl RbacAccessModel {
     /// Like `check_access_invariant` but escalation-aware.
     /// Enumerates all principals that can reach `(namespace, apigroup, resource, verb)`
     /// via direct RBAC grants *or* via `controls_identity` and `controls_group`
-    /// escalation.
+    /// escalation, or by writing RBAC objects (`rbac_write_perm`).
     pub fn check_reaches(
         &self,
         namespace: &str,
@@ -374,7 +378,9 @@ impl RbacAccessModel {
     /// when `perm_filter` is `Some((namespace, apigroup, resource, verb))`, and only for targets that
     /// actually satisfy that query (`permission_covers`). Targets are identities from `controls_identity` and groups
     /// from `controls_group`, or their `group_` counterparts when `principal`
-    /// is a group. Self-referential via entries are always excluded.
+    /// is a group. Self-referential via entries are always excluded, except
+    /// for a role `principal` can grant itself by writing RBAC objects,
+    /// shown as one hop from `principal` (`collect_rbac_write_paths`).
     ///
     /// Pass `None` for direct-grant queries (`check_access_invariant`) where
     /// escalation paths are out of scope.
@@ -441,7 +447,52 @@ impl RbacAccessModel {
             self.collect_binding_paths(target_subjects, hops.clone(), perm_filter, &mut paths);
         }
 
+        self.collect_rbac_write_paths(principal, query, &mut paths);
         paths
+    }
+
+    /// Append a path for each ClusterRole `principal` can grant itself by
+    /// writing RBAC objects (`rbac_write_perm`) whose permissions cover
+    /// `query`: one hop from `principal` itself, labeled with the verb that
+    /// lets the write through, to the binding it would create or update.
+    fn collect_rbac_write_paths(
+        &self,
+        principal: &Subject,
+        query: PermissionPattern<'_>,
+        out: &mut Vec<AccessPath>,
+    ) {
+        let found: BTreeSet<(&str, &str, &str)> = self
+            .tables
+            .rbac_writes
+            .get(principal)
+            .into_iter()
+            .flatten()
+            .filter(|write| permission_covers(&write.permission, query))
+            .map(|write| {
+                (
+                    write.mechanism.as_str(),
+                    write.binding.as_str(),
+                    write.role.as_str(),
+                )
+            })
+            .collect();
+        let or_new = |name: &str| {
+            if name.is_empty() {
+                NEW_OBJECT.to_string()
+            } else {
+                name.to_string()
+            }
+        };
+        for (mechanism, binding, role) in found {
+            out.push(AccessPath {
+                binding_kind: "ClusterRoleBinding",
+                binding_namespace: String::new(),
+                binding_name: or_new(binding),
+                role_kind: "ClusterRole",
+                role_name: or_new(role),
+                hops: vec![(principal.clone(), mechanism.to_string())],
+            });
+        }
     }
 
     /// The shortest escalation chains from `principal`, as a tree: for each
@@ -1362,6 +1413,68 @@ mod tests {
             [(
                 "admins",
                 vec![(Subject::group("admins"), "impersonate".to_string())]
+            )]
+        );
+    }
+
+    #[test]
+    fn rbac_writes_reach_cluster_admin() {
+        // ns1:sa-a may bind and escalate clusterroles and create
+        // clusterrolebindings, without holding */*/*: binding cluster-admin
+        // to itself reaches it, shown as a bind hop from sa-a to a new
+        // ClusterRoleBinding. ns1:sa-b may only create clusterrolebindings,
+        // which grants nothing it does not already hold.
+        let eval = load_engine_with(concat!(
+            r#"{"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"sa-a","namespace":"ns1"}}"#,
+            "\n",
+            r#"{"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"sa-b","namespace":"ns1"}}"#,
+            "\n",
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"rbac-manager"},"rules":[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterroles"],"verbs":["bind","escalate"]},{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterrolebindings"],"verbs":["create"]}]}"#,
+            "\n",
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"sa-a"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"rbac-manager"},"subjects":[{"kind":"ServiceAccount","name":"sa-a","namespace":"ns1"}]}"#,
+            "\n",
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"binding-creator"},"rules":[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterrolebindings"],"verbs":["create"]}]}"#,
+            "\n",
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding","metadata":{"name":"sa-b"},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"binding-creator"},"subjects":[{"kind":"ServiceAccount","name":"sa-b","namespace":"ns1"}]}"#,
+            "\n",
+        ))
+        .evaluate()
+        .expect("evaluate");
+        let model = RbacAccessModel::from_store(&eval);
+        let sa_a = Subject::username("system:serviceaccount:ns1:sa-a");
+        let sa_b = Subject::username("system:serviceaccount:ns1:sa-b");
+
+        assert!(
+            model
+                .direct_violations("", "*", "*", "*")
+                .iter()
+                .all(|v| v.principal != sa_a),
+            "sa-a holds no direct */*/* grant"
+        );
+        let via = model.check_reaches("", "*", "*", "*", &[], false);
+        let principals: Vec<&Subject> = via.iter().map(|v| &v.principal).collect();
+        assert!(!principals.contains(&&sa_b), "sa-b in {principals:?}");
+        let found = via
+            .iter()
+            .find(|v| v.principal == sa_a)
+            .unwrap_or_else(|| panic!("sa-a missing from {principals:?}"));
+        let shown: Vec<(&str, &str, Vec<(Subject, String)>)> = found
+            .paths
+            .iter()
+            .map(|p| {
+                (
+                    p.binding_name.as_str(),
+                    p.role_name.as_str(),
+                    p.hops.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [(
+                "(new)",
+                "cluster-admin",
+                vec![(sa_a.clone(), "bind".to_string())]
             )]
         );
     }

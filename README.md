@@ -162,9 +162,11 @@ Other flags worth knowing:
 ## How it works
 
 The rules live in [`rules/`](rules/) as plain Mangle files. `base.mg` projects
-raw objects into typed relations; the three `rbac*.mg` files model RBAC (see
-below); `escalation.mg` models identity theft paths (exec into a pod, mint a
-token, impersonate); `labels.mg` implements label selectors; `summary.mg` does
+raw objects into typed relations; the three `rbac_roles.mg`, `rbac_subjects.mg`
+and `rbac.mg` files model RBAC (see below); `escalation.mg` models identity
+theft paths (exec into a pod, mint a token, impersonate); `rbac_write.mg`
+models granting yourself a ClusterRole by writing RBAC objects (`bind`,
+`escalate`); `labels.mg` implements label selectors; `summary.mg` does
 inventory counts. `build.rs` compiles every rule file at build time, so a
 broken rule fails `cargo build` instead of your demo.
 
