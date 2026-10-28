@@ -116,12 +116,36 @@ impl Workspace {
         self.run(&["--script".as_ref(), path.as_os_str()], "")
     }
 
+    /// Like [`run_script`], but with rc enabled: write `rc` to a file passed as
+    /// `--rcfile` (so it runs before the script) instead of `--no-rc`.
+    fn run_script_with_rcfile(&self, rc: &str, script: &str) -> Output {
+        let rc_path = self.dir.join("pallographrc");
+        std::fs::write(&rc_path, rc).expect("write rc");
+        let script_path = self.dir.join("script.pg");
+        std::fs::write(&script_path, script).expect("write script");
+        let child = Command::new(env!("CARGO_BIN_EXE_pallograph"))
+            .arg("-C")
+            .arg(self.dir.join("pallograph.toml"))
+            .args(["--profile", "dev"])
+            .arg("--rcfile")
+            .arg(&rc_path)
+            .arg("--script")
+            .arg(&script_path)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn pallograph");
+        child.wait_with_output().expect("wait")
+    }
+
     /// Run with extra arguments, feeding `stdin`.
     fn run(&self, args: &[&std::ffi::OsStr], stdin: &str) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_pallograph"))
             .arg("-C")
             .arg(self.dir.join("pallograph.toml"))
-            .args(["--profile", "dev"])
+            .args(["--profile", "dev", "--no-rc"])
             .args(args)
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .stdin(Stdio::piped())
@@ -471,4 +495,76 @@ fn diff_relation_approved_admin_absent() {
     let stdout = stdout(&out);
     assert!(stdout.contains("(no changes)"), "{stdout}");
     assert!(!stdout.contains("eve@example.com"), "{stdout}");
+}
+
+#[test]
+fn alias_expands_on_bare_command() {
+    // `alias` defines a shorthand; typing it runs the expansion (here the
+    // escalation-aware cluster-admin check), not an "unknown command".
+    let ws = Workspace::new();
+    let out = ws.run_script("alias ca rbac::cluster-admin\nca\n");
+    let combined = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(
+        !combined.contains("Unknown command"),
+        "alias did not expand: {combined}"
+    );
+    assert!(
+        combined.contains("can reach") || combined.contains("effective_can"),
+        "{combined}"
+    );
+}
+
+#[test]
+fn unalias_removes_the_alias() {
+    let ws = Workspace::new();
+    let out = ws.run_script("alias ca rbac::cluster-admin\nunalias ca\nca\n");
+    assert!(
+        stderr(&out).contains("Unknown command: ca"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn qualified_form_bypasses_an_alias() {
+    // Shadow a builtin with an alias, then confirm the `::`-qualified form still
+    // runs the real command rather than the alias.
+    let ws = Workspace::new();
+    let out = ws.run_script("alias show rbac::cluster-admin\n::show\n");
+    let combined = format!("{}{}", stdout(&out), stderr(&out));
+    // `::show` lists relations (the fixture has `pod`), not a reachability check.
+    assert!(
+        !combined.contains("can reach"),
+        "alias was not bypassed: {combined}"
+    );
+}
+
+#[test]
+fn rcfile_runs_before_the_script() {
+    // An alias defined in the rc file is available to the script that follows.
+    let ws = Workspace::new();
+    let out = ws.run_script_with_rcfile("alias ca rbac::cluster-admin\n", "ca\n");
+    let combined = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(
+        !combined.contains("Unknown command"),
+        "rc alias not applied: {combined}"
+    );
+    assert!(
+        combined.contains("can reach") || combined.contains("effective_can"),
+        "{combined}"
+    );
+}
+
+#[test]
+fn rcfile_error_warns_but_session_continues() {
+    // A broken rc line must warn and not abort: the clean script that follows
+    // still runs and the session exits 0.
+    let ws = Workspace::new();
+    let out = ws.run_script_with_rcfile("bogus-rc-command\n", "snapshot base\nrbac::diff base\n");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Unknown command: bogus-rc-command"),
+        "{}",
+        stderr(&out)
+    );
 }

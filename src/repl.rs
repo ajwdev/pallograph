@@ -266,12 +266,21 @@ fn print_help() {
     println!(
         "  format default|compact|pretty|table|ndjson - set output format (compact = bare tuples, table = aligned columns, ndjson = one JSON object per row)"
     );
+    println!(
+        "  alias [<name> [<command...>]]          - list, show, or define a command alias (expanded on a bare command's first token)"
+    );
+    println!("  unalias <name>                         - remove an alias");
     println!("  !<cmd>                                 - run a shell command");
     println!(
         "  # <text>                               - comment, ignored (handy in --script files)"
     );
     println!("  help                                   - show this help");
     println!("  quit                                   - exit");
+    println!();
+    println!(
+        "Startup: commands in $XDG_CONFIG_HOME/pallograph/pallographrc (then ./.pallographrc)"
+    );
+    println!("run first; put `alias` and `format` lines there. --rcfile <f> / --no-rc override.");
     println!();
 }
 
@@ -581,7 +590,12 @@ impl Input {
 /// Run the REPL until EOF or `quit`. A command that fails prints an error
 /// and the session carries on, so this returns `Findings` if any `rbac::`/
 /// `sched::` check failed or `rbac::diff` found new permissions, else `Clean`.
-pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Result<SessionStatus> {
+pub fn run(
+    engine: &mut Engine,
+    store: EvalStore,
+    format: OutputFormat,
+    rc: Vec<String>,
+) -> Result<SessionStatus> {
     // Banner is interactive chrome: skip it when stdout is redirected so a
     // piped session (e.g. `... | pallograph --format ndjson > out.json`) yields
     // clean data. Status/diagnostic lines go to stderr for the same reason.
@@ -601,7 +615,13 @@ pub fn run(engine: &mut Engine, store: EvalStore, format: OutputFormat) -> Resul
     }));
     let _ = rl.load_history(&history_path);
     let rl = Box::new(rl);
-    session(engine, store, format, Input::Editor { rl, history_path })
+    session(
+        engine,
+        store,
+        format,
+        rc,
+        Input::Editor { rl, history_path },
+    )
 }
 
 /// Run the commands in `path` (`-` for stdin), one per line, through the
@@ -612,6 +632,7 @@ pub fn run_script(
     store: EvalStore,
     format: OutputFormat,
     path: &std::path::Path,
+    rc: Vec<String>,
 ) -> Result<SessionStatus> {
     let reader: Box<dyn std::io::BufRead> = if path == std::path::Path::new("-") {
         Box::new(std::io::stdin().lock())
@@ -620,13 +641,14 @@ pub fn run_script(
             .with_context(|| format!("opening script {}", path.display()))?;
         Box::new(std::io::BufReader::new(file))
     };
-    session(engine, store, format, Input::Script(reader))
+    session(engine, store, format, rc, Input::Script(reader))
 }
 
 fn session(
     engine: &mut Engine,
     store: EvalStore,
     format: OutputFormat,
+    rc: Vec<String>,
     mut input: Input,
 ) -> Result<SessionStatus> {
     // A script stops at its first failed line; the REPL carries on.
@@ -649,6 +671,10 @@ fn session(
     let mut had_failure = false;
     let mut query_counter: u32 = 0;
     let mut snapshots: BTreeMap<String, FrozenState> = BTreeMap::new();
+    // User-defined command aliases (see the `alias` command and the rc file).
+    // A bare command's first token is expanded textually before dispatch; a
+    // `::`-qualified command bypasses them.
+    let mut aliases: BTreeMap<String, String> = BTreeMap::new();
     // The `bool` is whether the line belongs in rustyline history: `true` for
     // a pasted multi-line command split apart below, `false` for the inner
     // command and restore sentinel a `use <name> <command>` one-shot queues,
@@ -664,8 +690,22 @@ fn session(
     // of reach of anything a person could type.
     const USE_RESTORE_PREFIX: &str = "\0use-restore:";
 
+    // rc (startup) lines run first, through the same dispatcher, followed by a
+    // sentinel marking the end of the startup phase. rc errors warn and
+    // continue: they must not stop a `--script` run or set the exit status, so
+    // the sentinel clears any findings/errors the rc lines produced.
+    const RC_END: &str = "\0rc-end";
+    let mut in_rc = false;
+    if !rc.is_empty() {
+        in_rc = true;
+        for line in rc {
+            pending.push_back((line, false));
+        }
+        pending.push_back((RC_END.to_string(), false));
+    }
+
     loop {
-        if stop_on_error && command_failed {
+        if stop_on_error && command_failed && !in_rc {
             break;
         }
         let (raw, to_history) = if let Some((queued, to_history)) = pending.pop_front() {
@@ -675,6 +715,14 @@ fn session(
         };
         match raw {
             Ok(line) => {
+                if line == RC_END {
+                    // Startup phase done: discard any findings/errors the rc
+                    // lines produced so they do not affect the exit status.
+                    in_rc = false;
+                    command_failed = false;
+                    had_failure = false;
+                    continue;
+                }
                 if let Some(prev) = line.strip_prefix(USE_RESTORE_PREFIX) {
                     in_use = (!prev.is_empty()).then(|| prev.to_string());
                     continue;
@@ -691,9 +739,17 @@ fn session(
                 // (`#`, handled above) are not commands and are left untouched.
                 let line = if line.starts_with("::") || line.starts_with(['?', '!', '+', '-', '~'])
                 {
+                    // `::` is the fully-qualified form and bypasses aliases.
                     line
                 } else {
-                    format!("::{line}")
+                    // A bare command: expand a user alias on its first token (if
+                    // any), then canonicalize to the `::` form.
+                    let expanded = expand_aliases(&line, &aliases);
+                    if expanded.starts_with("::") {
+                        expanded
+                    } else {
+                        format!("::{expanded}")
+                    }
                 };
                 // Split pasted multi-line input into individual commands.
                 // Only split at newlines where parentheses are balanced and we're
@@ -759,6 +815,44 @@ fn session(
                 }
                 if line == "::help" {
                     print_help();
+                    continue;
+                }
+                // `alias` (no args) lists; `alias <name> <command...>` defines a
+                // textual shorthand expanded on a bare command's first token;
+                // `alias <name>` shows one. Persist aliases by putting them in
+                // the rc file. A `::`-qualified command bypasses aliases.
+                if line == "::alias" || line.starts_with("::alias ") {
+                    let rest = line.strip_prefix("::alias").unwrap_or("").trim();
+                    if rest.is_empty() {
+                        if aliases.is_empty() {
+                            println!("No aliases defined.");
+                        } else {
+                            for (name, body) in &aliases {
+                                println!("  {name} = {body}");
+                            }
+                        }
+                    } else if let Some((name, body)) = rest.split_once(char::is_whitespace) {
+                        let body = body.trim();
+                        if body.is_empty() {
+                            command_error!("Usage: alias <name> <command...>");
+                        } else {
+                            aliases.insert(name.to_string(), body.to_string());
+                        }
+                    } else {
+                        match aliases.get(rest) {
+                            Some(body) => println!("  {rest} = {body}"),
+                            None => command_error!("No alias named '{rest}'."),
+                        }
+                    }
+                    continue;
+                }
+                if line == "::unalias" || line.starts_with("::unalias ") {
+                    let name = line.strip_prefix("::unalias").unwrap_or("").trim();
+                    if name.is_empty() {
+                        command_error!("Usage: unalias <name>");
+                    } else if aliases.remove(name).is_none() {
+                        command_error!("No alias named '{name}'.");
+                    }
                     continue;
                 }
                 if line == "::pretty" {
@@ -2478,6 +2572,79 @@ fn dirs_home() -> std::path::PathBuf {
     std::env::var("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// Directory for user config, following the XDG Base Directory spec on every
+/// platform: `$XDG_CONFIG_HOME` if set, else `$HOME/.config`. (Deliberately not
+/// `dirs::config_dir()`, which is `~/Library/Application Support` on macOS.)
+fn xdg_config_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("XDG_CONFIG_HOME")
+        && !dir.is_empty()
+    {
+        return Some(std::path::PathBuf::from(dir));
+    }
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(|h| std::path::PathBuf::from(h).join(".config"))
+}
+
+/// Collect startup (rc) command lines, run through the normal dispatcher before
+/// the REPL or `--script`. With `--rcfile <path>`, read only that file (and warn
+/// if it is missing). Otherwise read `$XDG_CONFIG_HOME/pallograph/pallographrc`
+/// (default `~/.config/pallograph/pallographrc`) then `./.pallographrc`, each
+/// optional and appended in that order; a missing default file is skipped
+/// silently. `--no-rc` skips everything.
+pub fn load_rc(rcfile: Option<&std::path::Path>, no_rc: bool) -> Vec<String> {
+    if no_rc {
+        return Vec::new();
+    }
+    let explicit = rcfile.is_some();
+    let paths: Vec<std::path::PathBuf> = if let Some(path) = rcfile {
+        vec![path.to_path_buf()]
+    } else {
+        let mut paths = Vec::new();
+        if let Some(dir) = xdg_config_dir() {
+            paths.push(dir.join("pallograph").join("pallographrc"));
+        }
+        paths.push(std::path::PathBuf::from(".pallographrc"));
+        paths
+    };
+
+    let mut lines = Vec::new();
+    for path in paths {
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => lines.extend(contents.lines().map(str::to_string)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !explicit => {}
+            Err(e) => eprintln!("warning: could not read rc file {}: {e}", path.display()),
+        }
+    }
+    lines
+}
+
+/// Expand a user alias on the command's first token, repeatedly, until the first
+/// token is not an alias or a depth limit is hit (guarding against cycles). A
+/// `::`-qualified command bypasses aliases entirely.
+fn expand_aliases(line: &str, aliases: &BTreeMap<String, String>) -> String {
+    let mut line = line.to_string();
+    for _ in 0..16 {
+        if line.starts_with("::") {
+            break;
+        }
+        let (head, rest) = match line.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r),
+            None => (line.as_str(), ""),
+        };
+        let Some(body) = aliases.get(head) else {
+            break;
+        };
+        line = if rest.is_empty() {
+            body.clone()
+        } else {
+            format!("{body} {rest}")
+        };
+    }
+    line
 }
 
 /// Pretty-print a Value: expand structs/lists with indentation.

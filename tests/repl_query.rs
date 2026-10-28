@@ -54,7 +54,7 @@ fn run_session_loading(extra_paths: &[&Path], args: &[&str], commands: &str) -> 
     let mut child = Command::new(env!("CARGO_BIN_EXE_pallograph"))
         .arg("-C")
         .arg(&config)
-        .args(["--profile", "dev"])
+        .args(["--profile", "dev", "--no-rc"])
         .args(args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(Stdio::piped())

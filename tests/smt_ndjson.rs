@@ -36,7 +36,7 @@ fn run_session(commands: &str, format: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_pallograph"))
         .arg("-C")
         .arg(&config)
-        .args(["--profile", "dev", "--format", format])
+        .args(["--profile", "dev", "--format", format, "--no-rc"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

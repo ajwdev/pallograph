@@ -60,6 +60,17 @@ struct Cli {
     /// `rbac::diff` finding new permissions), 2 on an error.
     #[arg(long, value_name = "FILE")]
     script: Option<PathBuf>,
+
+    /// Read startup commands from this rc file instead of the default search
+    /// locations ($XDG_CONFIG_HOME/pallograph/pallographrc, then
+    /// ./.pallographrc). Lines run before the REPL or `--script`, same syntax;
+    /// a good place for `alias` and `format`.
+    #[arg(long, value_name = "FILE")]
+    rcfile: Option<PathBuf>,
+
+    /// Skip all rc files.
+    #[arg(long)]
+    no_rc: bool,
 }
 
 /// Load one datasource. k8s objects go to `objects` so the engine can track
@@ -207,9 +218,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
 
     let store = engine.evaluate()?;
 
+    let rc = repl::load_rc(cli.rcfile.as_deref(), cli.no_rc);
     let status = match &cli.script {
-        Some(path) => repl::run_script(&mut engine, store, cli.format, path)?,
-        None => repl::run(&mut engine, store, cli.format)?,
+        Some(path) => repl::run_script(&mut engine, store, cli.format, path, rc)?,
+        None => repl::run(&mut engine, store, cli.format, rc)?,
     };
     Ok(ExitCode::from(status.exit_code()))
 }
