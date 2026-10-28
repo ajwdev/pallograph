@@ -9,18 +9,18 @@ default-run = "pallograph"
 debug = true # Keeps debug symbols without sacrificing release optimizations
 
 [build-dependencies]
-mangle-ast    = "0.9.1"
-mangle-driver = "0.9.1"
+mangle-ast    = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }
+mangle-driver = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }
 glob          = "0.3"
 
 [dependencies]
-mangle-ast         = "0.9.1"
-mangle-parse       = "0.9.1"
-mangle-common      = "0.9.1"
-mangle-driver      = "0.9.1"
-mangle-interpreter = "0.9.1"
-mangle-analysis    = "0.9.1"
-mangle-ir          = "0.9.1"
+mangle-ast         = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }
+mangle-parse       = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }
+mangle-common      = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }
+mangle-driver      = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }
+mangle-interpreter = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }
+mangle-analysis    = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }
+mangle-ir          = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }
 
 serde       = { version = "1", features = ["derive", "rc"] }
 serde_json  = { version = "1", features = ["preserve_order"] }
@@ -43,7 +43,7 @@ z3 = "0.12"
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 # Used by integration tests (tests/) to construct `Value` fixtures.
-mangle-common = "0.9.1"
+mangle-common = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }
 
 [[bench]]
 name = "small_bulk_load"

@@ -115,19 +115,24 @@ Known upstream `mangle-rs` bugs, deliberately not patched here:
 - A typo'd `:builtin` atom silently becomes a join against an empty relation,
   on both backends (`dd_call_filter_guard_rejects_unsupported` in
   `src/dd/session.rs`).
-- `fn:collect_distinct` fails on both backends (comment in
-  `tests/dd_interp_parity.rs`).
-- A variable repeated in one atom (`edge(X, X)`) loses its equality check,
-  and the two backends return different wrong answers
-  (`repeated_variable_in_atom`, an ignored test in
-  `tests/dd_interp_parity.rs`).
-- Multiple GroupBy rules in one ruleset collide on a shared temp relation in
-  the interpreter only, so `rules/summary.mg` keeps a single GroupBy rule.
+- The bounds checker rejects a zero-argument `fn:count()` ("reducer function
+  fn:count expects at least one argument"). mangle-go is the reverse: it
+  declares `fn:count` with arity 0 and rejects `fn:count(X)`. No form works
+  on both, so rules here write `fn:count(X)` with a body variable.
+- In the interpreter only, every GroupBy rule copies its body rows into the
+  same temp relation (`$temp_grp_0`), even across strata. When two GroupBy
+  rules read different relations, one picks up the other's rows (wrong
+  counts and sums, extra groups) or loses its output entirely. So
+  `rules/summary.mg` keeps a single GroupBy rule.
 - The interpreter indexes a struct-valued column by its field count alone
   (`value_to_index_key` in `mangle-interpreter`), so a lookup keyed on a
   struct (e.g. a PolicyRule `Rule`) returns nearly every row. Results stay
   correct, but evaluation is slow. `policy_rule_has_wildcard_verb` in
-  `rules/rbac_roles.mg` is shaped around it.
+  `rules/policies.mg` is shaped around it.
+- The interpreter's store checks each new fact against every row already in
+  its relation (`Vec::contains` in `MemStore::add_fact`), so loading facts
+  takes quadratic time: about 0.76s for 20k facts in one relation, against
+  0.007s on the DD backend.
 
 Don't work around these by making the DD backend diverge from the
 interpreter. Leave the affected test ignored or the rule shaped around the bug.
