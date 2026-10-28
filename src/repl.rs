@@ -25,6 +25,134 @@ use crate::snapshot::{Diff, FrozenState};
 
 struct ReplHelper {
     path_completer: FilenameCompleter,
+    /// Alias names, refreshed before each prompt (see `Input::set_completions`).
+    aliases: Vec<String>,
+    /// Relation names in the active state, for `?-`/`show`/`why`/`+` completion.
+    relations: Vec<String>,
+}
+
+/// Completable command paths: root verbs, subsystem namespaces, and their
+/// subcommands. Kept in step with the dispatcher by hand; see `print_help`.
+fn command_completions() -> &'static [&'static str] {
+    &[
+        // Root verbs.
+        "show",
+        "why",
+        "query",
+        "define",
+        "source",
+        "load",
+        "snapshot",
+        "rollback",
+        "diff",
+        "diff-relation",
+        "use",
+        "format",
+        "pretty",
+        "smtlib",
+        "alias",
+        "unalias",
+        "apply-delta",
+        "help",
+        "quit",
+        // Subsystem namespaces (a bare `rbac` completes to `rbac::`).
+        "rbac::",
+        "sched::",
+        "k8s::",
+        // Subsystem subcommands.
+        "rbac::access",
+        "rbac::reaches",
+        "rbac::cluster-admin",
+        "rbac::isolation",
+        "rbac::diff",
+        "sched::node-selector",
+        "sched::anti-affinity",
+        "sched::karpenter",
+        "k8s::load",
+        "k8s::match",
+        "k8s::match-all",
+    ]
+}
+
+fn completion_pair(s: String) -> Pair {
+    Pair {
+        display: s.clone(),
+        replacement: s,
+    }
+}
+
+/// What to complete for the text before the cursor. The file cases need
+/// rustyline's `Context`, so they are returned as `Files` for [`Completer`] to
+/// run; the rest are resolved here (and unit-tested) as concrete candidates.
+#[derive(Debug, PartialEq)]
+enum CompletionPlan {
+    /// Replace from this byte offset with these candidate strings.
+    Words(usize, Vec<String>),
+    /// Defer to the file-path completer.
+    Files,
+    /// Nothing to complete.
+    Nothing,
+}
+
+/// Plan completion for `before` (the text left of the cursor), given the current
+/// `aliases` and `relations`. Pure, so it can be tested without a terminal.
+fn plan_completion(before: &str, aliases: &[String], relations: &[String]) -> CompletionPlan {
+    let word_start = before
+        .rfind(char::is_whitespace)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let word = &before[word_start..];
+    let completing_command = before[..word_start].trim().is_empty();
+
+    if completing_command {
+        // Fact mutators take a relation name as their first token.
+        if let Some(first) = word.chars().next()
+            && matches!(first, '+' | '-' | '~')
+        {
+            let bare = &word[1..];
+            let cands = relations
+                .iter()
+                .filter(|r| r.starts_with(bare))
+                .map(|r| format!("{first}{r}"))
+                .collect();
+            return CompletionPlan::Words(word_start, cands);
+        }
+        // Command paths and alias names. A leading `::` (the fully-qualified
+        // form) is matched against the same set and preserved in the result.
+        let (prefix, bare) = match word.strip_prefix("::") {
+            Some(rest) => ("::", rest),
+            None => ("", word),
+        };
+        // Skip a candidate identical to what is already typed (e.g. `sched::`
+        // completing to itself alongside its subcommands).
+        let mut cands: Vec<String> = command_completions()
+            .iter()
+            .filter(|c| c.starts_with(bare) && **c != bare)
+            .map(|c| format!("{prefix}{c}"))
+            .collect();
+        if prefix.is_empty() {
+            cands.extend(aliases.iter().filter(|a| a.starts_with(bare)).cloned());
+        }
+        return CompletionPlan::Words(word_start, cands);
+    }
+
+    // Completing an argument: route by the command's first token.
+    let command = before.split_whitespace().next().unwrap_or("");
+    let command = command.strip_prefix("::").unwrap_or(command);
+    match command {
+        "source" | "k8s::load" => CompletionPlan::Files,
+        // `load <rel> <src>`: file-complete the second argument on.
+        "load" if before[..word_start].split_whitespace().count() >= 2 => CompletionPlan::Files,
+        "show" | "why" | "query" | "smtlib" | "?-" => {
+            let cands = relations
+                .iter()
+                .filter(|r| r.starts_with(word))
+                .cloned()
+                .collect();
+            CompletionPlan::Words(word_start, cands)
+        }
+        _ => CompletionPlan::Nothing,
+    }
 }
 
 impl Completer for ReplHelper {
@@ -36,11 +164,18 @@ impl Completer for ReplHelper {
         pos: usize,
         ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        // Shell escape: complete file paths after `!`.
         if line.starts_with('!') && pos >= 1 {
             let (start, candidates) = self.path_completer.complete(&line[1..], pos - 1, ctx)?;
             return Ok((start + 1, candidates));
         }
-        Ok((pos, vec![]))
+        match plan_completion(&line[..pos], &self.aliases, &self.relations) {
+            CompletionPlan::Words(start, words) => {
+                Ok((start, words.into_iter().map(completion_pair).collect()))
+            }
+            CompletionPlan::Files => self.path_completer.complete(line, pos, ctx),
+            CompletionPlan::Nothing => Ok((pos, vec![])),
+        }
     }
 }
 
@@ -585,6 +720,17 @@ impl Input {
             let _ = rl.save_history(history_path);
         }
     }
+
+    /// Refresh the tab-completion data (alias and relation names) shown at the
+    /// next prompt. A no-op for `--script` input.
+    fn set_completions(&mut self, aliases: Vec<String>, relations: Vec<String>) {
+        if let Input::Editor { rl, .. } = self
+            && let Some(helper) = rl.helper_mut()
+        {
+            helper.aliases = aliases;
+            helper.relations = relations;
+        }
+    }
 }
 
 /// Run the REPL until EOF or `quit`. A command that fails prints an error
@@ -612,6 +758,8 @@ pub fn run(
         rustyline::Editor::<ReplHelper, rustyline::history::DefaultHistory>::with_config(config)?;
     rl.set_helper(Some(ReplHelper {
         path_completer: FilenameCompleter::new(),
+        aliases: Vec::new(),
+        relations: Vec::new(),
     }));
     let _ = rl.load_history(&history_path);
     let rl = Box::new(rl);
@@ -711,6 +859,14 @@ fn session(
         let (raw, to_history) = if let Some((queued, to_history)) = pending.pop_front() {
             (Ok(queued), to_history)
         } else {
+            // Refresh tab-completion data from the current state before prompting.
+            let active = active_store(&current_store, &snapshots, &in_use);
+            let relations: Vec<String> = active
+                .relation_names()
+                .filter(|n| !n.starts_with(':') && !n.starts_with('_'))
+                .map(str::to_string)
+                .collect();
+            input.set_completions(aliases.keys().cloned().collect(), relations);
             (input.readline(&prompt(in_use.as_deref())), true)
         };
         match raw {
@@ -3502,6 +3658,98 @@ fn suggest(name: &str, known: &std::collections::HashSet<String>) -> Vec<String>
         .collect();
     scored.sort();
     scored.into_iter().take(3).map(|(_, k)| k.clone()).collect()
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    fn words(before: &str, aliases: &[&str], relations: &[&str]) -> Vec<String> {
+        let aliases: Vec<String> = aliases.iter().map(|s| s.to_string()).collect();
+        let relations: Vec<String> = relations.iter().map(|s| s.to_string()).collect();
+        match plan_completion(before, &aliases, &relations) {
+            CompletionPlan::Words(_, w) => w,
+            other => panic!("expected Words, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn first_token_completes_commands_and_aliases() {
+        let got = words("rb", &[], &[]);
+        assert_eq!(
+            got,
+            [
+                "rbac::",
+                "rbac::access",
+                "rbac::reaches",
+                "rbac::cluster-admin",
+                "rbac::isolation",
+                "rbac::diff"
+            ]
+        );
+        // An alias shares the bare command namespace.
+        assert_eq!(words("c", &["ca"], &[]), ["ca"]);
+    }
+
+    #[test]
+    fn subcommands_complete_within_a_namespace() {
+        assert_eq!(
+            words("sched::", &[], &[]),
+            [
+                "sched::node-selector",
+                "sched::anti-affinity",
+                "sched::karpenter"
+            ]
+        );
+    }
+
+    #[test]
+    fn qualified_prefix_is_preserved() {
+        // `::` bypasses aliases but still completes the command tree, keeping `::`.
+        let got = words("::k8s::m", &["match-everything"], &[]);
+        assert_eq!(got, ["::k8s::match", "::k8s::match-all"]);
+    }
+
+    #[test]
+    fn query_and_show_args_complete_relations() {
+        let rels = ["direct_perm", "direct_url_perm", "pod"];
+        assert_eq!(
+            words("?- direct_", &[], &rels),
+            ["direct_perm", "direct_url_perm"]
+        );
+        assert_eq!(words("show po", &[], &rels), ["pod"]);
+    }
+
+    #[test]
+    fn fact_mutator_completes_relations_keeping_the_sigil() {
+        assert_eq!(words("+po", &[], &["pod", "policy"]), ["+pod", "+policy"]);
+    }
+
+    #[test]
+    fn file_and_nothing_cases() {
+        assert_eq!(
+            plan_completion("source ./f", &[], &[]),
+            CompletionPlan::Files
+        );
+        assert_eq!(
+            plan_completion("k8s::load ./f", &[], &[]),
+            CompletionPlan::Files
+        );
+        // `load <rel> <src>`: first arg is not a file, second is.
+        assert_eq!(
+            plan_completion("load rel ", &[], &[]),
+            CompletionPlan::Files
+        );
+        assert_eq!(
+            plan_completion("load re", &[], &[]),
+            CompletionPlan::Nothing
+        );
+        // A command that takes no completable args.
+        assert_eq!(
+            plan_completion("snapshot foo", &[], &["pod".to_string()]),
+            CompletionPlan::Nothing
+        );
+    }
 }
 
 #[cfg(test)]

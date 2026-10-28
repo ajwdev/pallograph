@@ -51,6 +51,11 @@ why controls_identity("developer@example.com", "system:serviceaccount:kube-syste
 Run `help` in the REPL for the full command list. Commands are bare paths
 (e.g. `show`, `rbac::reaches`); a leading `::` is the fully-qualified form,
 used to disambiguate (e.g. `::rbac::diff` vs `::diff`). Queries start with `?-`.
+Tab completes command paths, relation names, and file arguments.
+
+Startup commands are read from `$XDG_CONFIG_HOME/pallograph/pallographrc` (then
+`./.pallographrc`); use `alias <name> <command...>` there for shorthands, e.g.
+`alias ca rbac::cluster-admin`. `--rcfile <file>` and `--no-rc` override.
 
 ## What it can do
 
