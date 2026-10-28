@@ -5,8 +5,10 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 default-run = "pallograph"
 
-[profile.release]
-debug = true # Keeps debug symbols without sacrificing release optimizations
+# Release optimizations plus debug symbols, for profiling with samply.
+[profile.profiling]
+inherits = "release"
+debug = true
 
 [build-dependencies]
 mangle-ast    = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }

@@ -333,13 +333,18 @@ For profiler runs, use the tight-loop driver so samply records the code under
 inspection rather than Criterion harness overhead:
 
 ```sh
-cargo build --release --bin profile_smt_access
-samply record target/release/profile_smt_access --scenario cluster-admin --iters 1000
-samply record target/release/profile_smt_access --scenario namespace-isolation --iters 1000
+cargo build --profile profiling --bin profile_smt_access
+samply record target/profiling/profile_smt_access --scenario cluster-admin --iters 1000
+samply record target/profiling/profile_smt_access --scenario namespace-isolation --iters 1000
 ```
 
 Other scenarios include `load-access-model`, `load-permission-tables`, and
 `direct-cluster-admin`.
+
+The `profiling` Cargo profile is the release profile plus debug symbols, so
+samply can symbolize stacks. Release builds stay lean. To profile the main
+binary, run `cargo build --profile profiling --bin pallograph` and point samply
+at `target/profiling/pallograph`.
 
 ## License
 
