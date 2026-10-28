@@ -19,7 +19,7 @@ pub(crate) mod facts;
 mod resource_scope;
 
 use facts::{
-    Permission, RbacWrite, RoleKey, ns_covers, parse_binding_subject, parse_strings,
+    Permission, RbacWrite, RoleKey, Writer, ns_covers, parse_binding_subject, parse_strings,
     parse_subject_rows, value_covers,
 };
 pub use facts::{PermissionTables, Subject, SubjectKind};
@@ -55,6 +55,22 @@ const UNKNOWN_MECHANISM: &str = "unknown";
 /// Binding or role name shown for one a principal would create by writing
 /// RBAC objects.
 const NEW_OBJECT: &str = "(new)";
+
+/// A write shown as an earlier step of a path, e.g. "bind ClusterRole
+/// rbac-admin" or "bind Role pod-creator in ns1".
+fn write_step_label(write: &RbacWrite) -> String {
+    let role = if write.role.is_empty() {
+        NEW_OBJECT
+    } else {
+        write.role.as_str()
+    };
+    let scope = match write.namespace.as_str() {
+        "" => String::new(),
+        "*" => " in every namespace".to_string(),
+        namespace => format!(" in {namespace}"),
+    };
+    format!("{} {} {role}{scope}", write.mechanism, write.role_kind)
+}
 
 /// The path an `RbacWrite` adds after `hops`: the binding it creates or
 /// updates and the role, "(new)" where it writes a new one.
@@ -109,7 +125,10 @@ pub struct RbacAccessModel {
     /// `gained_escalation_hop`: the identities each binding subject can
     /// assume in one hop through a role it can grant itself by writing RBAC
     /// objects, with the mechanisms.
-    gained_hops: HashMap<Subject, BTreeMap<String, BTreeSet<String>>>,
+    gained_hops: HashMap<Writer, BTreeMap<String, BTreeSet<String>>>,
+    /// `rbac_write_binding_direct`: the writes each writer can make in one
+    /// request, which explain a path best.
+    rbac_writes_direct: HashMap<Writer, HashSet<RbacWrite>>,
     /// Per mechanism label, the (namespace, ServiceAccount) pairs each binding
     /// subject's grants reach.
     service_account_mechanisms: Vec<(&'static str, HashMap<Subject, HashSet<(String, String)>>)>,
@@ -146,12 +165,12 @@ impl RbacAccessModel {
         {
             subject_hops.entry(subject).or_default().insert(target);
         }
-        let mut gained_hops: HashMap<Subject, BTreeMap<String, BTreeSet<String>>> = HashMap::new();
-        for (subject, [target, mechanism]) in
-            parse_subject_rows::<2>("gained_escalation_hop", &scan("gained_escalation_hop"))
+        let mut gained_hops: HashMap<Writer, BTreeMap<String, BTreeSet<String>>> = HashMap::new();
+        for (writer, [target, mechanism]) in
+            facts::parse_writer_rows::<2>("gained_escalation_hop", &scan("gained_escalation_hop"))
         {
             gained_hops
-                .entry(subject)
+                .entry(writer)
                 .or_default()
                 .entry(target)
                 .or_default()
@@ -179,11 +198,19 @@ impl RbacAccessModel {
         let granted_groups: BTreeSet<Subject> = tables
             .grants
             .keys()
-            .chain(tables.rbac_writes.keys())
+            .chain(tables.rbac_writes.keys().map(|writer| &writer.subject))
             .filter(|subject| subject.kind == SubjectKind::Group)
             .cloned()
             .collect();
         let granted_groups: Vec<Subject> = granted_groups.into_iter().collect();
+
+        let mut rbac_writes_direct: HashMap<Writer, HashSet<RbacWrite>> = HashMap::new();
+        for (writer, write) in facts::parse_rbac_write_binding(
+            "rbac_write_binding_direct",
+            &scan("rbac_write_binding_direct"),
+        ) {
+            rbac_writes_direct.entry(writer).or_default().insert(write);
+        }
 
         Self {
             include_builtins: false,
@@ -192,6 +219,7 @@ impl RbacAccessModel {
             binding_roles,
             subject_hops,
             gained_hops,
+            rbac_writes_direct,
             service_account_mechanisms,
             granted_groups,
         }
@@ -448,7 +476,12 @@ impl RbacAccessModel {
         // Likewise for a role the principal can grant itself by writing RBAC
         // objects: having it, the principal also reaches every other
         // identity, so chains through them would be noise.
-        self.collect_rbac_write_paths(&subjects, &[], query, &mut paths);
+        self.collect_rbac_write_paths(
+            &self.tables.login_writers(principal),
+            &[],
+            query,
+            &mut paths,
+        );
         if !paths.is_empty() {
             return paths;
         }
@@ -460,11 +493,12 @@ impl RbacAccessModel {
         // here, so cluster-admin principals don't endlessly list each other
         // as via-paths.
         let tree = self.escalation_tree(principal);
-        let target_chains: Vec<(Vec<Subject>, Vec<(Subject, String)>)> = self
+        let target_chains: Vec<(&Subject, Vec<Subject>, Vec<(Subject, String)>)> = self
             .escalation_targets(principal)
             .filter(|target| self.target_has_permission(target, query))
             .map(|target| {
                 (
+                    target,
                     self.tables.target_subjects(target),
                     hop_chain(&tree, principal, target),
                 )
@@ -474,13 +508,13 @@ impl RbacAccessModel {
         // The identities and groups that appear as the final hop of some chain.
         let final_hops: HashSet<&Subject> = target_chains
             .iter()
-            .filter_map(|(_, hops)| hops.last().map(|(hop, _)| hop))
+            .filter_map(|(_, _, hops)| hops.last().map(|(hop, _)| hop))
             .collect();
 
         // Suppress redundant longer paths: if a chain's intermediate hops include
         // another final-hop target, the longer chain adds no new information
         // (e.g. A→default→admin@ when A→default is already shown).
-        for (target_subjects, hops) in &target_chains {
+        for (_, target_subjects, hops) in &target_chains {
             let intermediates_are_endpoints = hops[..hops.len().saturating_sub(1)]
                 .iter()
                 .any(|(hop, _)| final_hops.contains(hop));
@@ -493,37 +527,73 @@ impl RbacAccessModel {
         // Roles a target at the end of a chain can grant itself by writing
         // RBAC objects. A target whose own bindings grant the query is
         // explained by them already.
-        for (target_subjects, hops) in &target_chains {
+        for (target, target_subjects, hops) in &target_chains {
             let bindings_cover = self
                 .tables
                 .grants_of(target_subjects.clone())
                 .any(|granted| permission_covers(granted, query));
             if !bindings_cover {
-                self.collect_rbac_write_paths(target_subjects, hops, query, &mut paths);
+                let writers = self.tables.target_writers(target);
+                self.collect_rbac_write_paths(&writers, hops, query, &mut paths);
             }
         }
         paths
     }
 
-    /// Append, for each of `subjects` that can grant itself a role covering
+    /// Append, for each of `writers` that can grant itself a role covering
     /// `query` by writing RBAC objects (`rbac_write_binding`), the path after
-    /// `hops`: a hop to the subject labeled with the verb that lets the
-    /// write through (bind or escalate), then the binding it would create
-    /// or update and the role.
+    /// `hops`: a hop to the writer labeled with the verb that lets the write
+    /// through (bind or escalate), then the binding it would create or
+    /// update and the role.
     ///
+    /// A write the writer can make in one request
+    /// (`rbac_write_binding_direct`) explains the path best, so those are
+    /// shown when any covers `query`. Otherwise the covering writes need
+    /// earlier writes that gain more RBAC permissions, and one such first
+    /// write is shown as a hop before them: "bind ClusterRole rbac-admin".
     fn collect_rbac_write_paths(
         &self,
-        subjects: &[Subject],
+        writers: &[Writer],
         hops: &[(Subject, String)],
         query: PermissionPattern<'_>,
         out: &mut Vec<AccessPath>,
     ) {
-        let keys: BTreeSet<Subject> = subjects.iter().map(Subject::principal).collect();
-        for subject in keys {
-            let writes = self.tables.rbac_writes.get(&subject).into_iter().flatten();
-            for write in writes.filter(|write| self.write_covers(write, query)) {
+        for writer in writers {
+            let Some(writes) = self.tables.rbac_writes.get(writer) else {
+                continue;
+            };
+            let direct = self.rbac_writes_direct.get(writer);
+            let is_direct = |write: &RbacWrite| direct.is_some_and(|set| set.contains(write));
+            let covering: Vec<&RbacWrite> = writes
+                .iter()
+                .filter(|write| self.write_covers(write, query))
+                .collect();
+            let (shown, first_step): (Vec<&RbacWrite>, Option<&RbacWrite>) =
+                if covering.iter().any(|write| is_direct(write)) {
+                    let shown = covering
+                        .into_iter()
+                        .filter(|write| is_direct(write))
+                        .collect();
+                    (shown, None)
+                } else {
+                    // A write it can make now whose role grants RBAC
+                    // permissions.
+                    let first_step = writes.iter().find(|write| {
+                        is_direct(write)
+                            && write.permissions(&self.tables.role_rules).iter().any(
+                                |(_, api_group, _, _)| {
+                                    value_covers(api_group, "rbac.authorization.k8s.io")
+                                },
+                            )
+                    });
+                    (covering, first_step)
+                };
+            for write in shown {
                 let mut chain = hops.to_vec();
-                chain.push((subject.clone(), write.mechanism.clone()));
+                if let Some(step) = first_step {
+                    chain.push((writer.subject.clone(), write_step_label(step)));
+                }
+                chain.push((writer.subject.clone(), write.mechanism.clone()));
                 out.push(write_path(write, chain));
             }
         }
@@ -554,10 +624,16 @@ impl RbacAccessModel {
         let mut groups_reached = false;
 
         while let Some(node) = queue.pop_front() {
-            let subjects = if node == *principal {
-                self.tables.subjects_of(&node)
+            let (subjects, writers) = if node == *principal {
+                (
+                    self.tables.subjects_of(&node),
+                    self.tables.login_writers(&node),
+                )
             } else {
-                self.tables.target_subjects(&node)
+                (
+                    self.tables.target_subjects(&node),
+                    self.tables.target_writers(&node),
+                )
             };
 
             // Sorted so ties between equally short chains resolve the same way
@@ -567,9 +643,9 @@ impl RbacAccessModel {
                 .filter_map(|subject| self.subject_hops.get(subject))
                 .flatten()
                 .chain(
-                    subjects
+                    writers
                         .iter()
-                        .filter_map(|subject| self.gained_hops.get(subject))
+                        .filter_map(|writer| self.gained_hops.get(writer))
                         .flat_map(BTreeMap::keys),
                 )
                 .collect();
@@ -577,7 +653,7 @@ impl RbacAccessModel {
                 .into_iter()
                 .map(|identity| {
                     let identity = Subject::username(identity.as_str());
-                    let mechanism = self.mechanism(&subjects, &identity);
+                    let mechanism = self.mechanism(&subjects, &writers, &identity);
                     (identity, mechanism)
                 })
                 .collect();
@@ -587,7 +663,7 @@ impl RbacAccessModel {
                 && self
                     .tables
                     .grants_of(subjects.clone())
-                    .chain(self.tables.gained_of(subjects.clone()))
+                    .chain(self.tables.gained_of(writers.clone()))
                     .any(Self::impersonates_groups)
             {
                 groups_reached = true;
@@ -615,16 +691,16 @@ impl RbacAccessModel {
     /// the hop is user impersonation. A hop only a role gained by writing
     /// RBAC objects allows (`gained_escalation_hop`) says so, e.g.
     /// "pod-create after RBAC write".
-    fn mechanism(&self, subjects: &[Subject], identity: &Subject) -> String {
+    fn mechanism(&self, subjects: &[Subject], writers: &[Writer], identity: &Subject) -> String {
         let direct = subjects.iter().any(|subject| {
             self.subject_hops
                 .get(subject)
                 .is_some_and(|targets| targets.contains(&identity.name))
         });
         if !direct {
-            let gained: BTreeSet<&String> = subjects
+            let gained: BTreeSet<&String> = writers
                 .iter()
-                .filter_map(|subject| self.gained_hops.get(subject))
+                .filter_map(|writer| self.gained_hops.get(writer))
                 .filter_map(|targets| targets.get(&identity.name))
                 .flatten()
                 .collect();
@@ -1589,6 +1665,39 @@ mod tests {
                 "cluster-admin".to_string(),
                 vec![(sa_a.clone(), "bind".to_string())]
             )])
+        );
+    }
+
+    #[test]
+    fn chained_rbac_writes_show_the_first_write() {
+        // ns1:sa-a may create ClusterRoleBindings and bind only rbac-admin,
+        // which allows binding any ClusterRole. The path to cluster-admin
+        // shows binding rbac-admin first.
+        let mut extra = sa_grant(
+            "sa-a",
+            "rbac-admin-binder",
+            r#"[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterroles"],"resourceNames":["rbac-admin"],"verbs":["bind"]},{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterrolebindings"],"verbs":["create"]}]"#,
+        );
+        extra.push_str(concat!(
+            r#"{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"rbac-admin"},"rules":[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterroles"],"verbs":["bind"]}]}"#,
+            "\n",
+        ));
+        let eval = load_engine_with(&extra).evaluate().expect("evaluate");
+        let model = RbacAccessModel::from_store(&eval);
+        let sa_a = Subject::username("system:serviceaccount:ns1:sa-a");
+
+        let paths = shown_paths(&model, &sa_a, "").expect("sa-a reaches cluster-admin");
+        assert!(
+            paths.contains(&(
+                String::new(),
+                "(new)".to_string(),
+                "cluster-admin".to_string(),
+                vec![
+                    (sa_a.clone(), "bind ClusterRole rbac-admin".to_string()),
+                    (sa_a.clone(), "bind".to_string())
+                ]
+            )),
+            "{paths:?}"
         );
     }
 

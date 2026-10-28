@@ -54,8 +54,8 @@
 //! | impersonate group G                    | `perm_group_impersonate(P)`, `group_has_grant(G)`       |
 //! | create ClusterRoleBinding of R         | `rbac_write_role(P, /principal, "bind", "", R)`         |
 //! | update ClusterRoleBinding B (of R)     | `rbac_write_role(P, /principal, "bind", B, R)`          |
-//! | create RoleBinding in ns of K R        | `rbac_write_binding(P, _, "bind", ns, "", K, R)`, or `*` for ns when K is ClusterRole |
-//! | update RoleBinding ns/B (of K R)       | `rbac_write_binding(P, _, "bind", ns, B, K, R)`  |
+//! | create RoleBinding in ns of K R        | `rbac_write_binding_direct(P, _, "bind", ns, "", K, R)`, or `*` for ns when K is ClusterRole |
+//! | update RoleBinding ns/B (of K R)       | `rbac_write_binding_direct(P, _, "bind", ns, B, K, R)`  |
 //! | create ClusterRole                     | `rbac_role_writable(P, _, "", "ClusterRole", "")` |
 //! | update ClusterRole R                   | `rbac_role_writable(P, _, "", "ClusterRole", R)` |
 //! | create Role in ns                      | `rbac_role_writable(P, _, ns, "Role", "")`, or `*` for ns |
@@ -367,23 +367,24 @@ fn decide_escalation(
 
     // (writer, mechanism, namespace, binding, role kind, role) and
     // (writer, namespace, role kind, role) for users and ServiceAccounts.
-    let write_bindings: BTreeSet<[String; 6]> = text_rows(&results, "rbac_write_binding", 7)?
-        .into_iter()
-        .filter(|row| row[1] != "/group")
-        .map(|row| {
-            [
-                row[0].clone(),
-                row[2].clone(),
-                row[3].clone(),
-                row[4].clone(),
-                row[5].clone(),
-                row[6].clone(),
-            ]
-        })
-        .collect();
+    let write_bindings: BTreeSet<[String; 6]> =
+        text_rows(&results, "rbac_write_binding_direct", 7)?
+            .into_iter()
+            .filter(|row| row[1] == "/user" || row[1] == "/serviceaccount")
+            .map(|row| {
+                [
+                    row[0].clone(),
+                    row[2].clone(),
+                    row[3].clone(),
+                    row[4].clone(),
+                    row[5].clone(),
+                    row[6].clone(),
+                ]
+            })
+            .collect();
     let writable_roles: BTreeSet<[String; 4]> = text_rows(&results, "rbac_role_writable", 5)?
         .into_iter()
-        .filter(|row| row[1] != "/group")
+        .filter(|row| row[1] == "/user" || row[1] == "/serviceaccount")
         .map(|row| {
             [
                 row[0].clone(),

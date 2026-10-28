@@ -228,12 +228,11 @@ fn bind_limited_to_resource_names() {
     }
 }
 
-// sa-a may create clusterrolebindings and bind only rbac-admin, which
-// allows binding any ClusterRole. It can bind rbac-admin; binding
-// cluster-admin would take a second write, and chains of writes are not
-// followed (see rules/rbac_write.mg).
+// Two writes: sa-a may create clusterrolebindings and bind only
+// rbac-admin, which allows binding any ClusterRole. In one request it can
+// bind rbac-admin; having it, it can bind cluster-admin.
 #[test]
-fn chains_of_rbac_writes_stop_after_the_first() {
+fn a_chain_of_two_rbac_writes_is_followed() {
     let mut manifests = base_cluster();
     manifests.push(cluster_role(
         "rbac-admin",
@@ -249,9 +248,58 @@ fn chains_of_rbac_writes_stop_after_the_first() {
 
     for (backend, result) in evaluate(&manifests, &[]) {
         assert_eq!(
-            writes(&result, "rbac_write_binding", SA_A),
+            writes(&result, "rbac_write_binding_direct", SA_A),
             [write("bind", "", "", "ClusterRole", "rbac-admin")],
             "{backend}"
+        );
+        let all = writes(&result, "rbac_write_binding", SA_A);
+        assert!(
+            all.contains(&write("bind", "", "", "ClusterRole", "cluster-admin")),
+            "{backend}: got {all:?}"
+        );
+    }
+}
+
+// Three writes, the last in a namespace: sa-a may create RoleBindings in
+// ns1 and bind only step-1 there. step-1 allows binding step-2, and
+// step-2 allows binding any ClusterRole, so sa-a ends up with
+// cluster-admin in ns1, and not cluster-wide.
+#[test]
+fn a_chain_of_three_rbac_writes_is_followed() {
+    let mut manifests = base_cluster();
+    manifests.push(cluster_role(
+        "step-1",
+        r#"[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterroles"],"resourceNames":["step-2"],"verbs":["bind"]}]"#,
+    ));
+    manifests.push(cluster_role(
+        "step-2",
+        r#"[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterroles"],"verbs":["bind"]}]"#,
+    ));
+    grant_in_ns1(
+        &mut manifests,
+        "sa-a",
+        "step-0",
+        r#"[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterroles"],"resourceNames":["step-1"],"verbs":["bind"]},
+            {"apiGroups":["rbac.authorization.k8s.io"],"resources":["rolebindings"],"verbs":["create"]}]"#,
+    );
+
+    for (backend, result) in evaluate(&manifests, &[]) {
+        let direct = writes(&result, "rbac_write_binding_direct", SA_A);
+        assert_eq!(
+            direct,
+            [write("bind", "ns1", "", "ClusterRole", "step-1")],
+            "{backend}"
+        );
+        let all = writes(&result, "rbac_write_binding", SA_A);
+        for role in ["step-2", "cluster-admin"] {
+            assert!(
+                all.contains(&write("bind", "ns1", "", "ClusterRole", role)),
+                "{backend}: {role} in ns1, got {all:?}"
+            );
+        }
+        assert!(
+            all.iter().all(|(_, namespace, ..)| namespace == "ns1"),
+            "{backend}: nothing outside ns1, got {all:?}"
         );
     }
 }
@@ -619,6 +667,64 @@ fn resource_names_limit_update_escalate_and_create() {
                 "self-editor"
             )],
             "{backend}"
+        );
+    }
+}
+
+// alice is in rbac-admins only through user_groups, and the group may bind
+// ns1's pod-creator Role and create RoleBindings in ns1. Logged in, alice
+// can bind it and create pods running as ns1/admin. imp may impersonate
+// users, but an impersonated alice is not in rbac-admins, so imp does not
+// reach ns1/admin through alice's writes.
+#[test]
+fn an_assumed_user_writes_without_its_user_groups() {
+    let mut manifests = base_cluster();
+    manifests.extend(admin_pod());
+    manifests.push(role(
+        "ns1",
+        "pod-creator",
+        r#"[{"apiGroups":[""],"resources":["pods"],"verbs":["create"]}]"#,
+    ));
+    manifests.push(role(
+        "ns1",
+        "pod-creator-binder",
+        r#"[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["roles"],"resourceNames":["pod-creator"],"verbs":["bind"]},
+            {"apiGroups":["rbac.authorization.k8s.io"],"resources":["rolebindings"],"verbs":["create"]}]"#,
+    ));
+    manifests.push(role_binding(
+        "ns1",
+        "rbac-admins",
+        "Role",
+        "pod-creator-binder",
+        r#"{"kind":"Group","name":"rbac-admins"}"#,
+    ));
+    manifests.push(cluster_role_binding(
+        "alice-view",
+        "view",
+        r#"{"kind":"User","name":"alice"}"#,
+    ));
+    manifests.push(cluster_role(
+        "user-impersonator",
+        r#"[{"apiGroups":[""],"resources":["users"],"verbs":["impersonate"]}]"#,
+    ));
+    manifests.push(cluster_role_binding(
+        "imp",
+        "user-impersonator",
+        r#"{"kind":"User","name":"imp"}"#,
+    ));
+
+    for (backend, result) in evaluate(&manifests, &[("alice", "rbac-admins")]) {
+        assert!(
+            has_row(&result, "controls_identity", &["alice", ADMIN_SA]),
+            "{backend}: alice logged in reaches ns1/admin"
+        );
+        assert!(
+            has_row(&result, "controls_identity", &["imp", "alice"]),
+            "{backend}: imp controls alice"
+        );
+        assert!(
+            !has_row(&result, "controls_identity", &["imp", ADMIN_SA]),
+            "{backend}: impersonated alice is not in rbac-admins"
         );
     }
 }
