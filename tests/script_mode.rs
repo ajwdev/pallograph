@@ -282,3 +282,70 @@ fn piped_repl_stays_forgiving() {
     assert_eq!(out.status.code(), Some(0));
     assert!(stdout(&out).contains("Saved snapshot 'base'"));
 }
+
+#[test]
+fn apply_delta_add_then_access_diff_expands_exits_1() {
+    // Empty base, head adds mallory's grant: apply-delta onto live, then the
+    // access-diff against the pre-delta snapshot finds the new permission.
+    let ws = Workspace::new();
+    let out = ws.run_script(&format!(
+        "::snapshot base\n::apply-delta - {}\n::access-diff base\n",
+        ws.rendered()
+    ));
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    let stdout = stdout(&out);
+    assert!(stdout.contains("FAIL  "), "{stdout}");
+    assert!(stdout.contains("mallory@example.com"), "{stdout}");
+    assert!(
+        stderr(&out).contains("Applied delta: +2 ~0 -0"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn apply_delta_retracts_base_only_object_exits_0() {
+    // The motivating case: the grant is live (loaded as if from the cluster)
+    // and in the base render, but head drops it. The delta retracts it, so
+    // the access-diff against the pre-delta snapshot only loses permissions.
+    let ws = Workspace::new();
+    let out = ws.run_script(&format!(
+        "::load-k8s {rendered}\n\
+         ::snapshot base\n\
+         ::apply-delta {rendered} -\n\
+         ::access-diff base\n",
+        rendered = ws.rendered()
+    ));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(stdout(&out).contains("none added"), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("Applied delta: +0 ~0 -2"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn apply_delta_wrong_arity_exits_2() {
+    let ws = Workspace::new();
+    let out = ws.run_script("::snapshot base\n::apply-delta onlyone\n");
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Usage: \\apply-delta"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn apply_delta_missing_side_exits_2() {
+    let ws = Workspace::new();
+    let missing = ws.dir.join("nonexistent");
+    let out = ws.run_script(&format!(
+        "::snapshot base\n::apply-delta {} {}\n",
+        ws.rendered(),
+        missing.display()
+    ));
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("Delta error"), "{}", stderr(&out));
+}

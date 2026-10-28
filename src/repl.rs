@@ -15,8 +15,8 @@ use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
 use crate::dd::session::LazyProvenance;
-use crate::edb::{K8sManifestsSource, ShellSource};
-use crate::engine::{Engine, EvalStore, RelationDoc};
+use crate::edb::{K8sManifestsSource, ObjectFacts, ObjectKey, ShellSource};
+use crate::engine::{Change, Engine, EvalStore, RelationDoc};
 use crate::load;
 use crate::query;
 use crate::rbac;
@@ -192,6 +192,9 @@ fn print_help() {
     );
     println!(
         "  \\load-k8s <src>                        — load k8s objects through the projection pipeline, replacing any already loaded with the same group, kind, namespace and name; src is a dir, .json file, or ! <kubectl args>"
+    );
+    println!(
+        "  \\apply-delta <base> <head>             — apply a PR's base→head delta onto live: add head-only objects, update changed ones, retract base-only ones (what Argo prunes), leave identical ones (keeping live drift); each side is a dir, .json file, or - for empty"
     );
     println!();
     println!("Snapshots");
@@ -413,8 +416,8 @@ fn known_relations_in_use(
 }
 
 /// Return `true` and refuse a state-changing command (`+`, `-`, `~`,
-/// `\define`, `\load`, `\load-k8s`, `\source`, `\snapshot`, `\rollback`)
-/// while a snapshot is in use: a frozen state never changes, so there is
+/// `\define`, `\load`, `\load-k8s`, `\apply-delta`, `\source`,
+/// `\snapshot`, `\rollback`) while a snapshot is in use: a frozen state never changes, so there is
 /// nothing for the command to act on. `\match` and `\match_all` are refused
 /// for the same reason even though they leave the EDB untouched: they
 /// re-evaluate the live engine, which a frozen snapshot has none of. A
@@ -1282,6 +1285,51 @@ fn session(
                             Err(e) => command_error!("Error: {e:#}"),
                         },
                         Err(e) => command_error!("Load error: {e:#}"),
+                    }
+                    continue;
+                }
+
+                if let Some(rest) = line.strip_prefix("::apply-delta ") {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
+                        continue;
+                    }
+                    let args: Vec<&str> = rest.split_whitespace().collect();
+                    let [base_arg, head_arg] = args.as_slice() else {
+                        command_error!(
+                            "Usage: \\apply-delta <base> <head> (a dir, .json file, or - for an empty side)"
+                        );
+                        continue;
+                    };
+                    // Load both rendered sides into key-indexed maps. This
+                    // is transient per-command state, not a Rust-side view of
+                    // the live EDB: the delta is applied straight back.
+                    let sides = load_delta_side(base_arg).and_then(|base| {
+                        let head = load_delta_side(head_arg)?;
+                        Ok((base, head))
+                    });
+                    let (base, head) = match sides {
+                        Ok(sides) => sides,
+                        Err(e) => {
+                            command_error!("Delta error: {e:#}");
+                            continue;
+                        }
+                    };
+                    let (changes, added, updated, unchanged) = diff_object_sides(base, head);
+                    let removed = changes
+                        .iter()
+                        .filter(|c| matches!(c, Change::Retract(_)))
+                        .count();
+                    let summary = engine.apply_changes(changes);
+                    match engine.evaluate() {
+                        Ok(new_store) => {
+                            current_store = new_store;
+                            eprintln!(
+                                "Applied delta: +{added} ~{updated} -{removed} \
+                                 ({unchanged} unchanged, {} removed but not live) and evaluated.",
+                                summary.removed_absent
+                            );
+                        }
+                        Err(e) => command_error!("Error: {e:#}"),
                     }
                     continue;
                 }
@@ -2728,6 +2776,73 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '~' | '.' | '%' | '/')
 }
 
+/// Load one side of a `\apply-delta` into its rendered objects. A literal
+/// `-` is an intentionally empty side (a brand-new chart has no base; a
+/// deleted chart has no head), distinct from a path that matches no files,
+/// which still errors like any manifest load.
+fn load_delta_side(arg: &str) -> Result<Vec<ObjectFacts>> {
+    if arg == "-" {
+        return Ok(Vec::new());
+    }
+    let mut source = K8sManifestsSource {
+        paths: vec![arg.to_string()],
+    };
+    crate::edb::object_facts(&mut source)
+}
+
+/// The `k8s/5` row an object emitted, which carries its whole body and so
+/// stands in for its content. Compared between base and head to tell an
+/// unchanged object from a changed one.
+fn k8s_row(object: &ObjectFacts) -> Option<&Vec<Value>> {
+    object
+        .facts
+        .iter()
+        .find(|(relation, _)| relation == "k8s")
+        .map(|(_, tuple)| tuple)
+}
+
+/// Diff two rendered object sets (base and head) into the changes a 3-way
+/// merge applies to the live cluster, treating live as "ours": head-only
+/// keys are adds, keys in both whose content differs are updates, base-only
+/// keys are retracts (what Argo would prune), and keys in both with
+/// identical content are left alone so live drift survives. Returns the
+/// changes plus the added, updated and unchanged counts for the summary;
+/// the retract count is read off the changes, and how many retracts were
+/// not live comes back from the engine.
+fn diff_object_sides(
+    base: Vec<ObjectFacts>,
+    head: Vec<ObjectFacts>,
+) -> (Vec<Change>, usize, usize, usize) {
+    // Last copy of a repeated key wins, matching how a load collapses an
+    // object listed twice across files.
+    let base: HashMap<ObjectKey, ObjectFacts> =
+        base.into_iter().map(|o| (o.key.clone(), o)).collect();
+    let head: HashMap<ObjectKey, ObjectFacts> =
+        head.into_iter().map(|o| (o.key.clone(), o)).collect();
+
+    let mut changes = Vec::new();
+    let (mut added, mut updated, mut unchanged) = (0, 0, 0);
+    for (key, head_object) in &head {
+        match base.get(key) {
+            None => {
+                added += 1;
+                changes.push(Change::Upsert(head_object.clone()));
+            }
+            Some(base_object) if k8s_row(base_object) != k8s_row(head_object) => {
+                updated += 1;
+                changes.push(Change::Upsert(head_object.clone()));
+            }
+            Some(_) => unchanged += 1,
+        }
+    }
+    for key in base.keys() {
+        if !head.contains_key(key) {
+            changes.push(Change::Retract(key.clone()));
+        }
+    }
+    (changes, added, updated, unchanged)
+}
+
 /// Load a sourced file: ground facts as EDB, then the rules, then evaluate.
 /// All or nothing: on any error, the rules and the facts this call inserted
 /// are removed again. A fact that was already present is left alone.
@@ -3564,5 +3679,84 @@ mod source_tests {
             assert_eq!(engine.relation_arity("single"), None, "{name}");
             assert_eq!(rows(&engine, "pair"), vec![vec![s("a"), s("b")]], "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod delta_tests {
+    use super::{diff_object_sides, load_delta_side};
+    use crate::edb::ObjectFacts;
+    use crate::engine::Change;
+
+    /// Turn JSON objects into the rendered `ObjectFacts` a delta side yields.
+    fn side(json: Vec<serde_json::Value>) -> Vec<ObjectFacts> {
+        struct Objects(Vec<serde_json::Value>);
+        impl crate::edb::FactSource for Objects {
+            fn k8s_objects(
+                &mut self,
+            ) -> anyhow::Result<Vec<(kube::api::DynamicObject, Option<(String, String)>)>>
+            {
+                self.0
+                    .drain(..)
+                    .map(|json| Ok((serde_json::from_value(json)?, None)))
+                    .collect()
+            }
+        }
+        crate::edb::object_facts(&mut Objects(json)).unwrap()
+    }
+
+    fn config_map(name: &str, tier: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": name, "namespace": "default"},
+            "data": {"tier": tier},
+        })
+    }
+
+    /// One row of the 3-way table at a time: head-only is an add, a content
+    /// change is an update, base-only is a retract, and identical content on
+    /// both sides emits nothing, so live (whatever its drift) is left alone.
+    #[test]
+    fn diff_classifies_each_table_row() {
+        let base = side(vec![
+            config_map("same", "web"),
+            config_map("changed", "web"),
+            config_map("removed", "web"),
+        ]);
+        let head = side(vec![
+            config_map("same", "web"),
+            config_map("changed", "db"),
+            config_map("added", "web"),
+        ]);
+        let (changes, added, updated, unchanged) = diff_object_sides(base, head);
+        assert_eq!((added, updated, unchanged), (1, 1, 1));
+        let retracts = changes
+            .iter()
+            .filter(|c| matches!(c, Change::Retract(_)))
+            .count();
+        let upserts = changes.len() - retracts;
+        assert_eq!(
+            (upserts, retracts),
+            (2, 1),
+            "add + update upsert, remove retracts"
+        );
+    }
+
+    /// An empty base (a brand-new chart) makes every head object an add.
+    #[test]
+    fn diff_with_empty_base_is_all_adds() {
+        let head = side(vec![config_map("a", "web"), config_map("b", "db")]);
+        let (changes, added, updated, unchanged) = diff_object_sides(Vec::new(), head);
+        assert_eq!((added, updated, unchanged), (2, 0, 0));
+        assert!(changes.iter().all(|c| matches!(c, Change::Upsert(_))));
+    }
+
+    /// `-` is an intentionally empty side; a real path with no files still
+    /// errors, like any manifest load.
+    #[test]
+    fn empty_side_dash_loads_nothing_but_missing_path_errors() {
+        assert!(load_delta_side("-").unwrap().is_empty());
+        assert!(load_delta_side("/pallograph/no/such/dir").is_err());
     }
 }
