@@ -125,6 +125,8 @@ escalation and the REPL commands that catch it:
   table, permissions borrowed through escalation, as a view.
 - [`cluster-admin-approved`](examples/cluster-admin-approved/): gate
   cluster-admins against a security-approved closure loaded as Mangle facts.
+- [`apply-delta`](examples/apply-delta/): review a PR end to end - snapshot the
+  live cluster, `\apply-delta` its base->head render, and inspect what changed.
 
 ## Configuration
 
