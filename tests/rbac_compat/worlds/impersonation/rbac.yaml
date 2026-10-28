@@ -1,0 +1,176 @@
+# Impersonation grants of every scope. The impersonation filter asks the
+# authorizer about a user or group with no namespace, so only a
+# ClusterRoleBinding can allow it, and about a ServiceAccount in the
+# ServiceAccount's own namespace, so a RoleBinding allows the
+# ServiceAccounts of its namespace. TestImpersonationDecisions in
+# tools/rbac-oracle pins the decisions.
+
+# Identities worth impersonating: a user and two groups holding grants of
+# their own, and three ServiceAccounts.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: deployer, namespace: team-a}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: builder, namespace: team-b}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: robot, namespace: team-a}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: secret-reader}
+rules:
+- {apiGroups: [""], resources: [secrets], verbs: [get, list]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: alice-secret-reader}
+subjects:
+- {kind: User, name: alice, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: secret-reader}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: admins-secret-reader}
+subjects:
+- {kind: Group, name: admins, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: secret-reader}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: devs-secret-reader, namespace: team-a}
+subjects:
+- {kind: Group, name: team-a-devs, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: secret-reader}
+---
+# Impersonate users, groups and ServiceAccounts.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: impersonator}
+rules:
+- {apiGroups: [""], resources: [users, groups, serviceaccounts], verbs: [impersonate]}
+---
+# Cluster-wide: every user, group and ServiceAccount.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: cluster-impersonator}
+subjects:
+- {kind: User, name: cluster-impersonator, apiGroup: rbac.authorization.k8s.io}
+- {kind: Group, name: impersonators, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: impersonator}
+---
+# The same ClusterRole in a RoleBinding: only team-a's ServiceAccounts, and
+# no user or group at all.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ns-impersonator, namespace: team-a}
+subjects:
+- {kind: User, name: ns-impersonator, apiGroup: rbac.authorization.k8s.io}
+- {kind: ServiceAccount, name: robot}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: impersonator}
+---
+# A Role does the same as a RoleBinding of the ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: impersonator, namespace: team-b}
+rules:
+- {apiGroups: [""], resources: [users, groups, serviceaccounts], verbs: [impersonate]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: role-impersonator, namespace: team-b}
+subjects:
+- {kind: User, name: role-impersonator, apiGroup: rbac.authorization.k8s.io}
+- {kind: Group, name: "system:serviceaccounts:team-b", apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: impersonator}
+---
+# One kind of identity each, cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: serviceaccount-impersonator}
+rules:
+- {apiGroups: [""], resources: [serviceaccounts], verbs: [impersonate]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: sa-impersonator}
+subjects:
+- {kind: User, name: sa-impersonator, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: serviceaccount-impersonator}
+---
+# resourceNames limit impersonation to the named identities. Pallograph
+# ignores them for impersonation (rules/escalation.mg), which
+# over-approximates: denied-by-resource-names.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: named-impersonator}
+rules:
+- {apiGroups: [""], resources: [users], resourceNames: [alice], verbs: [impersonate]}
+- {apiGroups: [""], resources: [groups], resourceNames: [admins], verbs: [impersonate]}
+- {apiGroups: [""], resources: [serviceaccounts], resourceNames: [builder], verbs: [impersonate]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: named-impersonator}
+subjects:
+- {kind: User, name: named-impersonator, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: named-impersonator}
+---
+# Wildcards: any verb on users, any resource in a namespace, any API group
+# for groups.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: wildcard-verb}
+rules:
+- {apiGroups: [""], resources: [users], verbs: ["*"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: wildcard-verb}
+subjects:
+- {kind: User, name: wildcard-verb, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: wildcard-verb}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: wildcard-resource}
+rules:
+- {apiGroups: [""], resources: ["*"], verbs: [impersonate]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: wildcard-resource, namespace: team-a}
+subjects:
+- {kind: User, name: wildcard-resource, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: wildcard-resource}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: wildcard-group}
+rules:
+- {apiGroups: ["*"], resources: [groups], verbs: [impersonate]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: wildcard-group}
+subjects:
+- {kind: User, name: wildcard-group, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: wildcard-group}
+---
+# Users and groups are impersonated in the core API group; a grant in
+# another one allows nothing.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: wrong-group}
+rules:
+- {apiGroups: [authentication.k8s.io], resources: [users, groups], verbs: [impersonate]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: wrong-group}
+subjects:
+- {kind: User, name: wrong-group, apiGroup: rbac.authorization.k8s.io}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: wrong-group}

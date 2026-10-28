@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! RBAC compatibility harness: checks `rbac_allowed` (rules/rbac.mg) against
-//! the kube-apiserver RBAC authorizer.
+//! the kube-apiserver RBAC authorizer, and the single-step impersonation
+//! and RBAC write relations of the escalation rules against the API server
+//! code around it (see "Escalation questions" below).
 //!
 //! Each world under `tests/rbac_compat/worlds/` is an `rbac.yaml`. Its
 //! requests and the oracle's decisions are generated, not committed:
@@ -16,9 +18,10 @@
 //!
 //! The counts are compared against `tests/rbac_compat/baseline.json` as a
 //! ratchet: the test fails when a bucket grows or a new one appears, and
-//! suggests tightening the baseline when one shrinks. Every world's entry is
-//! currently empty, so any mismatch fails the test; a known gap can still be
-//! recorded there while it is being worked on. `UPDATE_BASELINE=1 cargo test
+//! suggests tightening the baseline when one shrinks. Authorization
+//! requests have no recorded mismatches, so any fails the test; known gaps
+//! in the escalation questions are recorded there while they are being
+//! worked on. `UPDATE_BASELINE=1 cargo test
 //! --test rbac_compat` rewrites it. Every mismatch is written to
 //! `target/tmp/rbac-compat/<world>.ndjson` for inspection.
 //!
@@ -27,6 +30,40 @@
 //! has no baseline, since every seed makes new worlds: it fails only when
 //! the backends disagree, and reports which worlds hit a bucket the curated
 //! baseline lacks, as candidates to copy into `tests/rbac_compat/worlds/`.
+//!
+//! # Escalation questions
+//!
+//! Two kinds of escalation are decided outside the RBAC authorizer, so
+//! checking `rbac_allowed` cannot catch a mistake in them. The oracle also
+//! asks, per world:
+//!
+//! - "impersonate": may a principal impersonate a user, a group or a
+//!   ServiceAccount? Decided by the API server's impersonation filters.
+//! - "write": may a principal create or update a ClusterRoleBinding,
+//!   RoleBinding, ClusterRole or Role? Decided by the authorizer and the
+//!   RBAC registry's escalation checks (bind, escalate, or holding every
+//!   rule granted).
+//!
+//! Pallograph answers them with the relations its escalation analysis is
+//! built from, evaluated with the principals' groups as `user_groups`:
+//!
+//! | question                               | Pallograph allows when                                  |
+//! |----------------------------------------|---------------------------------------------------------|
+//! | impersonate user U                     | `escalation_hop(P, U)`                                  |
+//! | impersonate ServiceAccount ns/name     | `principal_subject(P, K, N)`, `subject_impersonatable_sa(N, K, ns, name)` |
+//! | impersonate group G                    | `perm_group_impersonate(P)`, `group_has_grant(G)`       |
+//! | create ClusterRoleBinding of R         | `rbac_write_role(P, /principal, "bind", "", R)`         |
+//! | update ClusterRoleBinding B (of R)     | `rbac_write_role(P, /principal, "bind", B, R)`          |
+//! | update ClusterRole R, bound to P       | `rbac_write_role(P, /principal, "escalate", _, R)`      |
+//! | any other write                        | never: not modeled                                      |
+//!
+//! `rbac_write_role` comes from rules/rbac_write.mg; without that file
+//! every write is answered "no", so its absence shows as write
+//! under-grants in the baseline rather than an error. Buckets of these
+//! kinds are prefixed with the kind, e.g. "impersonate over-grant: total".
+//! A write the principal's own rules already cover is allowed by
+//! Kubernetes (tagged write-allowed-by-covering-rules) but gains nothing,
+//! and `rbac_write_role` leaves it out.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -38,7 +75,7 @@ use anyhow::{Context, Result, bail};
 use mangle_common::Value;
 use mangle_interpreter::MemStore;
 use pallograph::edb;
-use pallograph::engine::{Backend, DdBackend, Engine, InterpreterBackend};
+use pallograph::engine::{Backend, DdBackend, Engine, EvalStore, InterpreterBackend};
 use serde_json::{Value as Json, json};
 
 /// Per world, bucket name to mismatch count.
@@ -179,6 +216,180 @@ fn request_facts(requests: &[Json]) -> Result<Vec<(&'static str, Vec<Value>)>> {
     Ok(facts)
 }
 
+/// The kind of a request row: "" for an authorization request, else
+/// "impersonate" or "write".
+fn kind_field(row: &Json) -> &str {
+    row["kind"].as_str().unwrap_or_default()
+}
+
+/// The `user_groups` facts that make the principals of escalation
+/// `questions` known to Pallograph, with the groups the oracle gave them.
+/// ServiceAccounts get none, as in `request_facts`.
+fn principal_facts(questions: &[Json]) -> Result<Vec<(&'static str, Vec<Value>)>> {
+    let mut groups_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for question in questions {
+        let user = string_field(question, "user");
+        if user.starts_with("system:serviceaccount:") {
+            continue;
+        }
+        let groups: Vec<String> = question["groups"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|group| {
+                group
+                    .as_str()
+                    .map(str::to_string)
+                    .context("non-string group")
+            })
+            .collect::<Result<_>>()?;
+        match groups_of.get(&user) {
+            Some(known) if *known != groups => {
+                bail!("principal {user} appears with groups {known:?} and {groups:?}")
+            }
+            Some(_) => {}
+            None => {
+                groups_of.insert(user, groups);
+            }
+        }
+    }
+    let mut facts = Vec::new();
+    for (user, groups) in groups_of {
+        for group in groups {
+            facts.push((
+                "user_groups",
+                vec![Value::String(user.clone()), Value::String(group)],
+            ));
+        }
+    }
+    Ok(facts)
+}
+
+/// A string or name column as text; names keep their leading "/".
+fn text(value: &Value) -> Result<&str> {
+    match value {
+        Value::String(text) | Value::Name(text) => Ok(text),
+        other => bail!("expected a string or name, got {other:?}"),
+    }
+}
+
+/// Each row of `relation` as text, after checking its arity.
+fn text_rows(results: &EvalStore, relation: &str, arity: usize) -> Result<Vec<Vec<String>>> {
+    results
+        .scan(relation)
+        .iter()
+        .map(|row| {
+            if row.len() != arity {
+                bail!(
+                    "{relation} has {} columns, expected {arity}; update tests/rbac_compat.rs",
+                    row.len()
+                );
+            }
+            row.iter()
+                .map(|value| text(value).map(str::to_string))
+                .collect()
+        })
+        .collect()
+}
+
+/// Question ids the escalation relations allow for `world` on `backend`;
+/// see "Escalation questions" in the module docs.
+fn decide_escalation(
+    world: &Path,
+    questions: &[Json],
+    backend: Box<dyn Backend>,
+) -> Result<BTreeSet<i64>> {
+    let mut store = MemStore::new();
+    let manifest = world.join("rbac.yaml");
+    edb::load_from_manifests(&mut store, vec![manifest.to_string_lossy().into_owned()])?;
+    for (relation, tuple) in principal_facts(questions)? {
+        store.add_fact(relation, tuple);
+    }
+    let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("rules");
+    let results = Engine::new(store, &rules, backend)?.evaluate()?;
+
+    let hops: BTreeSet<(String, String)> = text_rows(&results, "escalation_hop", 2)?
+        .into_iter()
+        .map(|row| (row[0].clone(), row[1].clone()))
+        .collect();
+    let mut principals_of: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    for row in text_rows(&results, "principal_subject", 3)? {
+        principals_of
+            .entry((row[1].clone(), row[2].clone()))
+            .or_default()
+            .push(row[0].clone());
+    }
+    let mut impersonatable_accounts = BTreeSet::new();
+    for row in text_rows(&results, "subject_impersonatable_sa", 4)? {
+        for principal in principals_of
+            .get(&(row[1].clone(), row[0].clone()))
+            .into_iter()
+            .flatten()
+        {
+            impersonatable_accounts.insert((principal.clone(), row[2].clone(), row[3].clone()));
+        }
+    }
+    let group_impersonators: BTreeSet<String> = text_rows(&results, "perm_group_impersonate", 1)?
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect();
+    let groups_with_grants: BTreeSet<String> = text_rows(&results, "group_has_grant", 1)?
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect();
+    // (writer, mechanism, binding, role) for users and ServiceAccounts.
+    let write_roles: BTreeSet<(String, String, String, String)> =
+        text_rows(&results, "rbac_write_role", 5)?
+            .into_iter()
+            .filter(|row| row[1] == "/principal")
+            .map(|row| {
+                (
+                    row[0].clone(),
+                    row[2].clone(),
+                    row[3].clone(),
+                    row[4].clone(),
+                )
+            })
+            .collect();
+
+    let mut allowed = BTreeSet::new();
+    for question in questions {
+        let user = string_field(question, "user");
+        let name = string_field(question, "name");
+        let resource = string_field(question, "resource");
+        let verb = string_field(question, "verb");
+        let role_ref = || string_field(&question["roleRef"], "name");
+        let writes = |mechanism: &str, binding: &str, role: &str| {
+            write_roles.contains(&(user.clone(), mechanism.into(), binding.into(), role.into()))
+        };
+        let answer = match (kind_field(question), resource.as_str(), verb.as_str()) {
+            ("impersonate", "users", _) => hops.contains(&(user.clone(), name.clone())),
+            ("impersonate", "serviceaccounts", _) => impersonatable_accounts.contains(&(
+                user.clone(),
+                string_field(question, "namespace"),
+                name.clone(),
+            )),
+            ("impersonate", "groups", _) => {
+                group_impersonators.contains(&user) && groups_with_grants.contains(&name)
+            }
+            ("impersonate", other, _) => bail!("cannot impersonate {other}"),
+            ("write", "clusterrolebindings", "create") => writes("bind", "", &role_ref()),
+            ("write", "clusterrolebindings", "update") => writes("bind", &name, &role_ref()),
+            ("write", "clusterroles", "update") => {
+                write_roles.iter().any(|(writer, mechanism, _, role)| {
+                    *writer == user && mechanism == "escalate" && *role == name
+                })
+            }
+            ("write", _, _) => false,
+            (other, _, _) => bail!("unexpected question kind {other:?}"),
+        };
+        if answer {
+            allowed.insert(id_field(question)?);
+        }
+    }
+    Ok(allowed)
+}
+
 /// Request ids `rbac_allowed` derives for `world` on `backend`.
 fn decide(world: &Path, requests: &[Json], backend: Box<dyn Backend>) -> Result<BTreeSet<i64>> {
     let mut store = MemStore::new();
@@ -236,11 +447,14 @@ fn parallel_map<T: Sync, R: Send>(items: &[T], function: impl Fn(&T) -> R + Sync
     results.into_iter().map(|(_, result)| result).collect()
 }
 
-/// A world's requests and the oracle's decisions, in id order.
+/// A world's requests and the oracle's decisions, in id order, with the
+/// requests split into authorization requests and escalation questions.
 struct LoadedWorld {
     path: PathBuf,
     requests: Vec<Json>,
     decisions: Vec<Json>,
+    access: Vec<Json>,
+    escalation: Vec<Json>,
 }
 
 fn load_world(world: &Path) -> Result<LoadedWorld> {
@@ -254,10 +468,16 @@ fn load_world(world: &Path) -> Result<LoadedWorld> {
             decisions.len()
         );
     }
+    let (access, escalation) = requests
+        .iter()
+        .cloned()
+        .partition(|request| kind_field(request).is_empty());
     Ok(LoadedWorld {
         path: world.to_path_buf(),
         requests,
         decisions,
+        access,
+        escalation,
     })
 }
 
@@ -266,23 +486,31 @@ fn load_world(world: &Path) -> Result<LoadedWorld> {
 fn check_worlds(worlds: &[PathBuf]) -> Vec<(PathBuf, Result<BTreeMap<String, usize>>)> {
     let loaded: Vec<Result<LoadedWorld>> = worlds.iter().map(|world| load_world(world)).collect();
 
+    // Authorization requests are decided in chunks; escalation questions
+    // (None) in one evaluation per world, since they do not depend on each
+    // other's facts but all read the whole escalation closure.
     let mut chunks = Vec::new();
     for (index, world) in loaded.iter().enumerate() {
         if let Ok(world) = world {
-            for start in (0..world.requests.len()).step_by(CHUNK_SIZE) {
-                chunks.push((index, start..(start + CHUNK_SIZE).min(world.requests.len())));
+            for start in (0..world.access.len()).step_by(CHUNK_SIZE) {
+                chunks.push((
+                    index,
+                    Some(start..(start + CHUNK_SIZE).min(world.access.len())),
+                ));
+            }
+            if !world.escalation.is_empty() {
+                chunks.push((index, None));
             }
         }
     }
     let decided = parallel_map(&chunks, |(index, range)| {
         let world = loaded[*index].as_ref().unwrap();
-        let requests = &world.requests[range.clone()];
-        let interpreter = decide(&world.path, requests, Box::new(InterpreterBackend))?;
-        let dd = decide(
-            &world.path,
-            requests,
-            Box::new(DdBackend { provenance: false }),
-        )?;
+        let run = |backend: Box<dyn Backend>| match range {
+            Some(range) => decide(&world.path, &world.access[range.clone()], backend),
+            None => decide_escalation(&world.path, &world.escalation, backend),
+        };
+        let interpreter = run(Box::new(InterpreterBackend))?;
+        let dd = run(Box::new(DdBackend { provenance: false }))?;
         Ok::<_, anyhow::Error>((interpreter, dd))
     });
 
@@ -324,6 +552,7 @@ fn compare_world(
         path: world,
         requests,
         decisions,
+        ..
     } = world;
     if interpreter != dd {
         let only_interpreter: Vec<_> = interpreter.difference(dd).take(10).collect();
@@ -356,10 +585,11 @@ fn compare_world(
             continue;
         }
 
-        let direction = if pallograph_allowed {
-            "over-grant"
-        } else {
-            "under-grant"
+        let direction = match (kind_field(request), pallograph_allowed) {
+            ("", true) => "over-grant".to_string(),
+            ("", false) => "under-grant".to_string(),
+            (kind, true) => format!("{kind} over-grant"),
+            (kind, false) => format!("{kind} under-grant"),
         };
         *buckets.entry(format!("{direction}: total")).or_insert(0) += 1;
         let tags: Vec<&str> = decision["tags"]
@@ -376,7 +606,7 @@ fn compare_world(
         // explained yet.
         if pallograph_allowed && !tags.iter().any(|tag| tag.starts_with("denied-by-")) {
             *buckets
-                .entry("over-grant: unexplained".to_string())
+                .entry(format!("{direction}: unexplained"))
                 .or_insert(0) += 1;
         }
 

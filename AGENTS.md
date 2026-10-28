@@ -49,7 +49,8 @@ Only the non-obvious parts:
   anonymizer (`src/bin/anonymize.rs`). It is not a stray; deleting it breaks
   the build.
 - `tools/rbac-oracle/` - Go program wrapping upstream k8s RBAC authorization,
-  used as the oracle for `tests/rbac_compat.rs`.
+  the impersonation filters and the RBAC registry's escalation checks, used
+  as the oracle for `tests/rbac_compat.rs`.
 - `notes/` is gitignored scratch space. Don't rely on it existing.
 
 ## Building and testing

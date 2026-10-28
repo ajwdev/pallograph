@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,6 +34,13 @@ var (
 	fuzzSAs          = []string{"sa-1", "sa-2"}
 	fuzzLabelKeys    = []string{"fuzz.pallograph.dev/agg-x", "fuzz.pallograph.dev/agg-y"}
 	fuzzMissingRoles = "missing-role"
+
+	// Escalation rules: impersonation and writing RBAC objects, with
+	// resourceNames that name the world's own identities and roles.
+	fuzzEscalationAPIGroups = []string{"", rbacv1.GroupName, rbacv1.APIGroupAll}
+	fuzzEscalationResources = []string{"users", "groups", "serviceaccounts", "clusterroles", "clusterrolebindings", "roles", "rolebindings", rbacv1.ResourceAll}
+	fuzzEscalationVerbs     = []string{"impersonate", "bind", "escalate", "create", "update", "patch", rbacv1.VerbAll}
+	fuzzEscalationNames     = []string{"user-1", "group-1", "sa-1", "clusterrole-0", "role-0"}
 )
 
 // fuzzWorld builds one random world from random. Every object it returns
@@ -58,7 +66,21 @@ func fuzzWorld(random *rand.Rand) []runtime.Object {
 	}
 	chance := func(percent int) bool { return random.IntN(100) < percent }
 
+	escalationRule := func() rbacv1.PolicyRule {
+		rule := rbacv1.PolicyRule{
+			APIGroups: pickSome(fuzzEscalationAPIGroups, 2),
+			Resources: pickSome(fuzzEscalationResources, 2),
+			Verbs:     pickSome(fuzzEscalationVerbs, 3),
+		}
+		if chance(25) {
+			rule.ResourceNames = pickSome(fuzzEscalationNames, 2)
+		}
+		return rule
+	}
 	resourceRule := func() rbacv1.PolicyRule {
+		if chance(20) {
+			return escalationRule()
+		}
 		rule := rbacv1.PolicyRule{
 			APIGroups: pickSome(fuzzAPIGroups, 2),
 			Resources: pickSome(fuzzResources, 2),
@@ -75,6 +97,18 @@ func fuzzWorld(random *rand.Rand) []runtime.Object {
 	}
 	nonResourceRule := func() rbacv1.PolicyRule {
 		return rbacv1.PolicyRule{NonResourceURLs: pickSome(fuzzURLs, 2), Verbs: pickSome(fuzzVerbs, 2)}
+	}
+
+	// ServiceAccount objects, which impersonation questions target.
+	for _, namespace := range fuzzNamespaces {
+		for _, name := range fuzzSAs {
+			if chance(50) {
+				objects = append(objects, &corev1.ServiceAccount{
+					TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
+					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				})
+			}
+		}
 	}
 
 	var roleNames = map[string][]string{}

@@ -1,6 +1,7 @@
 // rbac-oracle answers Kubernetes RBAC authorization requests with the
-// kube-apiserver RBAC authorizer, as ground truth for Pallograph's RBAC
-// model.
+// kube-apiserver RBAC authorizer, and impersonation and RBAC write
+// questions with the API server code around it, as ground truth for
+// Pallograph's RBAC model.
 //
 // A world is a directory holding rbac.yaml. Subcommands:
 //
@@ -81,7 +82,10 @@ func runGen(args []string) error {
 		if err != nil {
 			return err
 		}
-		requests := GenerateRequests(world, *limit, *seed)
+		requests, err := GenerateRequests(world, *limit, *seed)
+		if err != nil {
+			return err
+		}
 		if err := writeNDJSON(filepath.Join(dir, requestsFile), requests); err != nil {
 			return err
 		}

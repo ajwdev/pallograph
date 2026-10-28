@@ -221,13 +221,23 @@ requests on both backends, which must agree with each other exactly; every
 disagreement with the oracle is an over-grant or under-grant, bucketed by
 feature tag.
 
+Two escalation steps are decided outside the authorizer, so the oracle
+also asks, per world, whether a principal may impersonate a user, group or
+ServiceAccount (answered by the API server's impersonation filters) and
+whether it may create or update a role or binding (answered by the RBAC
+registry's bind and escalate checks). Pallograph answers these with the
+single-step relations of its escalation rules; the table in
+`tests/rbac_compat.rs` lists which.
+
 - Curated worlds under `tests/rbac_compat/worlds/` each target a corner of
   RBAC (resourceNames, nonResourceURLs, subresources, aggregation shapes,
   subject kinds, the v1.37 bootstrap policy). `hack/rbac-compat-gen.sh`
   generates their requests and decisions into `target/rbac-compat/`.
 - `tests/rbac_compat/baseline.json` is a ratchet of known mismatch counts
-  per world. Every entry is `{}`: each curated world matches the authorizer
-  exactly.
+  per world. Every authorization request matches the authorizer exactly.
+  The known gaps are in the escalation questions: impersonation grants
+  limited by resourceNames, which the escalation rules ignore, and RBAC
+  writes, which they do not model yet.
 - `hack/rbac-compat.sh -s SEED -n COUNT` is the fuzz tier: it generates
   random worlds from a seed, decides them with the oracle, and reports
   worlds whose mismatches the curated worlds do not cover.
