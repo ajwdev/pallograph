@@ -207,12 +207,17 @@ fn print_help() {
     println!(
         "  \\diff <name>                           — diff the state in use (live, unless \\use points elsewhere) against a named snapshot"
     );
-    println!("  \\diff <name1> <name2>                  — diff two named snapshots");
+    println!(
+        "  \\diff <name1> <name2>                  — diff two named snapshots (all relations)"
+    );
     println!(
         "  \\access-diff <name>                    — diff RBAC permissions, direct and through escalation, vs the state in use (live, unless \\use points elsewhere)"
     );
     println!(
         "  \\access-diff <name1> <name2>           — diff RBAC permissions between two named snapshots"
+    );
+    println!(
+        "  \\diff-relation <name> [name2] <relation> — like \\diff but scoped to one relation; a diagnostic view, not a pass/fail check"
     );
     println!(
         "  \\use <name>                            — point ?-, \\why, \\show and friends at a named snapshot (no name: back to the live state)"
@@ -1209,6 +1214,58 @@ fn session(
                             "Usage: ::access-diff <snap>  or  ::access-diff <snap1> <snap2>"
                         ),
                     }
+                    continue;
+                }
+
+                if let Some(rest) = line.strip_prefix("::diff-relation ") {
+                    // Like ::diff, but scoped to one relation: the trailing
+                    // token names the relation, the 1 or 2 before it name the
+                    // snapshot operands. Purely diagnostic, same pure-diff
+                    // output as ::diff (no verdict, no findings).
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    let (before_name, after_name, relation) = match parts.as_slice() {
+                        [name, relation] => (*name, None, *relation),
+                        [name1, name2, relation] => (*name1, Some(*name2), *relation),
+                        _ => {
+                            command_error!(
+                                "Usage: ::diff-relation <name> <relation>  or  ::diff-relation <name1> <name2> <relation>"
+                            );
+                            continue;
+                        }
+                    };
+                    let Some(before) = snapshots.get(before_name) else {
+                        command_error!("No snapshot named '{}'.", before_name);
+                        continue;
+                    };
+                    let after: &EvalStore = if let Some(after_name) = after_name {
+                        match snapshots.get(after_name) {
+                            Some(s) => &s.store,
+                            None => {
+                                command_error!("No snapshot named '{}'.", after_name);
+                                continue;
+                            }
+                        }
+                    } else {
+                        active_store(&current_store, &snapshots, &in_use)
+                    };
+                    // A relation the program never declares or derives would
+                    // diff as empty, which is misleading; flag the typo.
+                    if !engine.known_relations().contains(relation) {
+                        command_error!("Unknown relation '{}'.", relation);
+                        continue;
+                    }
+                    let full = Diff::between(&before.store, after);
+                    let mut one = Diff {
+                        added: BTreeMap::new(),
+                        removed: BTreeMap::new(),
+                    };
+                    if let Some(a) = full.added.get(relation) {
+                        one.added.insert(relation.to_string(), a.clone());
+                    }
+                    if let Some(r) = full.removed.get(relation) {
+                        one.removed.insert(relation.to_string(), r.clone());
+                    }
+                    print!("{one}");
                     continue;
                 }
 
