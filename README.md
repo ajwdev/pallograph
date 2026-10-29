@@ -152,7 +152,11 @@ See [`pallograph.toml.example`](pallograph.toml.example) for every option.
 
 Other flags worth knowing:
 
-- `--rules <dir>`: rule directory (default `rules/`).
+- `--rules <path>`: extra rules, a `.mg` file or a directory of them, loaded
+  on top of the built-in rules. Repeatable.
+- `--builtin-rules <dir>`: replace the built-in rules (embedded at build time)
+  with a directory, so rule edits take effect without a rebuild. For
+  development; hidden from `--help`.
 - `--backend interpreter|dd`: evaluation engine, see below.
 - `--provenance`: enable `why` on the DD backend.
 - `--format default|compact|table|ndjson`: output format.
@@ -364,6 +368,28 @@ The `profiling` Cargo profile is the release profile plus debug symbols, so
 samply can symbolize stacks. Release builds stay lean. To profile the main
 binary, run `cargo build --profile profiling --bin pallograph` and point samply
 at `target/profiling/pallograph`.
+
+## Install
+
+Static Linux binaries (x86_64, aarch64) are attached to each
+[release](https://github.com/ajwdev/pallograph/releases). The rules are
+embedded, so the binary works from any directory; `--rules <path>` adds to
+them. With no config file it reads the cluster in your current kubeconfig
+context (or in-cluster service account auth).
+
+With Docker, mounting a kubeconfig (`--user` so the container can read a
+0600 file):
+
+```sh
+docker run --rm -it --user "$(id -u)" \
+  -v ~/.kube/config:/home/nonroot/.kube/config:ro \
+  ghcr.io/ajwdev/pallograph
+```
+
+The image is the static binary plus busybox (for `shell` datasources) and CA
+certificates. Exec credential plugins such as `aws` and `gcloud` are not
+included, so use a token or certificate kubeconfig, or in-cluster
+service account auth.
 
 ## License
 

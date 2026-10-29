@@ -26,4 +26,24 @@ fn main() {
     if let Err(e) = compile_units(&src_refs, &arena) {
         panic!("rule compilation failed:\n{e:#}");
     }
+
+    // Embed the rules so a released binary works from any directory. The
+    // generated file is pulled into src/engine.rs with include!.
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let mut embedded = String::from("pub const EMBEDDED_RULES: &[&str] = &[\n");
+    for path in &rule_files {
+        let abs = std::path::Path::new(&manifest_dir).join(path);
+        embedded.push_str(&format!(
+            "    include_str!({:?}),\n",
+            abs.display().to_string()
+        ));
+    }
+    embedded.push_str("];\n");
+
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
+    std::fs::write(
+        std::path::Path::new(&out_dir).join("embedded_rules.rs"),
+        embedded,
+    )
+    .expect("write embedded_rules.rs");
 }

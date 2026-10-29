@@ -1,5 +1,6 @@
 pallograph
 /target
+/result*
 /notes
 
 # Anonymizer token mappings; review --report before ever sharing.

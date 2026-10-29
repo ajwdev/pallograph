@@ -57,7 +57,7 @@ mapfile -t relations < <(
 # The REPL reports each query's row count on stderr, one line per query, in
 # order: "Found N result(s).", "No results." or "Unknown relation".
 printf '?- %s\n' "${relations[@]}" |
-	"$binary" --rules "$rules" -C "$scratch/config.toml" --format ndjson 2>"$scratch/stderr" >/dev/null
+	"$binary" --builtin-rules "$rules" -C "$scratch/config.toml" --format ndjson 2>"$scratch/stderr" >/dev/null
 mapfile -t counts < <(
 	grep -E '^(Found [0-9]+ result|No results|Unknown relation)' "$scratch/stderr" |
 		sed -E 's/^Found ([0-9]+).*/\1/; s/^No results.*/0/; s/^Unknown relation.*/-/'

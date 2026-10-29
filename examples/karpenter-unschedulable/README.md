@@ -24,7 +24,7 @@ Two NodePools:
 ## REPL Session
 
 ```
-cargo run
+cargo run -- -C pallograph.toml.example --profile dev
 k8s::load examples/karpenter-unschedulable
 sched::karpenter
 ```

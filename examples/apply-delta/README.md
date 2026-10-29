@@ -31,10 +31,8 @@ From this directory:
 
 ```sh
 ../../target/debug/pallograph \
-  -C pallograph.toml --profile dev --rules ../../rules --script review.pg
+  -C pallograph.toml --profile dev --script review.pg
 ```
-
-(Rules load from `./rules` by default, so point `--rules` back at the repo.)
 
 ## What it shows
 

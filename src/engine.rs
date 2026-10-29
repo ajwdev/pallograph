@@ -16,6 +16,9 @@ use crate::edb::{Fact, ObjectFacts, ObjectKey};
 
 pub(crate) const EDB_DECLS: &str = include_str!("../rules/00_edb_prelude.mg");
 
+// The rules/*.mg sources in filename order, embedded by build.rs.
+include!(concat!(env!("OUT_DIR"), "/embedded_rules.rs"));
+
 /// Snapshot of all derived facts after an evaluation pass.
 #[derive(Clone)]
 pub struct EvalStore {
@@ -850,6 +853,28 @@ pub fn load_bench_fixtures_from(dir: &str) -> Result<(Vec<(String, Vec<Value>)>,
     Ok((edb, rules))
 }
 
+/// The rules embedded at build time, in filename order.
+pub fn builtin_rules() -> Vec<String> {
+    EMBEDDED_RULES.iter().map(|s| s.to_string()).collect()
+}
+
+/// Reads the rule sources at `path`: the file itself, or each `*.mg` file in
+/// it, in filename order, when `path` is a directory.
+pub fn read_rule_sources(path: &Path) -> Result<Vec<String>> {
+    let read =
+        |p: &Path| std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()));
+    if !path.is_dir() {
+        return Ok(vec![read(path)?]);
+    }
+
+    let mut rule_files = glob::glob(&path.join("*.mg").to_string_lossy())
+        .context("glob rules")?
+        .collect::<Result<Vec<_>, _>>()
+        .context("glob entries")?;
+    rule_files.sort();
+    rule_files.iter().map(|p| read(p)).collect()
+}
+
 impl Engine {
     pub fn new(edb_store: MemStore, rules_dir: &Path, backend: Box<dyn Backend>) -> Result<Self> {
         Self::with_objects(edb_store, Vec::new(), rules_dir, backend)
@@ -865,17 +890,18 @@ impl Engine {
         rules_dir: &Path,
         backend: Box<dyn Backend>,
     ) -> Result<Self> {
-        let rule_files =
-            glob::glob(&rules_dir.join("*.mg").to_string_lossy()).context("glob rules")?;
+        let rule_sources = read_rule_sources(rules_dir)?;
+        Self::with_rule_sources(edb_store, objects, rule_sources, backend)
+    }
 
-        let mut rule_sources = Vec::new();
-        for entry in rule_files {
-            let path = entry?;
-            let src = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            rule_sources.push(src);
-        }
-
+    /// Like [`Self::with_objects`], but takes the rule sources directly, such
+    /// as [`builtin_rules`] plus any extra rule files.
+    pub fn with_rule_sources(
+        edb_store: MemStore,
+        objects: Vec<ObjectFacts>,
+        rule_sources: Vec<String>,
+        backend: Box<dyn Backend>,
+    ) -> Result<Self> {
         Self::from_objects(
             crate::edb::drain_store(edb_store),
             objects,

@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use mangle_interpreter::MemStore;
 
-use pallograph::engine::{Backend, DdBackend, Engine, InterpreterBackend};
+use pallograph::engine::{self, Backend, DdBackend, Engine, InterpreterBackend};
 use pallograph::repl::OutputFormat;
 use pallograph::{config, edb, load, repl};
 
@@ -19,10 +19,17 @@ enum BackendKind {
 }
 
 #[derive(Parser)]
+#[command(version)]
 struct Cli {
-    /// Directory containing .mg rule files. Defaults to ./rules.
-    #[arg(long, default_value = "rules")]
-    rules: PathBuf,
+    /// Extra rules to load on top of the built-in ones: a .mg file, or a
+    /// directory of them. Repeatable.
+    #[arg(long, value_name = "PATH")]
+    rules: Vec<PathBuf>,
+
+    /// Directory of .mg files that replaces the rules embedded at build
+    /// time. For development, so rule edits take effect without a rebuild.
+    #[arg(long, hide = true, value_name = "DIR")]
+    builtin_rules: Option<PathBuf>,
 
     /// Path to a config file (overrides default search locations).
     #[arg(short = 'C')]
@@ -167,7 +174,7 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<ExitCode> {
     // Load EDB facts into a staging MemStore.
-    // Priority: config file > small fixture default.
+    // Priority: config file > the live cluster in the current kubeconfig context.
     let mut edb = MemStore::new();
     let mut objects = Vec::new();
     match config::load_config(cli.config.as_deref())? {
@@ -191,11 +198,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         None => {
-            eprintln!("datasource: k8s-manifests (fixtures/testdata/small) [default]");
-            let mut source = edb::K8sManifestsSource {
-                paths: vec!["fixtures/testdata/small".to_string()],
+            eprintln!("datasource: current kubeconfig context [default]");
+            let cluster = config::Datasource {
+                source: config::SourceKind::K8s,
+                paths: None,
+                command: None,
+                content: None,
+                relation: None,
             };
-            objects = edb::object_facts(&mut source)?;
+            load_datasource(&mut edb, &mut objects, "cluster", &cluster)
+                .await
+                .context("no config file found, so connecting to the current kubeconfig context")?;
         }
     }
 
@@ -209,7 +222,14 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     };
 
     // Build the policy engine.
-    let mut engine = Engine::with_objects(edb, objects, &cli.rules, backend)?;
+    let mut rule_sources = match &cli.builtin_rules {
+        Some(dir) => engine::read_rule_sources(dir)?,
+        None => engine::builtin_rules(),
+    };
+    for path in &cli.rules {
+        rule_sources.extend(engine::read_rule_sources(path)?);
+    }
+    let mut engine = Engine::with_rule_sources(edb, objects, rule_sources, backend)?;
     if cli.explain {
         let mut cp = engine.compile()?;
         cp.dump_plan()?;
