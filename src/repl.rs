@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::IsTerminal;
 
 use anyhow::{Context as _, Result};
@@ -2200,8 +2200,9 @@ fn print_access_diff(
     let eff_gained = rbac::diff::check_effective_can_expansion(before, after);
     let eff_lost = rbac::diff::check_effective_can_contraction(before, after);
 
-    let total_gained = can_gained.len() + eff_gained.len();
-    let total_lost = can_lost.len() + eff_lost.len();
+    let verdicts = per_principal_verdicts(&can_gained, &can_lost, &eff_gained, &eff_lost);
+    let total_gained: usize = verdicts.iter().map(|(_, gained, _)| gained).sum();
+    let total_lost: usize = verdicts.iter().map(|(_, _, lost)| lost).sum();
 
     if total_gained > 0 {
         println!("FAIL  {} new permission(s) granted", total_gained);
@@ -2211,8 +2212,6 @@ fn print_access_diff(
         println!("PASS  no permission changes");
         return true;
     }
-
-    let verdicts = per_principal_verdicts(&can_gained, &can_lost, &eff_gained, &eff_lost);
 
     println!(
         "=== Access diff: '{}' → '{}' ===",
@@ -2277,18 +2276,64 @@ fn per_principal_verdicts(
     eff_gained: &[rbac::diff::EffDiff],
     eff_lost: &[rbac::diff::EffDiff],
 ) -> Vec<(rbac::Subject, usize, usize)> {
+    // A permission can be both a direct and an effective change; count it once.
+    let key = |p: &rbac::Subject, ns: &str, g: &str, r: &str, v: &str| {
+        (
+            p.clone(),
+            ns.to_string(),
+            g.to_string(),
+            r.to_string(),
+            v.to_string(),
+        )
+    };
+    let gained: BTreeSet<_> = can_gained
+        .iter()
+        .map(|d| {
+            key(
+                &d.principal,
+                &d.namespace,
+                &d.apigroup,
+                &d.resource,
+                &d.verb,
+            )
+        })
+        .chain(eff_gained.iter().map(|d| {
+            key(
+                &d.principal,
+                &d.namespace,
+                &d.apigroup,
+                &d.resource,
+                &d.verb,
+            )
+        }))
+        .collect();
+    let lost: BTreeSet<_> = can_lost
+        .iter()
+        .map(|d| {
+            key(
+                &d.principal,
+                &d.namespace,
+                &d.apigroup,
+                &d.resource,
+                &d.verb,
+            )
+        })
+        .chain(eff_lost.iter().map(|d| {
+            key(
+                &d.principal,
+                &d.namespace,
+                &d.apigroup,
+                &d.resource,
+                &d.verb,
+            )
+        }))
+        .collect();
     let mut map: BTreeMap<rbac::Subject, (usize, usize)> = BTreeMap::new();
-    for d in can_gained {
-        map.entry(d.principal.clone()).or_default().0 += 1;
+    for (principal, ..) in gained {
+        map.entry(principal).or_default().0 += 1;
     }
-    for d in eff_gained {
-        map.entry(d.principal.clone()).or_default().0 += 1;
-    }
-    for d in can_lost {
-        map.entry(d.principal.clone()).or_default().1 += 1;
-    }
-    for d in eff_lost {
-        map.entry(d.principal.clone()).or_default().1 += 1;
+    for (principal, ..) in lost {
+        map.entry(principal).or_default().1 += 1;
     }
 
     let mut result: Vec<(rbac::Subject, usize, usize)> = map

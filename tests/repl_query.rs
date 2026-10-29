@@ -814,7 +814,7 @@ fn load_k8s_over_startup_object_contracts_access() {
             "{backend}: {stderr}"
         );
         assert!(
-            stdout.contains("PASS  2 permission(s) removed, none added"),
+            stdout.contains("PASS  1 permission(s) removed, none added"),
             "{backend}: {stdout}"
         );
         let lost = stdout
