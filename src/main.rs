@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use mangle_interpreter::MemStore;
 
-use pallograph::engine::{Backend, DdBackend, Engine, InterpreterBackend};
+use pallograph::engine::{self, Backend, DdBackend, Engine, InterpreterBackend};
 use pallograph::repl::OutputFormat;
 use pallograph::{config, edb, load, repl};
 
@@ -19,10 +19,17 @@ enum BackendKind {
 }
 
 #[derive(Parser)]
+#[command(version)]
 struct Cli {
-    /// Directory containing .mg rule files. Defaults to ./rules.
-    #[arg(long, default_value = "rules")]
-    rules: PathBuf,
+    /// Extra rules to load on top of the built-in ones: a .mg file, or a
+    /// directory of them. Repeatable.
+    #[arg(long, value_name = "PATH")]
+    rules: Vec<PathBuf>,
+
+    /// Directory of .mg files that replaces the rules embedded at build
+    /// time. For development, so rule edits take effect without a rebuild.
+    #[arg(long, hide = true, value_name = "DIR")]
+    builtin_rules: Option<PathBuf>,
 
     /// Path to a config file (overrides default search locations).
     #[arg(short = 'C')]
@@ -209,7 +216,14 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     };
 
     // Build the policy engine.
-    let mut engine = Engine::with_objects(edb, objects, &cli.rules, backend)?;
+    let mut rule_sources = match &cli.builtin_rules {
+        Some(dir) => engine::read_rule_sources(dir)?,
+        None => engine::builtin_rules(),
+    };
+    for path in &cli.rules {
+        rule_sources.extend(engine::read_rule_sources(path)?);
+    }
+    let mut engine = Engine::with_rule_sources(edb, objects, rule_sources, backend)?;
     if cli.explain {
         let mut cp = engine.compile()?;
         cp.dump_plan()?;

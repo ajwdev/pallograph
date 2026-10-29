@@ -152,7 +152,11 @@ See [`pallograph.toml.example`](pallograph.toml.example) for every option.
 
 Other flags worth knowing:
 
-- `--rules <dir>`: rule directory (default `rules/`).
+- `--rules <path>`: extra rules, a `.mg` file or a directory of them, loaded
+  on top of the built-in rules. Repeatable.
+- `--builtin-rules <dir>`: replace the built-in rules (embedded at build time)
+  with a directory, so rule edits take effect without a rebuild. For
+  development; hidden from `--help`.
 - `--backend interpreter|dd`: evaluation engine, see below.
 - `--provenance`: enable `why` on the DD backend.
 - `--format default|compact|table|ndjson`: output format.
