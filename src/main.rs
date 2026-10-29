@@ -174,7 +174,7 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<ExitCode> {
     // Load EDB facts into a staging MemStore.
-    // Priority: config file > small fixture default.
+    // Priority: config file > the live cluster in the current kubeconfig context.
     let mut edb = MemStore::new();
     let mut objects = Vec::new();
     match config::load_config(cli.config.as_deref())? {
@@ -198,11 +198,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         None => {
-            eprintln!("datasource: k8s-manifests (fixtures/testdata/small) [default]");
-            let mut source = edb::K8sManifestsSource {
-                paths: vec!["fixtures/testdata/small".to_string()],
+            eprintln!("datasource: current kubeconfig context [default]");
+            let cluster = config::Datasource {
+                source: config::SourceKind::K8s,
+                paths: None,
+                command: None,
+                content: None,
+                relation: None,
             };
-            objects = edb::object_facts(&mut source)?;
+            load_datasource(&mut edb, &mut objects, "cluster", &cluster)
+                .await
+                .context("no config file found, so connecting to the current kubeconfig context")?;
         }
     }
 
