@@ -4,7 +4,7 @@
 //! Access diff between two sets of RBAC grants (`rbac::diff`), computed in
 //! Rust over `PermissionTables`. No Z3 involved.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::facts::{ns_covers, value_covers};
 use super::{PermissionEntry, PermissionTables, Subject};
@@ -63,8 +63,8 @@ pub fn check_effective_can_contraction(
 
 /// Every (principal, permission) entry `have` holds literally and `not_have`
 /// does not, unless a wildcard or cluster-wide grant in `not_have` already
-/// covers it. `effective` counts what escalation reaches rather than direct
-/// grants alone.
+/// covers it, or a broader entry among the principal's own witnesses does.
+/// `effective` counts what escalation reaches rather than direct grants alone.
 fn diff_witnesses(
     have: &PermissionTables,
     not_have: &PermissionTables,
@@ -84,21 +84,83 @@ fn diff_witnesses(
     let mut witnesses = Vec::new();
     for (principal, entries) in by_principal {
         let held = not_have.held_grants(principal, effective);
-        witnesses.extend(
-            entries
-                .into_iter()
-                .filter(|(_, namespace, api_group, resource, verb)| {
-                    !held.iter().any(|granted| {
-                        ns_covers(&granted.0, namespace)
-                            && value_covers(&granted.1, api_group)
-                            && value_covers(&granted.2, resource)
-                            && value_covers(&granted.3, verb)
-                    })
+        let gained: Vec<&PermissionEntry> = entries
+            .into_iter()
+            .filter(|(_, namespace, api_group, resource, verb)| {
+                !held.iter().any(|granted| {
+                    ns_covers(&granted.0, namespace)
+                        && value_covers(&granted.1, api_group)
+                        && value_covers(&granted.2, resource)
+                        && value_covers(&granted.3, verb)
                 })
+            })
+            .collect();
+        // A principal that gains `*/*/*` cluster-wide would otherwise also list
+        // every narrower grant it gains, once per namespace.
+        let keys: HashSet<(&str, &str, &str, &str)> = gained
+            .iter()
+            .map(|(_, ns, group, resource, verb)| {
+                (
+                    ns.as_str(),
+                    group.as_str(),
+                    resource.as_str(),
+                    verb.as_str(),
+                )
+            })
+            .collect();
+        witnesses.extend(
+            gained
+                .into_iter()
+                .filter(|entry| !covered_by_broader(&keys, entry))
                 .cloned(),
         );
     }
     witnesses
+}
+
+/// `keys` holds an entry other than `entry` itself that covers it. Coverage
+/// only ever widens a field to `*` (or a namespace to `*` or cluster-wide),
+/// so checking those generalizations is enough.
+fn covered_by_broader(keys: &HashSet<(&str, &str, &str, &str)>, entry: &PermissionEntry) -> bool {
+    let (_, ns, group, resource, verb) = entry;
+    let mut namespaces = vec![ns.as_str()];
+    if !ns.is_empty() {
+        namespaces.push("");
+        if ns != "*" {
+            namespaces.push("*");
+        }
+    }
+    let (groups, resources, verbs) = (widen(group), widen(resource), widen(verb));
+    for &n in &namespaces {
+        for &g in &groups {
+            for &r in &resources {
+                for &v in &verbs {
+                    let key = (n, g, r, v);
+                    if key
+                        != (
+                            ns.as_str(),
+                            group.as_str(),
+                            resource.as_str(),
+                            verb.as_str(),
+                        )
+                        && keys.contains(&key)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// `value` and the wildcard that covers it.
+fn widen(value: &str) -> Vec<&str> {
+    if value == "*" {
+        vec!["*"]
+    } else {
+        vec![value, "*"]
+    }
 }
 
 fn can_diff_witnesses(have: &PermissionTables, not_have: &PermissionTables) -> Vec<CanDiff> {
@@ -263,6 +325,59 @@ mod tests {
                     d.principal, d.namespace, d.apigroup, d.resource, d.verb
                 ))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn gained_grants_collapse_under_a_broader_gained_grant() {
+        // alice gains cluster-wide */*/* along with narrower grants it covers,
+        // plus one grant elsewhere that only a namespaced wildcard covers.
+        let empty_store = MemStore::new();
+        let after_store = {
+            let mut store = MemStore::new();
+            for (ns, group, resource, verb) in [
+                ("", "*", "*", "*"),
+                ("", "", "nodes", "get"),
+                ("kube-system", "", "pods", "get"),
+                ("*", "apps", "deployments", "list"),
+            ] {
+                store.add_fact(
+                    "direct_perm",
+                    user_grant("alice", ns, group, resource, verb),
+                );
+            }
+            store.add_fact("direct_perm", user_grant("bob", "default", "", "pods", "*"));
+            store.add_fact(
+                "direct_perm",
+                user_grant("bob", "default", "", "pods", "get"),
+            );
+            store.add_fact(
+                "direct_perm",
+                user_grant("bob", "other", "", "secrets", "get"),
+            );
+            store
+        };
+
+        let before = tables_from_store(&empty_store);
+        let after = tables_from_store(&after_store);
+
+        let mut gained: Vec<String> = check_permission_expansion(&before, &after)
+            .iter()
+            .map(|d| {
+                format!(
+                    "{}/{}/{}/{}/{}",
+                    d.principal, d.namespace, d.apigroup, d.resource, d.verb
+                )
+            })
+            .collect();
+        gained.sort();
+        assert_eq!(
+            gained,
+            vec![
+                "alice//*/*/*",
+                "bob/default//pods/*",
+                "bob/other//secrets/get"
+            ]
         );
     }
 
