@@ -143,11 +143,18 @@ impl ClusterSource {
                 plural: plural.to_string(),
             };
             let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
-            for obj in api
-                .list(&ListParams::default())
-                .await
-                .with_context(|| format!("listing {kind}"))?
-            {
+            let list = match api.list(&ListParams::default()).await {
+                Ok(list) => list,
+                // The cluster doesn't serve this API (ex: no Karpenter CRDs).
+                // An unknown group is a plain-text 404, not a NotFound
+                // Status, so match on the code.
+                Err(kube::Error::Api(status)) if status.code == 404 => {
+                    eprintln!("    {kind}: {} not served, skipping", ar.api_version);
+                    continue;
+                }
+                Err(e) => return Err(e).with_context(|| format!("listing {kind}")),
+            };
+            for obj in list {
                 objects.push((obj, Some((ar.api_version.clone(), ar.kind.clone()))));
             }
         }
