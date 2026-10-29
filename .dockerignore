@@ -1,0 +1,13 @@
+# Without .git the flake sees every copied file, so keep this in step with
+# .gitignore.
+.git
+.direnv
+.worktrees
+.claude
+target
+notes
+ddtest
+result*
+pallograph
+*.mapping.json
+*.local.txt

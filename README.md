@@ -369,6 +369,28 @@ samply can symbolize stacks. Release builds stay lean. To profile the main
 binary, run `cargo build --profile profiling --bin pallograph` and point samply
 at `target/profiling/pallograph`.
 
+## Install
+
+Static Linux binaries (x86_64, aarch64) are attached to each
+[release](https://github.com/ajwdev/pallograph/releases). The rules are
+embedded, so the binary works from any directory; `--rules <path>` adds to
+them. With no config file it reads the cluster in your current kubeconfig
+context (or in-cluster service account auth).
+
+With Docker, mounting a kubeconfig (`--user` so the container can read a
+0600 file):
+
+```sh
+docker run --rm -it --user "$(id -u)" \
+  -v ~/.kube/config:/home/nonroot/.kube/config:ro \
+  ghcr.io/ajwdev/pallograph
+```
+
+The image is the static binary plus busybox (for `shell` datasources) and CA
+certificates. Exec credential plugins such as `aws` and `gcloud` are not
+included, so use a token or certificate kubeconfig, or in-cluster
+service account auth.
+
 ## License
 
 Licensed under either of
