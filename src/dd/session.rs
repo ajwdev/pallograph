@@ -135,9 +135,6 @@ pub enum Command {
         all_rule_sources: Vec<String>,
         /// Head predicate of the newly added rule(s), pre-extracted by the caller.
         new_head: Option<String>,
-        /// Whether the new rule(s) need provenance. In a provenance session that
-        /// forces a rebuild, since layering builds no annotations.
-        needs_provenance: bool,
         ack: Sender<AddOutcome>,
     },
     /// Terminate the worker loop.  Must be sent (and acked) before dropping the guard.
@@ -1274,7 +1271,6 @@ impl DdSession {
                         Command::AddRules {
                             all_rule_sources,
                             new_head,
-                            needs_provenance,
                             ack,
                         } => {
                             // Check if the new rule extends an already-materialized predicate.
@@ -1286,8 +1282,8 @@ impl DdSession {
 
                             // The layering path below builds no lazy annotations
                             // and the worker's `rules_by_id` is fixed at spawn,
-                            // so rules that need provenance rebuild instead.
-                            if extends_existing || (provenance && needs_provenance) {
+                            // so a provenance session rebuilds instead.
+                            if extends_existing || provenance {
                                 let _ = ack.send(AddOutcome::NeedsRebuild);
                                 continue;
                             }
@@ -1636,28 +1632,22 @@ impl DdSession {
 
     /// Attempt to add a new IDB rule by layering a fresh dataflow on top of the
     /// current one.  If the rule extends an existing materialized predicate or is
-    /// recursive, falls back to a full `rebuild` automatically.
+    /// recursive, falls back to a full `rebuild` automatically.  A provenance
+    /// session always rebuilds, since layering builds no annotations.
     ///
     /// `new_head` is the head predicate of the newly added rule, pre-extracted
     /// by the caller (see `engine::extract_head_pred`).  `all_rule_sources` is the
     /// full accumulated rule set including the new rule.
-    ///
-    /// `needs_provenance` says whether `::why` should be able to explain the new
-    /// rule's facts. In a provenance session that forces a `rebuild` (layering
-    /// builds no annotations); pass `false` for throwaway rules like `?-`
-    /// queries to keep them cheap.
     pub fn add_idb(
         &mut self,
         new_head: Option<&str>,
         edb: &[(String, Vec<Value>)],
         all_rule_sources: &[String],
-        needs_provenance: bool,
     ) -> Result<()> {
         let (ack_tx, ack_rx) = bounded(1);
         let _ = self.tx.send(Command::AddRules {
             all_rule_sources: all_rule_sources.to_vec(),
             new_head: new_head.map(|s| s.to_string()),
-            needs_provenance,
             ack: ack_tx,
         });
         match ack_rx.recv()? {
@@ -1879,7 +1869,7 @@ mod tests {
         let mut all_rules = base_rules.clone();
         all_rules.push("Decl view(Src).\nview(X) :- path(X, _).".to_string());
         session
-            .add_idb(Some("view"), &edb, &all_rules, true)
+            .add_idb(Some("view"), &edb, &all_rules)
             .expect("add_idb");
 
         let mut results = session.query("view").unwrap();
@@ -1903,7 +1893,7 @@ mod tests {
         let mut all_rules = base_rules.clone();
         all_rules.push("Decl view(Src).\nview(X) :- path(X, _).".to_string());
         session
-            .add_idb(Some("view"), &edb, &all_rules, true)
+            .add_idb(Some("view"), &edb, &all_rules)
             .expect("add_idb");
 
         // Before insert: only a
@@ -1937,14 +1927,14 @@ mod tests {
         let mut rules_v1 = base_rules.clone();
         rules_v1.push("Decl view1(Src).\nview1(X) :- path(X, _).".to_string());
         session
-            .add_idb(Some("view1"), &edb, &rules_v1, true)
+            .add_idb(Some("view1"), &edb, &rules_v1)
             .expect("add_idb view1");
 
         // Layer view2: view2(X) :- view1(X).
         let mut rules_v2 = rules_v1.clone();
         rules_v2.push("Decl view2(Src).\nview2(X) :- view1(X).".to_string());
         session
-            .add_idb(Some("view2"), &edb, &rules_v2, true)
+            .add_idb(Some("view2"), &edb, &rules_v2)
             .expect("add_idb view2");
 
         let mut results = session.query("view2").unwrap();
@@ -1969,7 +1959,7 @@ mod tests {
         let mut all_rules = base_rules.clone();
         all_rules.push("path(X, X) :- edge(X, _).".to_string());
         session
-            .add_idb(Some("path"), &edb, &all_rules, true)
+            .add_idb(Some("path"), &edb, &all_rules)
             .expect("add_idb fallback");
 
         // After rebuild, path should include both original edges and the reflexive pairs.

@@ -310,17 +310,26 @@ fn snapshots_do_not_copy_earlier_snapshots() {
     }
 }
 
-/// A `?-` query's result relation (`_0`) is scratch, not eval state a
-/// snapshot should freeze.
+/// A `?-` query is a read: it leaves no result relation behind, so a later
+/// query can't name one and a snapshot taken after it has nothing extra.
 #[test]
-fn snapshot_leaves_out_query_results() {
+fn query_keeps_no_result_relation() {
     for backend in ["interpreter", "dd"] {
-        let (stdout, _) = run_session_with(
+        let (stdout, stderr) = run_session_with(
             &["--backend", backend],
             "?- direct_perm(\"admin@example.com\", K, Ns, G, R, Rn, V)\n\
+             ?- direct_perm(\"admin@example.com\", K, Ns, G, R, Rn, V)\n\
              snapshot before\n\
              diff before\n\
+             ?- _0(K, Ns, G, R, Rn, V)\n\
              ::quit\n",
+        );
+        let found = stderr.lines().filter(|l| l.starts_with("Found ")).count();
+        assert_eq!(found, 2, "{backend}: {stderr}");
+        assert!(!stderr.contains("(→ _"), "{backend}: {stderr}");
+        assert!(
+            stderr.contains("Unknown relation '_0'"),
+            "{backend}: {stderr}"
         );
         assert!(
             !stdout.lines().any(|l| l.contains("_0")),
@@ -433,37 +442,6 @@ fn rollback_to_older_then_newer_snapshot() {
         assert!(!diff_b.contains("bob@example.com"), "{args:?}: {stdout}");
         assert!(diff_a.contains("bob@example.com"), "{args:?}: {stdout}");
         assert!(!diff_a.contains("carol@example.com"), "{args:?}: {stdout}");
-    }
-}
-
-/// `?-` results (`_N`) are not part of a snapshot: `rollback` drops all
-/// of them, from before the snapshot or after, and numbering starts over.
-#[test]
-fn rollback_drops_all_query_results() {
-    for args in ROLLBACK_BACKENDS {
-        let (_, stderr) = run_session_with(
-            args,
-            "?- direct_perm(\"admin@example.com\", K, Ns, G, R, Rn, V)\n\
-             snapshot base\n\
-             ?- direct_perm(\"admin@example.com\", K, Ns, G, R, Rn, V)\n\
-             rollback base\n\
-             ?- _0(K, Ns, G, R, Rn, V)\n\
-             ?- _1(K, Ns, G, R, Rn, V)\n\
-             ?- direct_perm(\"admin@example.com\", K, Ns, G, R, Rn, V)\n\
-             ::quit\n",
-        );
-        assert!(
-            stderr.contains("Unknown relation '_0'"),
-            "{args:?}: {stderr}"
-        );
-        assert!(
-            stderr.contains("Unknown relation '_1'"),
-            "{args:?}: {stderr}"
-        );
-        // `_0` before the snapshot, `_1` after it, `_0` again after the
-        // rollback.
-        assert_eq!(stderr.matches("(→ _0)").count(), 2, "{args:?}: {stderr}");
-        assert_eq!(stderr.matches("(→ _1)").count(), 1, "{args:?}: {stderr}");
     }
 }
 
@@ -596,8 +574,7 @@ fn use_refuses_state_changes() {
 }
 
 /// A `?-` query with named variables under `use` prints the same
-/// `Found <n> result(s).` trailing line as a `(→ _N)` query on the live
-/// state, minus the `_N` reference: no query-result relation is kept.
+/// `Found <n> result(s).` trailing line as a query on the live state.
 #[test]
 fn use_query_keeps_no_results() {
     for backend in ["interpreter", "dd"] {

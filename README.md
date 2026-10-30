@@ -61,7 +61,8 @@ Startup commands are read from `$XDG_CONFIG_HOME/pallograph/pallographrc` (then
 
 **Query the graph.** `?- <atom>, <atom>, ...` runs a Datalog query against
 facts loaded from the cluster (EDB) and everything the rules derive from them.
-`show` lists the documented relations along with their columns.
+A query is a read and keeps nothing; to reuse a result in later queries, name
+it with `define`. `show` lists the documented relations along with their columns.
 
 **Explain results.** `why <fact>` prints the derivation tree (provenance), so
 you can see the chain of bindings and rules that produced a fact rather than

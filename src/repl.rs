@@ -368,7 +368,7 @@ fn print_help() {
         "  snapshot <name>                        - save current eval state, and the facts and rules it came from, as a named snapshot"
     );
     println!(
-        "  rollback <name>                        - restore the facts and rules saved by snapshot <name>, re-evaluate, drop all _N results (the snapshot stays; each one holds a copy of the facts)"
+        "  rollback <name>                        - restore the facts and rules saved by snapshot <name>, re-evaluate (the snapshot stays; each one holds a copy of the facts)"
     );
     println!(
         "  diff <name>                            - diff the state in use (live, unless `use` points elsewhere) against a named snapshot"
@@ -666,7 +666,7 @@ fn refuse_if_in_use(in_use: &Option<String>, command_failed: &mut bool) -> bool 
 }
 
 /// Print a `?-` query's result rows in the current output format, shared by
-/// the live (`_N`-backed) and `use` (throwaway) result paths.
+/// the live and `use` paths.
 fn print_query_rows(format: OutputFormat, vars: &[String], tuples: &[Vec<Value>]) {
     if format == OutputFormat::Table {
         let rows: Vec<Vec<String>> = tuples
@@ -845,7 +845,6 @@ fn session(
     let mut current_store_stale = false;
     let mut format = format;
     let mut had_failure = false;
-    let mut query_counter: u32 = 0;
     let mut snapshots: BTreeMap<String, FrozenState> = BTreeMap::new();
     // User-defined command aliases (see the `alias` command and the rc file).
     // A bare command's first token is expanded textually before dispatch; a
@@ -1195,56 +1194,24 @@ fn session(
                     };
                     let body = body.as_str();
 
-                    if let Some(name) = &in_use {
-                        // A snapshot is frozen: evaluate just the query rule
-                        // over its facts, keep nothing, and never touch the
-                        // live engine (`known_relations` won't advance either).
-                        let relations = body_relations(raw_body);
-                        let result_name = "__use_query";
-                        let rule = format!("{result_name}({}) :- {body}.", vars.join(", "));
-                        let frozen = &snapshots
-                            .get(name)
-                            .expect("in_use always names an existing snapshot")
-                            .store;
-                        match engine.evaluate_query_on(frozen, &relations, rule) {
-                            Ok(result_store) => {
-                                let tuples = result_store.scan(result_name).to_vec();
-                                if tuples.is_empty() {
-                                    eprintln!("No results.");
-                                } else {
-                                    print_query_rows(format, &vars, &tuples);
-                                    eprintln!("Found {} result(s).", tuples.len());
-                                }
-                            }
-                            Err(e) => command_error!("Error: {e:#}"),
-                        }
-                        continue;
-                    }
-
-                    let result_name = format!("_{query_counter}");
+                    // A query is a read: evaluate just the query rule over
+                    // the active state's facts (live or a `use`d snapshot)
+                    // and keep nothing. The engine's rules and facts are
+                    // left alone, so name a result with `define` to reuse it.
+                    let relations = body_relations(raw_body);
+                    let result_name = "__query";
                     let rule = format!("{result_name}({}) :- {body}.", vars.join(", "));
-                    if let Err(e) = engine.add_query_rule(rule) {
-                        command_error!("Error: {e:#}");
-                        engine.remove_rules_for(&result_name);
-                        continue;
-                    }
-                    match engine.evaluate() {
-                        Ok(new_store) => {
-                            current_store = new_store;
-                            let tuples = current_store.scan(&result_name).to_vec();
+                    match engine.evaluate_query_on(active, &relations, rule) {
+                        Ok(result_store) => {
+                            let tuples = result_store.scan(result_name);
                             if tuples.is_empty() {
                                 eprintln!("No results.");
-                                engine.remove_rules_for(&result_name);
                             } else {
-                                print_query_rows(format, &vars, &tuples);
-                                eprintln!("Found {} result(s): (→ {result_name})", tuples.len());
-                                query_counter += 1;
+                                print_query_rows(format, &vars, tuples);
+                                eprintln!("Found {} result(s).", tuples.len());
                             }
                         }
-                        Err(e) => {
-                            command_error!("Error: {e:#}");
-                            engine.remove_rules_for(&result_name);
-                        }
+                        Err(e) => command_error!("Error: {e:#}"),
                     }
                     continue;
                 }
@@ -1439,15 +1406,10 @@ fn session(
                         command_error!("No snapshot named '{name}'.");
                         continue;
                     };
-                    // A snapshot saves no `?-` result rules (`_N`), so this
-                    // drops every one, including those from before the
-                    // snapshot. With none left to collide with, numbering
-                    // starts over at `_0`.
                     if let Err(e) = engine.restore_inputs(&frozen.inputs) {
                         command_error!("Error: {e:#}");
                         continue;
                     }
-                    query_counter = 0;
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
@@ -3732,8 +3694,8 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// Up to three known relations close to `name`, nearest first. Query results
-/// (`_N`) are not suggested.
+/// Up to three known relations close to `name`, nearest first. Internal
+/// relations (leading `_`) are not suggested.
 fn suggest(name: &str, known: &std::collections::HashSet<String>) -> Vec<String> {
     let mut scored: Vec<(usize, &String)> = known
         .iter()

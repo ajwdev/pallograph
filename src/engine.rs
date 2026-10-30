@@ -28,12 +28,9 @@ pub struct EvalStore {
 
 /// True for relations a frozen state (`snapshot`) or a `Diff` should not
 /// see: the interpreter's GroupBy scratch space (`$temp_grp_0`; the DD
-/// backend has none) and a `?-` query's result relation (`_0`, `_1`, ...).
+/// backend has none).
 pub(crate) fn is_scratch_relation(name: &str) -> bool {
     name.starts_with('$')
-        || name
-            .strip_prefix('_')
-            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
 impl EvalStore {
@@ -61,7 +58,7 @@ impl EvalStore {
     /// Clone this eval state, leaving out scratch relations (see
     /// `is_scratch_relation`). `snapshot` freezes a copy this way: later
     /// mutations to the live engine state must not change it, and the copy
-    /// must not include query results or interpreter temporaries.
+    /// must not include interpreter temporaries.
     pub fn frozen_copy(&self) -> EvalStore {
         let facts = self
             .facts
@@ -760,10 +757,8 @@ pub struct ApplySummary {
 
 /// A copy of what the engine evaluates: the facts loaded from the cluster
 /// or added since (EDB), and the rule sources, `define` rules included.
-/// `snapshot` saves one so `rollback` can put it back. The rules behind
-/// `?-` results (`_N`) are left out: those results belong to the REPL
-/// session, not to the state a snapshot saves. The duplicate index is left
-/// out too; [`Engine::restore_inputs`] rebuilds it.
+/// `snapshot` saves one so `rollback` can put it back. The duplicate index
+/// is left out; [`Engine::restore_inputs`] rebuilds it.
 #[derive(Clone)]
 pub struct EngineInputs {
     edb: Vec<(String, Vec<Value>)>,
@@ -989,27 +984,10 @@ impl Engine {
     /// backend cannot translate is reported as an error (and left in
     /// `rule_sources` for the caller to roll back) rather than silently dropped.
     pub fn add_rule(&mut self, rule: String) -> Result<()> {
-        self.add_rule_with_provenance(rule, true)
-    }
-
-    /// Add the temporary rule behind a `?-` query. Like [`Self::add_rule`], but
-    /// it never gets provenance, so a provenance session layers it on instead
-    /// of rebuilding: query results are throwaway and `::why` is for the core
-    /// relations.
-    pub fn add_query_rule(&mut self, rule: String) -> Result<()> {
-        self.add_rule_with_provenance(rule, false)
-    }
-
-    fn add_rule_with_provenance(&mut self, rule: String, needs_provenance: bool) -> Result<()> {
         let new_head = extract_head_pred(&rule);
         self.rule_sources.push(rule);
         if let Some(s) = &mut self.session {
-            s.add_idb(
-                new_head.as_deref(),
-                &self.edb,
-                &self.rule_sources,
-                needs_provenance,
-            )?;
+            s.add_idb(new_head.as_deref(), &self.edb, &self.rule_sources)?;
         }
         Ok(())
     }
@@ -1107,18 +1085,11 @@ impl Engine {
         Ok(())
     }
 
-    /// Copy the engine's current facts and rules, minus the rules behind
-    /// `?-` results (`_N`), for `snapshot`.
+    /// Copy the engine's current facts and rules, for `snapshot`.
     pub fn save_inputs(&self) -> EngineInputs {
-        let rule_sources = self
-            .rule_sources
-            .iter()
-            .filter(|rule| !extract_head_pred(rule).is_some_and(|head| is_scratch_relation(&head)))
-            .cloned()
-            .collect();
         EngineInputs {
             edb: self.edb.clone(),
-            rule_sources,
+            rule_sources: self.rule_sources.clone(),
         }
     }
 
@@ -1289,16 +1260,6 @@ impl Engine {
 
     pub fn truncate_rules(&mut self, len: usize) {
         self.rule_sources.truncate(len);
-        if let Some(s) = &mut self.session {
-            let _ = s.rebuild(&self.edb, &self.rule_sources);
-        }
-    }
-
-    /// Remove all rules whose head matches `predicate`.
-    pub fn remove_rules_for(&mut self, predicate: &str) {
-        let prefix = format!("{predicate}(");
-        self.rule_sources
-            .retain(|s| !s.trim_start().starts_with(&prefix));
         if let Some(s) = &mut self.session {
             let _ = s.rebuild(&self.edb, &self.rule_sources);
         }
@@ -1927,21 +1888,14 @@ mod tests {
 
     /// Restoring saved inputs undoes an upsert of a startup object, an
     /// added fact and an added rule, leaving the same facts as before, and
-    /// rebuilds the DD session once. `?-` result rules (`_N`) are never
-    /// saved, so none survive a restore, whenever they were added.
+    /// rebuilds the DD session once.
     #[test]
     fn restore_inputs_undoes_upsert_of_startup_object() {
         let startup = objects(vec![config_map("x", "web"), config_map("y", "db")]);
         for mut engine in object_engines(startup) {
             let before = sorted_store(engine.evaluate().unwrap());
             let rules_before = engine.rules_len();
-            engine
-                .add_query_rule("_0(X) :- path(X, \"d\").".to_string())
-                .unwrap();
             let saved = engine.save_inputs();
-            engine
-                .add_query_rule("_1(X) :- path(\"a\", X).".to_string())
-                .unwrap();
 
             engine.upsert_objects(objects(vec![config_map("x", "api")]));
             engine.add_fact("edge".to_string(), vec![s("d"), s("e")]);
@@ -1955,9 +1909,7 @@ mod tests {
             assert_eq!(engine.rebuild_count, rebuilds + 1);
             assert_eq!(engine.rules_len(), rules_before);
             assert_eq!(tiers(&engine), [(s("x"), s("web")), (s("y"), s("db"))]);
-            let after = engine.evaluate().unwrap();
-            assert!(after.scan("_0").is_empty() && after.scan("_1").is_empty());
-            assert_eq!(sorted_store(after), before);
+            assert_eq!(sorted_store(engine.evaluate().unwrap()), before);
             // The duplicate index matches the restored EDB: the retracted
             // startup row can't be re-added, the dropped edge can.
             assert!(!engine.add_fact("edge".to_string(), vec![s("a"), s("b")]));
@@ -2080,31 +2032,6 @@ mod tests {
         }
         assert!(derived > 0, "fixtures derived no facts");
         eprintln!("explained {derived} derived facts");
-    }
-
-    /// A `?-` query rule layers onto a provenance session without provenance:
-    /// its results are queryable but not annotated (a rebuild would have
-    /// annotated them), and the core relations stay explainable.
-    #[test]
-    fn dd_provenance_query_rule_layers_without_provenance() {
-        use crate::dd::value::Row;
-
-        let (edb, rules) = diamond();
-        let mut engine =
-            Engine::from_parts(edb, rules, Box::new(DdBackend { provenance: true })).unwrap();
-        engine
-            .add_query_rule("_0(Y) :- path(\"a\", Y).".to_string())
-            .unwrap();
-
-        let mut results = engine.query_live("_0").unwrap();
-        results.sort();
-        assert_eq!(results, vec![vec![s("b")], vec![s("c")], vec![s("d")]]);
-
-        let session = engine.provenance_session().expect("still a lazy session");
-        assert!(!session.has_provenance_for("_0"), "query rule was layered");
-        assert!(session.has_provenance_for("path"));
-        let ad = Row::from([s("a"), s("d")].as_slice());
-        assert_eq!(session.why_height("path", &ad).map(|a| a.1), Some(2));
     }
 
     /// Heights track fact deltas in the live session: a shortcut edge lowers
