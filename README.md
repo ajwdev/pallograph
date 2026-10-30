@@ -61,7 +61,8 @@ Startup commands are read from `$XDG_CONFIG_HOME/pallograph/pallographrc` (then
 
 **Query the graph.** `?- <atom>, <atom>, ...` runs a Datalog query against
 facts loaded from the cluster (EDB) and everything the rules derive from them.
-`show` lists the documented relations along with their columns.
+A query is a read and keeps nothing; to reuse a result in later queries, name
+it with `define`. `show` lists the documented relations along with their columns.
 
 **Explain results.** `why <fact>` prints the derivation tree (provenance), so
 you can see the chain of bindings and rules that produced a fact rather than
@@ -162,6 +163,19 @@ Other flags worth knowing:
 - `--format default|compact|table|ndjson`: output format.
 - `--script <file>`: run commands from a file (`-` for stdin) instead of the
   REPL; see "Script it" above.
+- `--watch`: watch every `k8s` datasource, as if each set `watch = true`
+  (see below). Mainly for running without a config file.
+
+**Watching a cluster.** Set `watch = true` on a `k8s` datasource to keep
+watching it instead of listing it once at startup (one watched datasource
+per profile for now). Each command sees the cluster as of when it started,
+and a `live: 2 updated, 1 removed` line says what changed since the last
+one. Pair it with `--backend dd`, which applies each batch of changes
+incrementally; the interpreter re-evaluates everything. While watching, the
+watcher owns the cluster's objects: `rollback` is refused, and a `+`/`-`
+edit to a watched object lasts until that object next changes. Snapshots
+still work, so `snapshot morning` then later `rbac::diff morning` shows
+what the cluster gained since.
 
 ## How it works
 

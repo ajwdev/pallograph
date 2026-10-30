@@ -273,21 +273,14 @@ with `... (depth limit)`.
 `::why` reads facts from the live session, so it reflects `+`/`-` fact changes
 immediately.
 
-**Rules added in the REPL.** Provenance is for the core relations, the rules
-loaded at startup. How a rule added later is handled depends on how it was
-added:
+**Rules added in the REPL.** `::define` and `::source` rules get
+provenance. The session rebuilds from scratch (the worker shuts down and
+re-runs every rule over the full EDB), because the cheaper layering path
+builds no annotations and cannot register a rule for `why_step`.
 
-- `::define` and `::source` rules get provenance. The session rebuilds from
-  scratch (the worker shuts down and re-runs every rule over the full EDB),
-  because the cheaper layering path builds no annotations and cannot register
-  a rule for `why_step`.
-- `?-` queries do not. Each query is a temporary rule (`_N(...) :- ...`),
-  and it is layered onto the running dataflow without annotations
-  (`Engine::add_query_rule`), so queries cost the same with `--provenance` as
-  without. `::why` on a query result says it is not tracked.
-
-Any rebuild annotates every rule, so a query rule that happens to be present
-when a later rebuild runs does get provenance.
+`?-` queries add no rule to the session. A query is evaluated on its own
+over a copy of the facts it reads (`Engine::evaluate_query_on`) and its
+result is discarded, so it costs the same with `--provenance` as without.
 
 ---
 

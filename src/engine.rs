@@ -28,12 +28,9 @@ pub struct EvalStore {
 
 /// True for relations a frozen state (`snapshot`) or a `Diff` should not
 /// see: the interpreter's GroupBy scratch space (`$temp_grp_0`; the DD
-/// backend has none) and a `?-` query's result relation (`_0`, `_1`, ...).
+/// backend has none).
 pub(crate) fn is_scratch_relation(name: &str) -> bool {
     name.starts_with('$')
-        || name
-            .strip_prefix('_')
-            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
 impl EvalStore {
@@ -61,7 +58,7 @@ impl EvalStore {
     /// Clone this eval state, leaving out scratch relations (see
     /// `is_scratch_relation`). `snapshot` freezes a copy this way: later
     /// mutations to the live engine state must not change it, and the copy
-    /// must not include query results or interpreter temporaries.
+    /// must not include interpreter temporaries.
     pub fn frozen_copy(&self) -> EvalStore {
         let facts = self
             .facts
@@ -482,7 +479,9 @@ impl CompiledProgram {
     }
 }
 
-pub trait Backend {
+/// `Send` so an `Engine` can be shared across threads (e.g. a cluster watcher
+/// feeding it while the REPL reads).
+pub trait Backend: Send {
     fn evaluate(&self, edb: &[(String, Vec<Value>)], rule_sources: &[String]) -> Result<EvalStore>;
 
     /// Whether `::why` can explain facts with this backend. The interpreter
@@ -760,10 +759,8 @@ pub struct ApplySummary {
 
 /// A copy of what the engine evaluates: the facts loaded from the cluster
 /// or added since (EDB), and the rule sources, `define` rules included.
-/// `snapshot` saves one so `rollback` can put it back. The rules behind
-/// `?-` results (`_N`) are left out: those results belong to the REPL
-/// session, not to the state a snapshot saves. The duplicate index is left
-/// out too; [`Engine::restore_inputs`] rebuilds it.
+/// `snapshot` saves one so `rollback` can put it back. The duplicate index
+/// is left out; [`Engine::restore_inputs`] rebuilds it.
 #[derive(Clone)]
 pub struct EngineInputs {
     edb: Vec<(String, Vec<Value>)>,
@@ -784,6 +781,10 @@ pub struct Engine {
     /// mutations are fed directly to the worker rather than waiting for a full
     /// recompute.
     session: Option<crate::dd::session::DdSession>,
+    /// Stands in for the DD epoch when there is no session (the
+    /// interpreter), so [`Self::version`] works on both backends. Counts
+    /// changes to the facts or rules; unused while a session is live.
+    batch_version: u64,
     /// How many times a fact insert rebuilt the live session. Lets tests
     /// check that a batch insert rebuilds at most once.
     #[cfg(test)]
@@ -947,6 +948,7 @@ impl Engine {
             rule_sources,
             backend,
             session,
+            batch_version: 0,
             #[cfg(test)]
             rebuild_count: 0,
         })
@@ -989,27 +991,11 @@ impl Engine {
     /// backend cannot translate is reported as an error (and left in
     /// `rule_sources` for the caller to roll back) rather than silently dropped.
     pub fn add_rule(&mut self, rule: String) -> Result<()> {
-        self.add_rule_with_provenance(rule, true)
-    }
-
-    /// Add the temporary rule behind a `?-` query. Like [`Self::add_rule`], but
-    /// it never gets provenance, so a provenance session layers it on instead
-    /// of rebuilding: query results are throwaway and `::why` is for the core
-    /// relations.
-    pub fn add_query_rule(&mut self, rule: String) -> Result<()> {
-        self.add_rule_with_provenance(rule, false)
-    }
-
-    fn add_rule_with_provenance(&mut self, rule: String, needs_provenance: bool) -> Result<()> {
         let new_head = extract_head_pred(&rule);
         self.rule_sources.push(rule);
+        self.note_change();
         if let Some(s) = &mut self.session {
-            s.add_idb(
-                new_head.as_deref(),
-                &self.edb,
-                &self.rule_sources,
-                needs_provenance,
-            )?;
+            s.add_idb(new_head.as_deref(), &self.edb, &self.rule_sources)?;
         }
         Ok(())
     }
@@ -1085,6 +1071,7 @@ impl Engine {
     fn push_fact(&mut self, entry: (String, Vec<Value>)) {
         self.edb_index.insert(entry.clone());
         self.edb.push(entry);
+        self.note_change();
     }
 
     /// Re-spawn the live session from the current EDB and rules, if there
@@ -1107,18 +1094,11 @@ impl Engine {
         Ok(())
     }
 
-    /// Copy the engine's current facts and rules, minus the rules behind
-    /// `?-` results (`_N`), for `snapshot`.
+    /// Copy the engine's current facts and rules, for `snapshot`.
     pub fn save_inputs(&self) -> EngineInputs {
-        let rule_sources = self
-            .rule_sources
-            .iter()
-            .filter(|rule| !extract_head_pred(rule).is_some_and(|head| is_scratch_relation(&head)))
-            .cloned()
-            .collect();
         EngineInputs {
             edb: self.edb.clone(),
-            rule_sources,
+            rule_sources: self.rule_sources.clone(),
         }
     }
 
@@ -1128,6 +1108,7 @@ impl Engine {
         self.edb = inputs.edb.clone();
         self.edb_index = self.edb.iter().cloned().collect();
         self.rule_sources = inputs.rule_sources.clone();
+        self.note_change();
         self.try_rebuild_session()
     }
 
@@ -1156,6 +1137,7 @@ impl Engine {
             s.retract(relation.to_string(), row);
         }
         let entry = self.edb.remove(pos);
+        self.note_change();
         // The EDB can hold a fact more than once (two objects that emit the
         // same fact each add a copy); the index keeps the fact until the
         // last copy goes.
@@ -1287,18 +1269,32 @@ impl Engine {
         self.rule_sources.len()
     }
 
-    pub fn truncate_rules(&mut self, len: usize) {
-        self.rule_sources.truncate(len);
-        if let Some(s) = &mut self.session {
-            let _ = s.rebuild(&self.edb, &self.rule_sources);
+    /// The version of the engine's state: it moves forward on every change
+    /// to the facts (EDB) or rules, so a reader can tell whether an
+    /// `EvalStore` it took earlier is out of date.
+    ///
+    /// With a DD session this is the session's epoch: the worker has settled
+    /// there, so everything committed before it has propagated through every
+    /// rule. The interpreter has no epoch; it evaluates on demand and is
+    /// always settled, so a change counter stands in (`batch_version`).
+    pub fn version(&self) -> u64 {
+        match &self.session {
+            Some(s) => s.epoch(),
+            None => self.batch_version,
         }
     }
 
-    /// Remove all rules whose head matches `predicate`.
-    pub fn remove_rules_for(&mut self, predicate: &str) {
-        let prefix = format!("{predicate}(");
-        self.rule_sources
-            .retain(|s| !s.trim_start().starts_with(&prefix));
+    /// Move the interpreter's stand-in version on. With a session, the
+    /// mutator's commit or rebuild moves the epoch instead.
+    fn note_change(&mut self) {
+        if self.session.is_none() {
+            self.batch_version += 1;
+        }
+    }
+
+    pub fn truncate_rules(&mut self, len: usize) {
+        self.rule_sources.truncate(len);
+        self.note_change();
         if let Some(s) = &mut self.session {
             let _ = s.rebuild(&self.edb, &self.rule_sources);
         }
@@ -1925,23 +1921,106 @@ mod tests {
         }
     }
 
+    /// An `Engine` can move to another thread, so a cluster watcher and the
+    /// REPL can share one.
+    #[test]
+    fn engine_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Engine>();
+    }
+
+    /// Every change to the facts or rules moves the version; reads and
+    /// no-op writes leave it alone.
+    #[test]
+    fn version_moves_on_every_change() {
+        let startup = objects(vec![config_map("x", "web")]);
+        for mut engine in object_engines(startup) {
+            let mut seen = engine.version();
+            let mut moved = |engine: &Engine| {
+                let changed = engine.version() != seen;
+                seen = engine.version();
+                changed
+            };
+
+            engine.evaluate().unwrap();
+            let _ = engine.evaluate_query_on(
+                &engine.evaluate().unwrap(),
+                &["path".to_string()],
+                "q(X) :- path(X, \"d\").".to_string(),
+            );
+            assert!(!moved(&engine), "reads");
+
+            assert!(engine.add_fact("edge".to_string(), vec![s("d"), s("e")]));
+            assert!(moved(&engine), "add_fact");
+            assert!(!engine.add_fact("edge".to_string(), vec![s("d"), s("e")]));
+            assert!(!moved(&engine), "duplicate add_fact");
+            let saved = engine.save_inputs();
+            assert!(engine.retract_fact("edge", &[s("d"), s("e")]));
+            assert!(moved(&engine), "retract_fact");
+            assert!(!engine.retract_fact("edge", &[s("d"), s("e")]));
+            assert!(!moved(&engine), "missing retract_fact");
+            engine.upsert_objects(objects(vec![config_map("x", "api")]));
+            assert!(moved(&engine), "upsert_objects");
+            let rules = engine.rules_len();
+            engine
+                .add_rule("reach_d(X) :- path(X, \"d\").".to_string())
+                .unwrap();
+            assert!(moved(&engine), "add_rule");
+            engine.truncate_rules(rules);
+            assert!(moved(&engine), "truncate_rules");
+            engine.restore_inputs(&saved).unwrap();
+            assert!(moved(&engine), "restore_inputs");
+        }
+    }
+
+    /// On DD the version is the session's epoch, and it moves forward on
+    /// every change: a commit, a rule layered on, or a rebuild (new
+    /// relation, provenance `define`, `rollback`) that would otherwise
+    /// restart the worker at epoch 1.
+    #[test]
+    fn dd_version_is_the_session_epoch_and_never_goes_back() {
+        for provenance in [false, true] {
+            let (edb, rules) = diamond();
+            let mut engine =
+                Engine::from_parts(edb, rules, Box::new(DdBackend { provenance })).unwrap();
+            let saved = engine.save_inputs();
+            let mut last = engine.version();
+            let mut step = |engine: &Engine, what: &str| {
+                let session = engine.session.as_ref().unwrap();
+                assert_eq!(engine.version(), session.epoch(), "{what}");
+                assert!(
+                    engine.version() > last,
+                    "{what}: {last} -> {}",
+                    engine.version()
+                );
+                last = engine.version();
+            };
+
+            engine.add_fact("edge".to_string(), vec![s("d"), s("e")]);
+            step(&engine, "commit");
+            let rebuilds = engine.rebuild_count;
+            engine.add_fact("node".to_string(), vec![s("a")]);
+            assert_eq!(engine.rebuild_count, rebuilds + 1);
+            step(&engine, "rebuild for a new relation");
+            engine
+                .add_rule("reach_d(X) :- path(X, \"d\").".to_string())
+                .unwrap();
+            step(&engine, "add_rule");
+            engine.restore_inputs(&saved).unwrap();
+            step(&engine, "restore_inputs");
+        }
+    }
+
     /// Restoring saved inputs undoes an upsert of a startup object, an
     /// added fact and an added rule, leaving the same facts as before, and
-    /// rebuilds the DD session once. `?-` result rules (`_N`) are never
-    /// saved, so none survive a restore, whenever they were added.
+    /// rebuilds the DD session once.
     #[test]
     fn restore_inputs_undoes_upsert_of_startup_object() {
         let startup = objects(vec![config_map("x", "web"), config_map("y", "db")]);
         for mut engine in object_engines(startup) {
             let before = sorted_store(engine.evaluate().unwrap());
             let rules_before = engine.rules_len();
-            engine
-                .add_query_rule("_0(X) :- path(X, \"d\").".to_string())
-                .unwrap();
             let saved = engine.save_inputs();
-            engine
-                .add_query_rule("_1(X) :- path(\"a\", X).".to_string())
-                .unwrap();
 
             engine.upsert_objects(objects(vec![config_map("x", "api")]));
             engine.add_fact("edge".to_string(), vec![s("d"), s("e")]);
@@ -1955,9 +2034,7 @@ mod tests {
             assert_eq!(engine.rebuild_count, rebuilds + 1);
             assert_eq!(engine.rules_len(), rules_before);
             assert_eq!(tiers(&engine), [(s("x"), s("web")), (s("y"), s("db"))]);
-            let after = engine.evaluate().unwrap();
-            assert!(after.scan("_0").is_empty() && after.scan("_1").is_empty());
-            assert_eq!(sorted_store(after), before);
+            assert_eq!(sorted_store(engine.evaluate().unwrap()), before);
             // The duplicate index matches the restored EDB: the retracted
             // startup row can't be re-added, the dropped edge can.
             assert!(!engine.add_fact("edge".to_string(), vec![s("a"), s("b")]));
@@ -2080,31 +2157,6 @@ mod tests {
         }
         assert!(derived > 0, "fixtures derived no facts");
         eprintln!("explained {derived} derived facts");
-    }
-
-    /// A `?-` query rule layers onto a provenance session without provenance:
-    /// its results are queryable but not annotated (a rebuild would have
-    /// annotated them), and the core relations stay explainable.
-    #[test]
-    fn dd_provenance_query_rule_layers_without_provenance() {
-        use crate::dd::value::Row;
-
-        let (edb, rules) = diamond();
-        let mut engine =
-            Engine::from_parts(edb, rules, Box::new(DdBackend { provenance: true })).unwrap();
-        engine
-            .add_query_rule("_0(Y) :- path(\"a\", Y).".to_string())
-            .unwrap();
-
-        let mut results = engine.query_live("_0").unwrap();
-        results.sort();
-        assert_eq!(results, vec![vec![s("b")], vec![s("c")], vec![s("d")]]);
-
-        let session = engine.provenance_session().expect("still a lazy session");
-        assert!(!session.has_provenance_for("_0"), "query rule was layered");
-        assert!(session.has_provenance_for("path"));
-        let ad = Row::from([s("a"), s("d")].as_slice());
-        assert_eq!(session.why_height("path", &ad).map(|a| a.1), Some(2));
     }
 
     /// Heights track fact deltas in the live session: a shortcut edge lowers

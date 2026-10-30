@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::IsTerminal;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context as _, Result};
 use mangle_common::Value;
@@ -16,12 +17,13 @@ use rustyline::{Context, Helper};
 
 use crate::dd::session::LazyProvenance;
 use crate::edb::{K8sManifestsSource, ObjectFacts, ObjectKey, ShellSource};
-use crate::engine::{Change, Engine, EvalStore, RelationDoc};
+use crate::engine::{ApplySummary, Change, Engine, EvalStore, RelationDoc};
 use crate::load;
 use crate::query;
 use crate::rbac;
 use crate::smt;
 use crate::snapshot::{Diff, FrozenState};
+use crate::watch::WatchStatus;
 
 struct ReplHelper {
     path_completer: FilenameCompleter,
@@ -368,7 +370,7 @@ fn print_help() {
         "  snapshot <name>                        - save current eval state, and the facts and rules it came from, as a named snapshot"
     );
     println!(
-        "  rollback <name>                        - restore the facts and rules saved by snapshot <name>, re-evaluate, drop all _N results (the snapshot stays; each one holds a copy of the facts)"
+        "  rollback <name>                        - restore the facts and rules saved by snapshot <name>, re-evaluate (the snapshot stays; each one holds a copy of the facts; not with --watch)"
     );
     println!(
         "  diff <name>                            - diff the state in use (live, unless `use` points elsewhere) against a named snapshot"
@@ -602,6 +604,22 @@ fn run_match(
     true
 }
 
+/// The line printed before a command when the cluster watcher changed the
+/// live state since the last one, e.g. `live: 2 updated, 1 removed`. None
+/// when nothing changed.
+fn live_changes_line(summary: ApplySummary) -> Option<String> {
+    let parts: Vec<String> = [
+        (summary.added, "added"),
+        (summary.updated, "updated"),
+        (summary.retracted, "removed"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, what)| format!("{count} {what}"))
+    .collect();
+    (!parts.is_empty()).then(|| format!("live: {}", parts.join(", ")))
+}
+
 /// The interactive prompt, red like the rest of the REPL's chrome. `use`
 /// with no snapshot (`None`) points it back at the plain prompt; `use
 /// <name>` names the snapshot queries are pointed at.
@@ -666,7 +684,7 @@ fn refuse_if_in_use(in_use: &Option<String>, command_failed: &mut bool) -> bool 
 }
 
 /// Print a `?-` query's result rows in the current output format, shared by
-/// the live (`_N`-backed) and `use` (throwaway) result paths.
+/// the live and `use` paths.
 fn print_query_rows(format: OutputFormat, vars: &[String], tuples: &[Vec<Value>]) {
     if format == OutputFormat::Table {
         let rows: Vec<Vec<String>> = tuples
@@ -765,10 +783,11 @@ impl Input {
 /// and the session carries on, so this returns `Findings` if any `rbac::`/
 /// `sched::` check failed or `rbac::diff` found new permissions, else `Clean`.
 pub fn run(
-    engine: &mut Engine,
+    engine: &Mutex<Engine>,
     store: EvalStore,
     format: OutputFormat,
     rc: Vec<String>,
+    watch: Option<&WatchStatus>,
 ) -> Result<SessionStatus> {
     // Banner is interactive chrome: skip it when stdout is redirected so a
     // piped session (e.g. `... | pallograph --format ndjson > out.json`) yields
@@ -796,6 +815,7 @@ pub fn run(
         store,
         format,
         rc,
+        watch,
         Input::Editor { rl, history_path },
     )
 }
@@ -804,11 +824,12 @@ pub fn run(
 /// same dispatcher as the REPL. Stops with `Error` at the first line that is
 /// not a command or whose command fails; otherwise like [`run`].
 pub fn run_script(
-    engine: &mut Engine,
+    engine: &Mutex<Engine>,
     store: EvalStore,
     format: OutputFormat,
     path: &std::path::Path,
     rc: Vec<String>,
+    watch: Option<&WatchStatus>,
 ) -> Result<SessionStatus> {
     let reader: Box<dyn std::io::BufRead> = if path == std::path::Path::new("-") {
         Box::new(std::io::stdin().lock())
@@ -817,14 +838,21 @@ pub fn run_script(
             .with_context(|| format!("opening script {}", path.display()))?;
         Box::new(std::io::BufReader::new(file))
     };
-    session(engine, store, format, rc, Input::Script(reader))
+    session(engine, store, format, rc, watch, Input::Script(reader))
+}
+
+/// Lock the shared engine, treating a poisoned lock (a panic while it was
+/// held) as fatal.
+fn lock_engine(engine: &Mutex<Engine>) -> MutexGuard<'_, Engine> {
+    engine.lock().expect("engine lock poisoned")
 }
 
 fn session(
-    engine: &mut Engine,
+    engine: &Mutex<Engine>,
     store: EvalStore,
     format: OutputFormat,
     rc: Vec<String>,
+    watch: Option<&WatchStatus>,
     mut input: Input,
 ) -> Result<SessionStatus> {
     // A script stops at its first failed line; the REPL carries on.
@@ -839,13 +867,14 @@ fn session(
     }
 
     let mut current_store = store;
-    // With a live session, `+`, `-` and `~` skip re-evaluating so a run of
-    // them stays fast, and mark `current_store` stale instead. The next
-    // other command refreshes it once from the session.
-    let mut current_store_stale = false;
+    // The engine version `current_store` was evaluated at. Anything that
+    // moves the engine on (a `+`, `-` or `~`, which skip re-evaluating with a
+    // live session so a run of them stays fast, or another thread feeding the
+    // engine) leaves it behind, and the next other command refreshes
+    // `current_store` once.
+    let mut store_version = lock_engine(engine).version();
     let mut format = format;
     let mut had_failure = false;
-    let mut query_counter: u32 = 0;
     let mut snapshots: BTreeMap<String, FrozenState> = BTreeMap::new();
     // User-defined command aliases (see the `alias` command and the rc file).
     // A bare command's first token is expanded textually before dispatch; a
@@ -956,12 +985,19 @@ fn session(
                     input.add_history_entry(&line)?;
                 }
 
+                // Hold the engine for the whole command, so nothing else
+                // changes it partway through.
+                let mut engine_guard = lock_engine(engine);
+                let engine = &mut *engine_guard;
+                if let Some(line) = watch.and_then(|w| live_changes_line(w.take())) {
+                    eprintln!("{line}");
+                }
                 let is_mutator = line.starts_with(['+', '-', '~']);
-                if current_store_stale && !is_mutator {
+                if engine.version() != store_version && !is_mutator {
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
-                            current_store_stale = false;
+                            store_version = engine.version();
                         }
                         Err(e) => command_error!("Error: {e:#}"),
                     }
@@ -1195,56 +1231,24 @@ fn session(
                     };
                     let body = body.as_str();
 
-                    if let Some(name) = &in_use {
-                        // A snapshot is frozen: evaluate just the query rule
-                        // over its facts, keep nothing, and never touch the
-                        // live engine (`known_relations` won't advance either).
-                        let relations = body_relations(raw_body);
-                        let result_name = "__use_query";
-                        let rule = format!("{result_name}({}) :- {body}.", vars.join(", "));
-                        let frozen = &snapshots
-                            .get(name)
-                            .expect("in_use always names an existing snapshot")
-                            .store;
-                        match engine.evaluate_query_on(frozen, &relations, rule) {
-                            Ok(result_store) => {
-                                let tuples = result_store.scan(result_name).to_vec();
-                                if tuples.is_empty() {
-                                    eprintln!("No results.");
-                                } else {
-                                    print_query_rows(format, &vars, &tuples);
-                                    eprintln!("Found {} result(s).", tuples.len());
-                                }
-                            }
-                            Err(e) => command_error!("Error: {e:#}"),
-                        }
-                        continue;
-                    }
-
-                    let result_name = format!("_{query_counter}");
+                    // A query is a read: evaluate just the query rule over
+                    // the active state's facts (live or a `use`d snapshot)
+                    // and keep nothing. The engine's rules and facts are
+                    // left alone, so name a result with `define` to reuse it.
+                    let relations = body_relations(raw_body);
+                    let result_name = "__query";
                     let rule = format!("{result_name}({}) :- {body}.", vars.join(", "));
-                    if let Err(e) = engine.add_query_rule(rule) {
-                        command_error!("Error: {e:#}");
-                        engine.remove_rules_for(&result_name);
-                        continue;
-                    }
-                    match engine.evaluate() {
-                        Ok(new_store) => {
-                            current_store = new_store;
-                            let tuples = current_store.scan(&result_name).to_vec();
+                    match engine.evaluate_query_on(active, &relations, rule) {
+                        Ok(result_store) => {
+                            let tuples = result_store.scan(result_name);
                             if tuples.is_empty() {
                                 eprintln!("No results.");
-                                engine.remove_rules_for(&result_name);
                             } else {
-                                print_query_rows(format, &vars, &tuples);
-                                eprintln!("Found {} result(s): (→ {result_name})", tuples.len());
-                                query_counter += 1;
+                                print_query_rows(format, &vars, tuples);
+                                eprintln!("Found {} result(s).", tuples.len());
                             }
                         }
-                        Err(e) => {
-                            command_error!("Error: {e:#}");
-                            engine.remove_rules_for(&result_name);
-                        }
+                        Err(e) => command_error!("Error: {e:#}"),
                     }
                     continue;
                 }
@@ -1430,6 +1434,14 @@ fn session(
                     if refuse_if_in_use(&in_use, &mut command_failed) {
                         continue;
                     }
+                    if watch.is_some() {
+                        // A rollback swaps the whole EDB behind the watcher's back,
+                        // so objects deleted since the snapshot would come back.
+                        command_error!(
+                            "rollback is unavailable while watching a cluster: the watcher owns the live state."
+                        );
+                        continue;
+                    }
                     let name = line.strip_prefix("::rollback").unwrap_or("").trim();
                     if name.is_empty() {
                         command_error!("Usage: rollback <name>");
@@ -1439,18 +1451,14 @@ fn session(
                         command_error!("No snapshot named '{name}'.");
                         continue;
                     };
-                    // A snapshot saves no `?-` result rules (`_N`), so this
-                    // drops every one, including those from before the
-                    // snapshot. With none left to collide with, numbering
-                    // starts over at `_0`.
                     if let Err(e) = engine.restore_inputs(&frozen.inputs) {
                         command_error!("Error: {e:#}");
                         continue;
                     }
-                    query_counter = 0;
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
+                            store_version = engine.version();
                             println!("Rolled back to snapshot '{name}'.");
                         }
                         Err(e) => command_error!("Error: {e:#}"),
@@ -1617,6 +1625,7 @@ fn session(
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
+                            store_version = engine.version();
                             eprintln!("Rule added and evaluated.");
                         }
                         Err(e) => {
@@ -1637,6 +1646,7 @@ fn session(
                             Ok(text) => match source_program(engine, text) {
                                 Ok(new_store) => {
                                     current_store = new_store;
+                                    store_version = engine.version();
                                     eprintln!("Sourced and evaluated.");
                                 }
                                 Err(e) => command_error!("Error: {e:#}"),
@@ -1666,6 +1676,7 @@ fn session(
                         Ok(summary) => match engine.evaluate() {
                             Ok(new_store) => {
                                 current_store = new_store;
+                                store_version = engine.version();
                                 eprintln!(
                                     "Loaded {} object(s) ({} replaced) and evaluated.",
                                     summary.added + summary.updated,
@@ -1713,6 +1724,7 @@ fn session(
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
+                            store_version = engine.version();
                             eprintln!(
                                 "Applied delta: +{added} ~{updated} -{removed} \
                                  ({unchanged} unchanged, {} removed but not live) and evaluated.",
@@ -1743,6 +1755,7 @@ fn session(
                         Ok(n) => match engine.evaluate() {
                             Ok(new_store) => {
                                 current_store = new_store;
+                                store_version = engine.version();
                                 eprintln!("Inserted {n} fact(s) into {relation} and evaluated.");
                             }
                             Err(e) => command_error!("Error: {e:#}"),
@@ -1778,7 +1791,6 @@ fn session(
                                     let removed = engine.retract_fact(&old_rel, &old_tuple);
                                     engine.add_fact(new_rel, new_tuple);
                                     if engine.has_session() {
-                                        current_store_stale = true;
                                         if removed {
                                             println!("Replaced.");
                                         } else {
@@ -1790,6 +1802,7 @@ fn session(
                                         match engine.evaluate() {
                                             Ok(new_store) => {
                                                 current_store = new_store;
+                                                store_version = engine.version();
                                                 if removed {
                                                     println!("Replaced.");
                                                 } else {
@@ -1829,12 +1842,12 @@ fn session(
                             }
                             if engine.add_fact(rel, tuple) {
                                 if engine.has_session() {
-                                    current_store_stale = true;
                                     eprintln!("Asserted.");
                                 } else {
                                     match engine.evaluate() {
                                         Ok(new_store) => {
                                             current_store = new_store;
+                                            store_version = engine.version();
                                             eprintln!("Asserted.");
                                         }
                                         Err(e) => command_error!("Error: {e:#}"),
@@ -1859,12 +1872,12 @@ fn session(
                         Ok((rel, tuple)) => {
                             if engine.retract_fact(&rel, &tuple) {
                                 if engine.has_session() {
-                                    current_store_stale = true;
                                     eprintln!("Retracted.");
                                 } else {
                                     match engine.evaluate() {
                                         Ok(new_store) => {
                                             current_store = new_store;
+                                            store_version = engine.version();
                                             eprintln!("Retracted.");
                                         }
                                         Err(e) => command_error!("Error: {e:#}"),
@@ -1887,8 +1900,14 @@ fn session(
                     let parts: Vec<&str> = rest.trim().splitn(3, char::is_whitespace).collect();
                     match parts.as_slice() {
                         [kind, namespace, selector] => {
+                            // run_match retracts the facts it asserts, so a store that was
+                            // current before it still is.
+                            let in_sync = engine.version() == store_version;
                             if !run_match(engine, Some(kind), namespace, selector, format) {
                                 command_failed = true;
+                            }
+                            if in_sync {
+                                store_version = engine.version();
                             }
                         }
                         _ => command_error!(
@@ -1906,8 +1925,14 @@ fn session(
                     let parts: Vec<&str> = rest.trim().splitn(2, char::is_whitespace).collect();
                     match parts.as_slice() {
                         [namespace, selector] => {
+                            // run_match retracts the facts it asserts, so a store that was
+                            // current before it still is.
+                            let in_sync = engine.version() == store_version;
                             if !run_match(engine, None, namespace, selector, format) {
                                 command_failed = true;
+                            }
+                            if in_sync {
+                                store_version = engine.version();
                             }
                         }
                         _ => command_error!("Usage: k8s::match-all <namespace> <selector>"),
@@ -3732,8 +3757,8 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// Up to three known relations close to `name`, nearest first. Query results
-/// (`_N`) are not suggested.
+/// Up to three known relations close to `name`, nearest first. Internal
+/// relations (leading `_`) are not suggested.
 fn suggest(name: &str, known: &std::collections::HashSet<String>) -> Vec<String> {
     let mut scored: Vec<(usize, &String)> = known
         .iter()
@@ -3900,6 +3925,23 @@ mod query_helper_tests {
         assert_eq!(
             prompt(Some("before")),
             "\x1b[1;31mpallograph (before)>\x1b[0m "
+        );
+    }
+
+    /// The watcher's line names only what changed, and nothing at all when
+    /// nothing did. A retract of an object already gone changed nothing.
+    #[test]
+    fn live_changes_line_names_what_changed() {
+        assert_eq!(live_changes_line(ApplySummary::default()), None);
+        let summary = ApplySummary {
+            updated: 2,
+            retracted: 1,
+            removed_absent: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            live_changes_line(summary).as_deref(),
+            Some("live: 2 updated, 1 removed")
         );
     }
 

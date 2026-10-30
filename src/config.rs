@@ -54,6 +54,11 @@ pub struct Datasource {
     pub content: Option<ContentKind>,
     /// Target relation name. Required when content = "json-tuples".
     pub relation: Option<String>,
+    /// Keep watching the cluster instead of listing it once at startup, so
+    /// the live state follows it. Only for source = "k8s", and at most one
+    /// watched datasource per profile for now.
+    #[serde(default)]
+    pub watch: bool,
 }
 
 /// Find and load the config file. Search order:
