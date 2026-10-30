@@ -3,7 +3,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::IsTerminal;
-use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context as _, Result};
 use mangle_common::Value;
@@ -15,14 +14,12 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
+use crate::api::{At, Core, LocalCore, Rows};
 use crate::dd::session::LazyProvenance;
 use crate::edb::{K8sManifestsSource, ObjectFacts, ObjectKey, ShellSource};
 use crate::engine::{ApplySummary, Change, Engine, EvalStore, RelationDoc};
 use crate::load;
-use crate::query::{
-    self, body_relations, count_top_level_args, extract_vars, single_atom, split_atom,
-    split_projection, suggest,
-};
+use crate::query::{self, extract_vars, split_projection};
 use crate::rbac;
 use crate::smt;
 use crate::snapshot::{Diff, FrozenState};
@@ -286,19 +283,6 @@ impl OutputFormat {
             OutputFormat::Ndjson => "ndjson",
         }
     }
-}
-
-/// The declared column names for a relation, in order, for use as NDJSON keys.
-/// Empty when the relation has no `Decl` (callers fall back to positional keys).
-fn column_keys(engine: &Engine, relation: &str) -> Vec<String> {
-    engine
-        .relation_docs()
-        .ok()
-        .and_then(|docs| {
-            docs.get(relation)
-                .map(|d| d.columns.iter().map(|c| c.name.clone()).collect())
-        })
-        .unwrap_or_default()
 }
 
 /// Render one tuple as a single-line NDJSON object. `key` maps a column index to
@@ -659,24 +643,6 @@ fn active_store<'a>(
     }
 }
 
-/// Relation names a `?-` query may reference under `use <name>`: every
-/// relation the frozen store actually holds rows or keys for, plus any
-/// relation with a `Decl` (covers one with no rows at snapshot time). Unlike
-/// `Engine::known_relations`, this leaves out a relation `define` added
-/// after the snapshot was taken: it did not exist in the frozen state, so a
-/// query against it is unknown, not merely empty.
-fn known_relations_in_use(
-    engine: &Engine,
-    active: &EvalStore,
-) -> std::collections::HashSet<String> {
-    let mut known: std::collections::HashSet<String> = engine
-        .relation_docs()
-        .map(|docs| docs.into_keys().collect())
-        .unwrap_or_default();
-    known.extend(active.relation_names().map(str::to_string));
-    known
-}
-
 /// Return `true` and refuse a state-changing command (`+`, `-`, `~`,
 /// `define`, `load`, `k8s::load`, `apply-delta`, `source`,
 /// `snapshot`, `rollback`) while a snapshot is in use: a frozen state never changes, so there is
@@ -794,8 +760,7 @@ impl Input {
 /// and the session carries on, so this returns `Findings` if any `rbac::`/
 /// `sched::` check failed or `rbac::diff` found new permissions, else `Clean`.
 pub fn run(
-    engine: &Mutex<Engine>,
-    store: EvalStore,
+    core: &LocalCore,
     format: OutputFormat,
     rc: Vec<String>,
     watch: Option<&WatchStatus>,
@@ -821,22 +786,14 @@ pub fn run(
     }));
     let _ = rl.load_history(&history_path);
     let rl = Box::new(rl);
-    session(
-        engine,
-        store,
-        format,
-        rc,
-        watch,
-        Input::Editor { rl, history_path },
-    )
+    session(core, format, rc, watch, Input::Editor { rl, history_path })
 }
 
 /// Run the commands in `path` (`-` for stdin), one per line, through the
 /// same dispatcher as the REPL. Stops with `Error` at the first line that is
 /// not a command or whose command fails; otherwise like [`run`].
 pub fn run_script(
-    engine: &Mutex<Engine>,
-    store: EvalStore,
+    core: &LocalCore,
     format: OutputFormat,
     path: &std::path::Path,
     rc: Vec<String>,
@@ -849,18 +806,11 @@ pub fn run_script(
             .with_context(|| format!("opening script {}", path.display()))?;
         Box::new(std::io::BufReader::new(file))
     };
-    session(engine, store, format, rc, watch, Input::Script(reader))
-}
-
-/// Lock the shared engine, treating a poisoned lock (a panic while it was
-/// held) as fatal.
-fn lock_engine(engine: &Mutex<Engine>) -> MutexGuard<'_, Engine> {
-    engine.lock().expect("engine lock poisoned")
+    session(core, format, rc, watch, Input::Script(reader))
 }
 
 fn session(
-    engine: &Mutex<Engine>,
-    store: EvalStore,
+    core: &LocalCore,
     format: OutputFormat,
     rc: Vec<String>,
     watch: Option<&WatchStatus>,
@@ -877,16 +827,8 @@ fn session(
         }};
     }
 
-    let mut current_store = store;
-    // The engine version `current_store` was evaluated at. Anything that
-    // moves the engine on (a `+`, `-` or `~`, which skip re-evaluating with a
-    // live session so a run of them stays fast, or another thread feeding the
-    // engine) leaves it behind, and the next other command refreshes
-    // `current_store` once.
-    let mut store_version = lock_engine(engine).version();
     let mut format = format;
     let mut had_failure = false;
-    let mut snapshots: BTreeMap<String, FrozenState> = BTreeMap::new();
     // User-defined command aliases (see the `alias` command and the rc file).
     // A bare command's first token is expanded textually before dispatch; a
     // `::`-qualified command bypasses them.
@@ -927,13 +869,17 @@ fn session(
         let (raw, to_history) = if let Some((queued, to_history)) = pending.pop_front() {
             (Ok(queued), to_history)
         } else {
-            // Refresh tab-completion data from the current state before prompting.
-            let active = active_store(&current_store, &snapshots, &in_use);
-            let relations: Vec<String> = active
-                .relation_names()
-                .filter(|n| !n.starts_with(':') && !n.starts_with('_'))
-                .map(str::to_string)
-                .collect();
+            // Refresh tab-completion data from the current state before
+            // prompting. The live state as last evaluated is close enough.
+            let relations: Vec<String> = {
+                let live = core.last_live();
+                let snapshots = core.snapshots();
+                active_store(&live, &snapshots, &in_use)
+                    .relation_names()
+                    .filter(|n| !n.starts_with(':') && !n.starts_with('_'))
+                    .map(str::to_string)
+                    .collect()
+            };
             input.set_completions(aliases.keys().cloned().collect(), relations);
             (input.readline(&prompt(in_use.as_deref())), true)
         };
@@ -996,23 +942,46 @@ fn session(
                     input.add_history_entry(&line)?;
                 }
 
-                // Hold the engine for the whole command, so nothing else
-                // changes it partway through.
-                let mut engine_guard = lock_engine(engine);
-                let engine = &mut *engine_guard;
                 if let Some(line) = watch.and_then(|w| live_changes_line(w.take())) {
                     eprintln!("{line}");
                 }
-                let is_mutator = line.starts_with(['+', '-', '~']);
-                if engine.version() != store_version && !is_mutator {
-                    match engine.evaluate() {
-                        Ok(new_store) => {
-                            current_store = new_store;
-                            store_version = engine.version();
-                        }
-                        Err(e) => command_error!("Error: {e:#}"),
+
+                if let Some(body) = line
+                    .strip_prefix("::query ")
+                    .or_else(|| line.strip_prefix("?- "))
+                {
+                    let at = match &in_use {
+                        Some(name) => At::Snapshot(name.clone()),
+                        None => At::Live,
+                    };
+                    match core.query(&at, body) {
+                        Ok(rows) => print_rows(format, &rows),
+                        Err(e) => command_error!("{e}"),
                     }
+                    continue;
                 }
+
+                // Commands not yet on `Core` hold the engine and the snapshots
+                // for the whole command, so nothing else changes them partway
+                // through.
+                let mut engine_guard = core.engine();
+                let engine = &mut *engine_guard;
+                let mut snapshots = core.snapshots();
+                // The live state, re-evaluated if the engine moved on since the
+                // last command. `+`, `-` and `~` skip this so a run of them on
+                // a DD session stays fast; the next other command catches up.
+                let is_mutator = line.starts_with(['+', '-', '~']);
+                let current_store = if is_mutator {
+                    core.last_live()
+                } else {
+                    match core.live_store(engine) {
+                        Ok(store) => store,
+                        Err(e) => {
+                            command_error!("Error: {e:#}");
+                            core.last_live()
+                        }
+                    }
+                };
 
                 if let Some(cmd) = line.strip_prefix('!') {
                     let cmd = cmd.trim();
@@ -1186,122 +1155,6 @@ fn session(
                     let active = active_store(&current_store, &snapshots, &in_use);
                     if let Err(e) = engine.explain_query(&rule, active) {
                         command_error!("Error: {e:#}");
-                    }
-                    continue;
-                }
-                if let Some(raw_body) = line
-                    .strip_prefix("::query ")
-                    .or_else(|| line.strip_prefix("?- "))
-                {
-                    let raw_body = raw_body.trim();
-                    // Optional projection via an anonymous head: `_(R, N) :-
-                    // atom, atom` reports only the head variables; the rest act
-                    // as join keys. Without a head, every named variable in the
-                    // body is reported (the original behaviour).
-                    let (projection, raw_body) = split_projection(raw_body);
-                    let active = active_store(&current_store, &snapshots, &in_use);
-                    // A typo'd relation is an empty result on the interpreter and
-                    // an opaque error on DD; catch it up front either way.
-                    let known = if in_use.is_some() {
-                        known_relations_in_use(engine, active)
-                    } else {
-                        let mut known = engine.known_relations();
-                        known.extend(current_store.relation_names().map(str::to_string));
-                        known
-                    };
-                    let unknown: Vec<String> = body_relations(raw_body)
-                        .into_iter()
-                        .filter(|r| !known.contains(r))
-                        .collect();
-                    if !unknown.is_empty() {
-                        for r in &unknown {
-                            match suggest(r, &known) {
-                                s if s.is_empty() => command_error!("Unknown relation '{r}'."),
-                                s => command_error!(
-                                    "Unknown relation '{r}'. Did you mean: {}?",
-                                    s.join(", ")
-                                ),
-                            }
-                        }
-                        continue;
-                    }
-                    let existing = extract_vars(raw_body);
-                    let single = single_atom(raw_body);
-                    let cols = single.map(|r| column_keys(engine, r)).unwrap_or_default();
-                    if let Some(rel) = single {
-                        let given = split_atom(raw_body)
-                            .map_or(0, |(_, inner)| count_top_level_args(inner));
-                        if let Some(arity) = relation_arity(active, rel, &cols)
-                            && given > arity
-                        {
-                            command_error!("{rel} has {arity} columns, got {given} arguments.");
-                            continue;
-                        }
-                        // No named variables: list whole tuples, not bindings.
-                        if existing.is_empty() {
-                            if !list_tuples(
-                                engine,
-                                active,
-                                format,
-                                rel,
-                                raw_body,
-                                &cols,
-                                in_use.is_none(),
-                            ) {
-                                command_failed = true;
-                            }
-                            continue;
-                        }
-                    } else if existing.is_empty() {
-                        command_error!("No variables to bind. Name one (e.g. X).");
-                        continue;
-                    }
-                    let (body, mut vars) = match auto_complete_partial(raw_body, active, &cols) {
-                        Some((new_body, added)) => {
-                            let mut all = existing;
-                            all.extend(added);
-                            (new_body, all)
-                        }
-                        None => (raw_body.to_string(), existing),
-                    };
-                    let body = body.as_str();
-
-                    // A projection list narrows the reported columns to the
-                    // named variables; each must be bound somewhere in the body.
-                    if let Some(proj) = projection {
-                        let unbound: Vec<&str> = proj
-                            .iter()
-                            .filter(|p| !vars.contains(p))
-                            .map(String::as_str)
-                            .collect();
-                        if !unbound.is_empty() {
-                            command_error!(
-                                "Projection variable(s) not bound by the body: {}.",
-                                unbound.join(", ")
-                            );
-                            continue;
-                        }
-                        vars = proj;
-                    }
-
-                    // A query is a read: evaluate just the query rule over
-                    // the active state's facts (live or a `use`d snapshot)
-                    // and keep nothing. The engine's rules and facts are
-                    // left alone, so name a result with `define` to reuse it.
-                    let relations = body_relations(raw_body);
-                    let result_name = "__query";
-                    let rule = format!("{result_name}({}) :- {body}.", vars.join(", "));
-                    match engine.evaluate_query_on(active, &relations, rule) {
-                        Ok(result_store) => {
-                            let tuples = result_store.scan(result_name);
-                            if tuples.is_empty() {
-                                eprintln!("No results.");
-                            } else {
-                                print_query_rows(format, &vars, tuples);
-                                eprintln!("Found {} result(s).", tuples.len());
-                            }
-                        }
-                        Err(e) => command_error!("Error: {e:#}"),
                     }
                     continue;
                 }
@@ -1510,8 +1363,7 @@ fn session(
                     }
                     match engine.evaluate() {
                         Ok(new_store) => {
-                            current_store = new_store;
-                            store_version = engine.version();
+                            core.remember_live(engine, new_store);
                             println!("Rolled back to snapshot '{name}'.");
                         }
                         Err(e) => command_error!("Error: {e:#}"),
@@ -1677,8 +1529,7 @@ fn session(
                     }
                     match engine.evaluate() {
                         Ok(new_store) => {
-                            current_store = new_store;
-                            store_version = engine.version();
+                            core.remember_live(engine, new_store);
                             eprintln!("Rule added and evaluated.");
                         }
                         Err(e) => {
@@ -1698,8 +1549,7 @@ fn session(
                         Ok(bytes) => match std::str::from_utf8(&bytes) {
                             Ok(text) => match source_program(engine, text) {
                                 Ok(new_store) => {
-                                    current_store = new_store;
-                                    store_version = engine.version();
+                                    core.remember_live(engine, new_store);
                                     eprintln!("Sourced and evaluated.");
                                 }
                                 Err(e) => command_error!("Error: {e:#}"),
@@ -1728,8 +1578,7 @@ fn session(
                     match source_result.and_then(|mut src| engine.populate_from(src.as_mut())) {
                         Ok(summary) => match engine.evaluate() {
                             Ok(new_store) => {
-                                current_store = new_store;
-                                store_version = engine.version();
+                                core.remember_live(engine, new_store);
                                 eprintln!(
                                     "Loaded {} object(s) ({} replaced) and evaluated.",
                                     summary.added + summary.updated,
@@ -1776,8 +1625,7 @@ fn session(
                     let summary = engine.apply_changes(changes);
                     match engine.evaluate() {
                         Ok(new_store) => {
-                            current_store = new_store;
-                            store_version = engine.version();
+                            core.remember_live(engine, new_store);
                             eprintln!(
                                 "Applied delta: +{added} ~{updated} -{removed} \
                                  ({unchanged} unchanged, {} removed but not live) and evaluated.",
@@ -1807,8 +1655,7 @@ fn session(
                     match load::load_tuples(engine, relation, source) {
                         Ok(n) => match engine.evaluate() {
                             Ok(new_store) => {
-                                current_store = new_store;
-                                store_version = engine.version();
+                                core.remember_live(engine, new_store);
                                 eprintln!("Inserted {n} fact(s) into {relation} and evaluated.");
                             }
                             Err(e) => command_error!("Error: {e:#}"),
@@ -1854,8 +1701,7 @@ fn session(
                                     } else {
                                         match engine.evaluate() {
                                             Ok(new_store) => {
-                                                current_store = new_store;
-                                                store_version = engine.version();
+                                                core.remember_live(engine, new_store);
                                                 if removed {
                                                     println!("Replaced.");
                                                 } else {
@@ -1899,8 +1745,7 @@ fn session(
                                 } else {
                                     match engine.evaluate() {
                                         Ok(new_store) => {
-                                            current_store = new_store;
-                                            store_version = engine.version();
+                                            core.remember_live(engine, new_store);
                                             eprintln!("Asserted.");
                                         }
                                         Err(e) => command_error!("Error: {e:#}"),
@@ -1929,8 +1774,7 @@ fn session(
                                 } else {
                                     match engine.evaluate() {
                                         Ok(new_store) => {
-                                            current_store = new_store;
-                                            store_version = engine.version();
+                                            core.remember_live(engine, new_store);
                                             eprintln!("Retracted.");
                                         }
                                         Err(e) => command_error!("Error: {e:#}"),
@@ -1953,15 +1797,13 @@ fn session(
                     let parts: Vec<&str> = rest.trim().splitn(3, char::is_whitespace).collect();
                     match parts.as_slice() {
                         [kind, namespace, selector] => {
-                            // run_match retracts the facts it asserts, so a store that was
-                            // current before it still is.
-                            let in_sync = engine.version() == store_version;
+                            // run_match retracts the facts it asserts, so a live state
+                            // evaluated before it still holds after.
+                            let before = engine.version();
                             if !run_match(engine, Some(kind), namespace, selector, format) {
                                 command_failed = true;
                             }
-                            if in_sync {
-                                store_version = engine.version();
-                            }
+                            core.carry_live(before, engine.version());
                         }
                         _ => command_error!(
                             "Usage: k8s::match <Kind> <namespace> <selector>  (namespace \"\" for cluster-scoped)"
@@ -1978,15 +1820,13 @@ fn session(
                     let parts: Vec<&str> = rest.trim().splitn(2, char::is_whitespace).collect();
                     match parts.as_slice() {
                         [namespace, selector] => {
-                            // run_match retracts the facts it asserts, so a store that was
-                            // current before it still is.
-                            let in_sync = engine.version() == store_version;
+                            // run_match retracts the facts it asserts, so a live state
+                            // evaluated before it still holds after.
+                            let before = engine.version();
                             if !run_match(engine, None, namespace, selector, format) {
                                 command_failed = true;
                             }
-                            if in_sync {
-                                store_version = engine.version();
-                            }
+                            core.carry_live(before, engine.version());
                         }
                         _ => command_error!("Usage: k8s::match-all <namespace> <selector>"),
                     }
@@ -2986,27 +2826,6 @@ fn pretty_format_atom(s: &str) -> String {
     b
 }
 
-/// If `body` is a single atom with named variables but fewer arguments than the
-/// relation has columns, pad the rest with `_` so Mangle sees the right arity.
-/// Returns (new_body, extra_vars) or None if no padding is needed or the arity
-/// is unknown.
-fn auto_complete_partial(
-    body: &str,
-    store: &EvalStore,
-    cols: &[String],
-) -> Option<(String, Vec<String>)> {
-    let (rel, inner) = split_atom(body)?;
-    let arity = relation_arity(store, rel, cols)?;
-    let given = count_top_level_args(inner);
-    if given == 0 || given >= arity {
-        return None;
-    }
-    let padding = std::iter::repeat_n("_", arity - given)
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some((format!("{rel}({inner}, {padding})"), vec![]))
-}
-
 /// Build a map from (relation, tuple) → list of premise-sets that derived it.
 /// A single fact may have been derived by multiple rules/paths.
 fn build_provenance_index(
@@ -3547,63 +3366,31 @@ fn render_table(headers: &[String], rows: &[Vec<String>]) -> String {
     out
 }
 
-/// Print the tuples of `rel` matching the constants in `body`, one row per
-/// line (`Column = value, ...`, or `rel(a, b, ...)` in compact format). `_` and
-/// missing trailing arguments match anything. `live` is false under `use`: a
-/// frozen snapshot has no live session of its own, so `store` is read directly
-/// even when the live engine has one. Returns `false` if the query failed.
-fn list_tuples(
-    engine: &Engine,
-    store: &EvalStore,
-    format: OutputFormat,
-    rel: &str,
-    body: &str,
-    cols: &[String],
-    live: bool,
-) -> bool {
-    let live_rows: Vec<Vec<Value>>;
-    let rows: &[Vec<Value>] = if live && engine.has_session() {
-        live_rows = match engine.query_live(rel) {
-            Ok(rows) => rows,
-            Err(e) => {
-                eprintln!("Error: {e:#}");
-                return false;
-            }
-        };
-        &live_rows
-    } else {
-        store.scan(rel)
-    };
-    let q = match split_atom(body) {
-        Some((_, inner)) if !inner.trim().is_empty() => match query::parse_query(body) {
-            Ok(q) => q,
-            Err(e) => {
-                eprintln!("Parse error: {e}");
-                return false;
-            }
-        },
-        _ => query::ParsedQuery {
-            predicate: rel.to_string(),
-            args: vec![],
-        },
-    };
-    let matched = query::filter_tuples(rows, &q);
-    if matched.is_empty() {
+/// Print a query's rows in the current output format, then a count to
+/// stderr. Whole tuples of one relation (`Rows::relation`) print as
+/// `Column = value, ...`, or `rel(a, b, ...)` in compact format; variable
+/// bindings print as `X = value, ...`.
+fn print_rows(format: OutputFormat, rows: &Rows) {
+    if rows.rows.is_empty() {
         eprintln!("No results.");
-        return true;
+        return;
     }
+    match &rows.relation {
+        Some(relation) => print_tuples(format, relation, &rows.columns, &rows.rows),
+        None => print_query_rows(format, &rows.columns, &rows.rows),
+    }
+    eprintln!("Found {} result(s).", rows.rows.len());
+}
+
+/// Print whole tuples of `rel`, one per line, with `cols` naming each column.
+fn print_tuples(format: OutputFormat, rel: &str, cols: &[String], tuples: &[Vec<Value>]) {
     if format == OutputFormat::Table {
-        let width = matched.iter().map(|t| t.len()).max().unwrap_or(0);
-        let headers: Vec<String> = (0..width)
-            .map(|i| cols.get(i).cloned().unwrap_or_else(|| format!("c{i}")))
-            .collect();
-        let rows: Vec<Vec<String>> = matched
+        let rows: Vec<Vec<String>> = tuples
             .iter()
             .map(|t| t.iter().map(|v| v.to_string()).collect())
             .collect();
-        print!("{}", render_table(&headers, &rows));
-        eprintln!("Found {} result(s).", matched.len());
-        return true;
+        print!("{}", render_table(cols, &rows));
+        return;
     }
     let show = |v: &Value| {
         if format == OutputFormat::Pretty {
@@ -3612,7 +3399,7 @@ fn list_tuples(
             v.to_string()
         }
     };
-    for tuple in &matched {
+    for tuple in tuples {
         match format {
             OutputFormat::Ndjson => println!("{}", ndjson_row(tuple, |i| cols.get(i).cloned())),
             OutputFormat::Compact => {
@@ -3623,27 +3410,13 @@ fn list_tuples(
             _ => {
                 let parts: Vec<String> = tuple
                     .iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        let name = cols.get(i).cloned().unwrap_or_else(|| format!("c{i}"));
-                        format!("{name} = {}", show(v))
-                    })
+                    .zip(cols)
+                    .map(|(v, name)| format!("{name} = {}", show(v)))
                     .collect();
                 println!("  {}", parts.join(", "));
             }
         }
     }
-    eprintln!("Found {} result(s).", matched.len());
-    true
-}
-
-/// Column count of `rel`: from a stored row, else from its Decl.
-fn relation_arity(store: &EvalStore, rel: &str, cols: &[String]) -> Option<usize> {
-    store
-        .scan(rel)
-        .first()
-        .map(|t| t.len())
-        .or_else(|| (!cols.is_empty()).then_some(cols.len()))
 }
 
 #[cfg(test)]
@@ -3741,7 +3514,7 @@ mod completion_tests {
 #[cfg(test)]
 mod query_helper_tests {
     use super::*;
-    use crate::query::split_top_level_args;
+    use crate::query::{body_relations, single_atom, split_top_level_args, suggest};
 
     #[test]
     fn finds_relations_in_bodies() {

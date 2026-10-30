@@ -9,6 +9,7 @@
 // provenance index in repl). Allowed for now so it doesn't block -D warnings.
 #![allow(clippy::type_complexity)]
 
+pub mod api;
 pub(crate) mod builtins;
 pub mod config;
 pub(crate) mod dd;

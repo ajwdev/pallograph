@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use mangle_interpreter::MemStore;
 
+use pallograph::api::LocalCore;
 use pallograph::engine::{self, Backend, DdBackend, Engine, InterpreterBackend};
 use pallograph::repl::OutputFormat;
 use pallograph::{config, edb, load, repl, watch};
@@ -297,6 +298,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         None => None,
     };
     let store = engine.lock().expect("engine lock poisoned").evaluate()?;
+    let core = LocalCore::new(engine, store);
 
     // The REPL blocks on input, so run it off the async runtime's worker
     // threads, which the watcher's tasks need.
@@ -304,8 +306,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     let status = tokio::task::spawn_blocking(move || {
         let watch = watch.as_deref();
         match &cli.script {
-            Some(path) => repl::run_script(&engine, store, cli.format, path, rc, watch),
-            None => repl::run(&engine, store, cli.format, rc, watch),
+            Some(path) => repl::run_script(&core, cli.format, path, rc, watch),
+            None => repl::run(&core, cli.format, rc, watch),
         }
     })
     .await??;
