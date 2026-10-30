@@ -20,7 +20,7 @@ use crate::load;
 use crate::query::{extract_vars, split_projection};
 use crate::rbac;
 use crate::smt;
-use crate::snapshot::{Diff, FrozenState};
+use crate::snapshot::FrozenState;
 use crate::watch::WatchStatus;
 
 struct ReplHelper {
@@ -974,12 +974,100 @@ fn session(
                     continue;
                 }
 
+                if line == "::use" || line.starts_with("::use ") {
+                    let rest = line.strip_prefix("::use").unwrap_or("").trim();
+                    if rest.is_empty() {
+                        in_use = None;
+                        eprintln!("Using live state.");
+                        continue;
+                    }
+                    let (name, command) = match rest.split_once(char::is_whitespace) {
+                        Some((n, c)) => (n.to_string(), Some(c.trim().to_string())),
+                        None => (rest.to_string(), None),
+                    };
+                    if !core.has_snapshot(&name) {
+                        command_error!("No snapshot named '{name}'.");
+                        continue;
+                    }
+                    match command {
+                        None => {
+                            eprintln!("Using snapshot '{name}'.");
+                            in_use = Some(name);
+                        }
+                        Some(command) => {
+                            // One-shot: queue the command to run with `name`
+                            // in use, then a sentinel to restore whatever was
+                            // in use before — on every `continue` path, since
+                            // it is just the next queued line.
+                            let prev = in_use.clone().unwrap_or_default();
+                            pending.push_front((format!("{USE_RESTORE_PREFIX}{prev}"), false));
+                            pending.push_front((command, false));
+                            in_use = Some(name);
+                        }
+                    }
+                    continue;
+                }
+
+                if let Some(name) = line.strip_prefix("::snapshot ") {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
+                        continue;
+                    }
+                    match core.snapshot(name.trim()) {
+                        Ok(info) => println!(
+                            "Saved snapshot '{}' ({} relations, {} facts).",
+                            info.name, info.relations, info.facts
+                        ),
+                        Err(e) => command_error!("{e}"),
+                    }
+                    continue;
+                }
+
+                // `diff <name> [<name>]` and `diff-relation <name> [<name>]
+                // <relation>`: one snapshot diffs against whatever is in use.
+                let diff_args = line
+                    .strip_prefix("::diff ")
+                    .map(|rest| (rest, false))
+                    .or_else(|| {
+                        line.strip_prefix("::diff-relation ")
+                            .map(|rest| (rest, true))
+                    });
+                if let Some((rest, one_relation)) = diff_args {
+                    let mut parts: Vec<&str> = rest.split_whitespace().collect();
+                    let relation = if one_relation { parts.pop() } else { None };
+                    let current = match &in_use {
+                        Some(name) => At::Snapshot(name.clone()),
+                        None => At::Live,
+                    };
+                    let (before, after) = match parts.as_slice() {
+                        [name] => (At::Snapshot(name.to_string()), current),
+                        [name1, name2] => (
+                            At::Snapshot(name1.to_string()),
+                            At::Snapshot(name2.to_string()),
+                        ),
+                        _ if one_relation => {
+                            command_error!(
+                                "Usage: diff-relation <name> <relation>  or  diff-relation <name1> <name2> <relation>"
+                            );
+                            continue;
+                        }
+                        _ => {
+                            command_error!("Usage: diff <name>  or  diff <name1> <name2>");
+                            continue;
+                        }
+                    };
+                    match core.diff(&before, &after, relation) {
+                        Ok(diff) => print!("{diff}"),
+                        Err(e) => command_error!("{e}"),
+                    }
+                    continue;
+                }
+
                 // Commands not yet on `Core` hold the engine and the snapshots
                 // for the whole command, so nothing else changes them partway
                 // through.
                 let mut engine_guard = core.engine();
                 let engine = &mut *engine_guard;
-                let mut snapshots = core.snapshots();
+                let snapshots = core.snapshots();
                 // The live state, re-evaluated if the engine moved on since the
                 // last command. `+`, `-` and `~` skip this so a run of them on
                 // a DD session stays fast; the next other command catches up.
@@ -1172,40 +1260,6 @@ fn session(
                     continue;
                 }
 
-                if line == "::use" || line.starts_with("::use ") {
-                    let rest = line.strip_prefix("::use").unwrap_or("").trim();
-                    if rest.is_empty() {
-                        in_use = None;
-                        eprintln!("Using live state.");
-                        continue;
-                    }
-                    let (name, command) = match rest.split_once(char::is_whitespace) {
-                        Some((n, c)) => (n.to_string(), Some(c.trim().to_string())),
-                        None => (rest.to_string(), None),
-                    };
-                    if !snapshots.contains_key(&name) {
-                        command_error!("No snapshot named '{name}'.");
-                        continue;
-                    }
-                    match command {
-                        None => {
-                            eprintln!("Using snapshot '{name}'.");
-                            in_use = Some(name);
-                        }
-                        Some(command) => {
-                            // One-shot: queue the command to run with `name`
-                            // in use, then a sentinel to restore whatever was
-                            // in use before — on every `continue` path, since
-                            // it is just the next queued line.
-                            let prev = in_use.clone().unwrap_or_default();
-                            pending.push_front((format!("{USE_RESTORE_PREFIX}{prev}"), false));
-                            pending.push_front((command, false));
-                            in_use = Some(name);
-                        }
-                    }
-                    continue;
-                }
-
                 if let Some(rest) = line.strip_prefix("::smtlib ") {
                     let relations: Vec<&str> = rest.split_whitespace().collect();
                     if relations.is_empty() {
@@ -1218,51 +1272,6 @@ fn session(
                         enc.load(active, &relations);
                         println!("{}", enc.to_smtlib());
                     }
-                    continue;
-                }
-
-                if let Some(name) = line.strip_prefix("::snapshot ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let name = name.trim().to_string();
-                    if name.is_empty() || name.contains(char::is_whitespace) {
-                        command_error!("Snapshot names cannot be empty or contain spaces.");
-                        continue;
-                    }
-                    if snapshots.contains_key(&name) {
-                        command_error!("Snapshot '{name}' already exists.");
-                        continue;
-                    }
-                    let lazy_provenance = match engine
-                        .provenance_session()
-                        .map(|s| s.freeze_provenance())
-                        .transpose()
-                    {
-                        Ok(p) => p,
-                        Err(e) => {
-                            command_error!("Error: {e:#}");
-                            continue;
-                        }
-                    };
-                    let frozen_store = current_store.frozen_copy();
-                    let rc = frozen_store
-                        .relation_names()
-                        .filter(|r| !frozen_store.scan(r).is_empty())
-                        .count();
-                    let fc: usize = frozen_store
-                        .relation_names()
-                        .map(|r| frozen_store.scan(r).len())
-                        .sum();
-                    println!("Saved snapshot '{name}' ({rc} relations, {fc} facts).");
-                    snapshots.insert(
-                        name,
-                        FrozenState {
-                            store: frozen_store,
-                            lazy_provenance,
-                            inputs: engine.save_inputs(),
-                        },
-                    );
                     continue;
                 }
 
@@ -1298,48 +1307,6 @@ fn session(
                         }
                         Err(e) => command_error!("Error: {e:#}"),
                     }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("::diff ") {
-                    let parts: Vec<&str> = rest.trim().splitn(2, ' ').collect();
-                    let lookup = |n: &str| -> Option<&FrozenState> { snapshots.get(n) };
-                    let (before, after_snap) = match parts.as_slice() {
-                        [name] => match lookup(name) {
-                            Some(s) => (s, None),
-                            None => {
-                                command_error!("No snapshot named '{}'.", name);
-                                continue;
-                            }
-                        },
-                        [name1, name2] => {
-                            let s1 = match lookup(name1) {
-                                Some(s) => s,
-                                None => {
-                                    command_error!("No snapshot named '{}'.", name1);
-                                    continue;
-                                }
-                            };
-                            let s2 = match lookup(name2) {
-                                Some(s) => s,
-                                None => {
-                                    command_error!("No snapshot named '{}'.", name2);
-                                    continue;
-                                }
-                            };
-                            (s1, Some(s2))
-                        }
-                        _ => {
-                            command_error!("Usage: diff <name>  or  diff <name1> <name2>");
-                            continue;
-                        }
-                    };
-                    let after: &EvalStore = match after_snap {
-                        Some(s) => &s.store,
-                        None => active_store(&current_store, &snapshots, &in_use),
-                    };
-                    let diff = Diff::between(&before.store, after);
-                    print!("{diff}");
                     continue;
                 }
 
@@ -1390,58 +1357,6 @@ fn session(
                             "Usage: rbac::diff <snap>  or  rbac::diff <snap1> <snap2>"
                         ),
                     }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("::diff-relation ") {
-                    // Like ::diff, but scoped to one relation: the trailing
-                    // token names the relation, the 1 or 2 before it name the
-                    // snapshot operands. Purely diagnostic, same pure-diff
-                    // output as ::diff (no verdict, no findings).
-                    let parts: Vec<&str> = rest.split_whitespace().collect();
-                    let (before_name, after_name, relation) = match parts.as_slice() {
-                        [name, relation] => (*name, None, *relation),
-                        [name1, name2, relation] => (*name1, Some(*name2), *relation),
-                        _ => {
-                            command_error!(
-                                "Usage: diff-relation <name> <relation>  or  diff-relation <name1> <name2> <relation>"
-                            );
-                            continue;
-                        }
-                    };
-                    let Some(before) = snapshots.get(before_name) else {
-                        command_error!("No snapshot named '{}'.", before_name);
-                        continue;
-                    };
-                    let after: &EvalStore = if let Some(after_name) = after_name {
-                        match snapshots.get(after_name) {
-                            Some(s) => &s.store,
-                            None => {
-                                command_error!("No snapshot named '{}'.", after_name);
-                                continue;
-                            }
-                        }
-                    } else {
-                        active_store(&current_store, &snapshots, &in_use)
-                    };
-                    // A relation the program never declares or derives would
-                    // diff as empty, which is misleading; flag the typo.
-                    if !engine.known_relations().contains(relation) {
-                        command_error!("Unknown relation '{}'.", relation);
-                        continue;
-                    }
-                    let full = Diff::between(&before.store, after);
-                    let mut one = Diff {
-                        added: BTreeMap::new(),
-                        removed: BTreeMap::new(),
-                    };
-                    if let Some(a) = full.added.get(relation) {
-                        one.added.insert(relation.to_string(), a.clone());
-                    }
-                    if let Some(r) = full.removed.get(relation) {
-                        one.removed.insert(relation.to_string(), r.clone());
-                    }
-                    print!("{one}");
                     continue;
                 }
 

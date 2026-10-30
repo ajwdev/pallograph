@@ -24,7 +24,7 @@ use crate::query::{
     self, body_relations, count_top_level_args, extract_vars, single_atom, split_atom,
     split_projection, suggest,
 };
-use crate::snapshot::FrozenState;
+use crate::snapshot::{Diff, FrozenState};
 
 /// Which state a read sees.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +107,50 @@ pub trait Core {
     /// trailing argument) matches anything. No matching facts is an empty
     /// list, not an error.
     fn provenance(&self, at: &At, fact: &str) -> Result<Vec<ProvenanceTree>, ProvenanceError>;
+
+    /// Freeze the live state as a snapshot named `name`, which reads can then
+    /// name with [`At::Snapshot`].
+    fn snapshot(&self, name: &str) -> Result<SnapshotInfo, SnapshotError>;
+
+    fn has_snapshot(&self, name: &str) -> bool;
+
+    /// The facts added and removed going from `before` to `after`, in every
+    /// relation or only in `relation`.
+    fn diff(&self, before: &At, after: &At, relation: Option<&str>) -> Result<Diff, DiffError>;
+}
+
+/// A snapshot just taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotInfo {
+    pub name: String,
+    /// Relations holding at least one fact.
+    pub relations: usize,
+    pub facts: usize,
+}
+
+/// Why a snapshot wasn't taken. Each displays as the line the REPL prints
+/// for it.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotError {
+    #[error("Snapshot names cannot be empty or contain spaces.")]
+    InvalidName,
+    #[error("Snapshot '{0}' already exists.")]
+    AlreadyExists(String),
+    #[error("Error: {0:#}")]
+    Evaluation(anyhow::Error),
+}
+
+/// Why a diff failed. Each displays as the line the REPL prints for it.
+#[derive(Debug, thiserror::Error)]
+pub enum DiffError {
+    #[error("No snapshot named '{0}'.")]
+    UnknownSnapshot(String),
+    /// A relation the program never declares or derives would diff as
+    /// empty, which is misleading.
+    #[error("Unknown relation '{0}'.")]
+    UnknownRelation(String),
+    #[error("Error: {0:#}")]
+    Evaluation(anyhow::Error),
 }
 
 /// How deep a provenance tree goes before its branches stop at
@@ -198,6 +242,61 @@ pub enum ProvenanceError {
     Evaluation(anyhow::Error),
 }
 
+/// The state a read at an [`At`] resolved to.
+enum State<'a> {
+    Live(Arc<EvalStore>),
+    Frozen(&'a FrozenState),
+}
+
+impl State<'_> {
+    fn store(&self) -> &EvalStore {
+        match self {
+            State::Live(store) => store,
+            State::Frozen(frozen) => &frozen.store,
+        }
+    }
+
+    fn frozen(&self) -> Option<&FrozenState> {
+        match self {
+            State::Live(_) => None,
+            State::Frozen(frozen) => Some(frozen),
+        }
+    }
+}
+
+/// Why an [`At`] didn't resolve. Each method's own error takes it in.
+enum StateError {
+    UnknownSnapshot(String),
+    Evaluation(anyhow::Error),
+}
+
+impl From<StateError> for QueryError {
+    fn from(error: StateError) -> Self {
+        match error {
+            StateError::UnknownSnapshot(name) => QueryError::UnknownSnapshot(name),
+            StateError::Evaluation(e) => QueryError::Evaluation(e),
+        }
+    }
+}
+
+impl From<StateError> for ProvenanceError {
+    fn from(error: StateError) -> Self {
+        match error {
+            StateError::UnknownSnapshot(name) => ProvenanceError::UnknownSnapshot(name),
+            StateError::Evaluation(e) => ProvenanceError::Evaluation(e),
+        }
+    }
+}
+
+impl From<StateError> for DiffError {
+    fn from(error: StateError) -> Self {
+        match error {
+            StateError::UnknownSnapshot(name) => DiffError::UnknownSnapshot(name),
+            StateError::Evaluation(e) => DiffError::Evaluation(e),
+        }
+    }
+}
+
 /// The live state evaluated at some engine version.
 struct LiveStore {
     version: u64,
@@ -279,6 +378,26 @@ impl LocalCore {
         }
     }
 
+    /// Resolve `at` to the state a read sees. `engine` and `snapshots` are
+    /// this core's, already held by the caller.
+    fn read_state<'a>(
+        &self,
+        engine: &Engine,
+        snapshots: &'a BTreeMap<String, FrozenState>,
+        at: &At,
+    ) -> Result<State<'a>, StateError> {
+        match at {
+            At::Live => self
+                .live_store(engine)
+                .map(State::Live)
+                .map_err(StateError::Evaluation),
+            At::Snapshot(name) => snapshots
+                .get(name)
+                .map(State::Frozen)
+                .ok_or_else(|| StateError::UnknownSnapshot(name.clone())),
+        }
+    }
+
     /// Every row of `relation` matching the constants in `body`: `_` and
     /// missing trailing arguments match anything. On the live state with a
     /// DD session, the rows come straight from the session.
@@ -332,19 +451,8 @@ impl Core for LocalCore {
     fn query(&self, at: &At, query: &str) -> Result<Rows, QueryError> {
         let engine = self.engine();
         let snapshots = self.snapshots();
-        let live_store;
-        let store: &EvalStore = match at {
-            At::Live => {
-                live_store = self.live_store(&engine).map_err(QueryError::Evaluation)?;
-                &live_store
-            }
-            At::Snapshot(name) => {
-                &snapshots
-                    .get(name)
-                    .ok_or_else(|| QueryError::UnknownSnapshot(name.clone()))?
-                    .store
-            }
-        };
+        let state = self.read_state(&engine, &snapshots, at)?;
+        let store = state.store();
 
         let (projection, body) = split_projection(query.trim());
         // A typo'd relation is an empty result on the interpreter and an
@@ -436,21 +544,8 @@ impl Core for LocalCore {
             return Err(ProvenanceError::NotEnabled);
         }
         let snapshots = self.snapshots();
-        let live_store;
-        let (store, frozen): (&EvalStore, Option<&FrozenState>) = match at {
-            At::Live => {
-                live_store = self
-                    .live_store(&engine)
-                    .map_err(ProvenanceError::Evaluation)?;
-                (&live_store, None)
-            }
-            At::Snapshot(name) => {
-                let frozen = snapshots
-                    .get(name)
-                    .ok_or_else(|| ProvenanceError::UnknownSnapshot(name.clone()))?;
-                (&frozen.store, Some(frozen))
-            }
-        };
+        let state = self.read_state(&engine, &snapshots, at)?;
+        let (store, frozen) = (state.store(), state.frozen());
         let parsed =
             query::parse_query(fact.trim()).map_err(|e| ProvenanceError::Parse(e.to_string()))?;
         let relation = parsed.predicate.as_str();
@@ -517,6 +612,70 @@ impl Core for LocalCore {
                 })
                 .collect())
         }
+    }
+
+    fn snapshot(&self, name: &str) -> Result<SnapshotInfo, SnapshotError> {
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            return Err(SnapshotError::InvalidName);
+        }
+        let engine = self.engine();
+        let mut snapshots = self.snapshots();
+        if snapshots.contains_key(name) {
+            return Err(SnapshotError::AlreadyExists(name.to_string()));
+        }
+        // On DD the provenance lives in the session, not the store, so `why`
+        // under the snapshot needs its own copy.
+        let lazy_provenance = engine
+            .provenance_session()
+            .map(|session| session.freeze_provenance())
+            .transpose()
+            .map_err(SnapshotError::Evaluation)?;
+        let store = self
+            .live_store(&engine)
+            .map_err(SnapshotError::Evaluation)?
+            .frozen_copy();
+        let info = SnapshotInfo {
+            name: name.to_string(),
+            relations: store
+                .relation_names()
+                .filter(|relation| !store.scan(relation).is_empty())
+                .count(),
+            facts: store
+                .relation_names()
+                .map(|relation| store.scan(relation).len())
+                .sum(),
+        };
+        snapshots.insert(
+            name.to_string(),
+            FrozenState {
+                store,
+                lazy_provenance,
+                inputs: engine.save_inputs(),
+            },
+        );
+        Ok(info)
+    }
+
+    fn has_snapshot(&self, name: &str) -> bool {
+        self.snapshots().contains_key(name)
+    }
+
+    fn diff(&self, before: &At, after: &At, relation: Option<&str>) -> Result<Diff, DiffError> {
+        let engine = self.engine();
+        let snapshots = self.snapshots();
+        let before = self.read_state(&engine, &snapshots, before)?;
+        let after = self.read_state(&engine, &snapshots, after)?;
+        if let Some(relation) = relation
+            && !engine.known_relations().contains(relation)
+        {
+            return Err(DiffError::UnknownRelation(relation.to_string()));
+        }
+        let mut diff = Diff::between(before.store(), after.store());
+        if let Some(relation) = relation {
+            diff.added.retain(|name, _| name == relation);
+            diff.removed.retain(|name, _| name == relation);
+        }
+        Ok(diff)
     }
 }
 
@@ -702,6 +861,7 @@ fn auto_complete_partial(
 mod tests {
     use super::*;
     use crate::engine::{Backend, DdBackend, InterpreterBackend};
+    use std::collections::BTreeSet;
 
     fn s(text: &str) -> Value {
         Value::String(text.to_string())
@@ -957,5 +1117,66 @@ mod tests {
             tree.derivation,
             Derivation::Unexplained(Unexplained::NotCaptured)
         );
+    }
+
+    #[test]
+    fn snapshot_names_must_be_new_and_single_words() {
+        for core in cores() {
+            let info = core.snapshot("before").unwrap();
+            // edge a→b→c: two edges, three paths.
+            assert_eq!((info.relations, info.facts), (2, 5));
+            assert!(core.has_snapshot("before"));
+            assert!(!core.has_snapshot("after"));
+            for (name, message) in [
+                ("", "Snapshot names cannot be empty or contain spaces."),
+                (
+                    "two words",
+                    "Snapshot names cannot be empty or contain spaces.",
+                ),
+                ("before", "Snapshot 'before' already exists."),
+            ] {
+                assert_eq!(core.snapshot(name).unwrap_err().to_string(), message);
+            }
+        }
+    }
+
+    /// A diff names what changed between two states, and only in one
+    /// relation when asked.
+    #[test]
+    fn diff_between_snapshot_and_live() {
+        for core in cores() {
+            core.snapshot("before").unwrap();
+            {
+                let mut engine = core.engine();
+                engine.retract_fact("edge", &[s("b"), s("c")]);
+                engine.add_fact("edge".to_string(), vec![s("c"), s("d")]);
+            }
+            let before = At::Snapshot("before".to_string());
+
+            let diff = core.diff(&before, &At::Live, None).unwrap();
+            let edge = |a: &str, b: &str| BTreeSet::from([vec![s(a), s(b)]]);
+            assert_eq!(diff.added["edge"], edge("c", "d"));
+            assert_eq!(diff.removed["edge"], edge("b", "c"));
+            assert!(diff.removed.contains_key("path"));
+
+            let only_edge = core.diff(&before, &At::Live, Some("edge")).unwrap();
+            assert_eq!(only_edge.added.keys().collect::<Vec<_>>(), ["edge"]);
+            assert_eq!(only_edge.removed.keys().collect::<Vec<_>>(), ["edge"]);
+
+            assert!(core.diff(&before, &before, None).unwrap().added.is_empty());
+            assert_eq!(
+                core.diff(&before, &At::Live, Some("egde"))
+                    .unwrap_err()
+                    .to_string(),
+                "Unknown relation 'egde'."
+            );
+            let missing = At::Snapshot("nope".to_string());
+            assert_eq!(
+                core.diff(&missing, &At::Live, None)
+                    .unwrap_err()
+                    .to_string(),
+                "No snapshot named 'nope'."
+            );
+        }
     }
 }
