@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::IsTerminal;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context as _, Result};
 use mangle_common::Value;
@@ -765,7 +766,7 @@ impl Input {
 /// and the session carries on, so this returns `Findings` if any `rbac::`/
 /// `sched::` check failed or `rbac::diff` found new permissions, else `Clean`.
 pub fn run(
-    engine: &mut Engine,
+    engine: &Mutex<Engine>,
     store: EvalStore,
     format: OutputFormat,
     rc: Vec<String>,
@@ -804,7 +805,7 @@ pub fn run(
 /// same dispatcher as the REPL. Stops with `Error` at the first line that is
 /// not a command or whose command fails; otherwise like [`run`].
 pub fn run_script(
-    engine: &mut Engine,
+    engine: &Mutex<Engine>,
     store: EvalStore,
     format: OutputFormat,
     path: &std::path::Path,
@@ -820,8 +821,14 @@ pub fn run_script(
     session(engine, store, format, rc, Input::Script(reader))
 }
 
+/// Lock the shared engine, treating a poisoned lock (a panic while it was
+/// held) as fatal.
+fn lock_engine(engine: &Mutex<Engine>) -> MutexGuard<'_, Engine> {
+    engine.lock().expect("engine lock poisoned")
+}
+
 fn session(
-    engine: &mut Engine,
+    engine: &Mutex<Engine>,
     store: EvalStore,
     format: OutputFormat,
     rc: Vec<String>,
@@ -839,10 +846,12 @@ fn session(
     }
 
     let mut current_store = store;
-    // With a live session, `+`, `-` and `~` skip re-evaluating so a run of
-    // them stays fast, and mark `current_store` stale instead. The next
-    // other command refreshes it once from the session.
-    let mut current_store_stale = false;
+    // The engine version `current_store` was evaluated at. Anything that
+    // moves the engine on (a `+`, `-` or `~`, which skip re-evaluating with a
+    // live session so a run of them stays fast, or another thread feeding the
+    // engine) leaves it behind, and the next other command refreshes
+    // `current_store` once.
+    let mut store_version = lock_engine(engine).version();
     let mut format = format;
     let mut had_failure = false;
     let mut snapshots: BTreeMap<String, FrozenState> = BTreeMap::new();
@@ -955,12 +964,16 @@ fn session(
                     input.add_history_entry(&line)?;
                 }
 
+                // Hold the engine for the whole command, so nothing else
+                // changes it partway through.
+                let mut engine_guard = lock_engine(engine);
+                let engine = &mut *engine_guard;
                 let is_mutator = line.starts_with(['+', '-', '~']);
-                if current_store_stale && !is_mutator {
+                if engine.version() != store_version && !is_mutator {
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
-                            current_store_stale = false;
+                            store_version = engine.version();
                         }
                         Err(e) => command_error!("Error: {e:#}"),
                     }
@@ -1413,6 +1426,7 @@ fn session(
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
+                            store_version = engine.version();
                             println!("Rolled back to snapshot '{name}'.");
                         }
                         Err(e) => command_error!("Error: {e:#}"),
@@ -1579,6 +1593,7 @@ fn session(
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
+                            store_version = engine.version();
                             eprintln!("Rule added and evaluated.");
                         }
                         Err(e) => {
@@ -1599,6 +1614,7 @@ fn session(
                             Ok(text) => match source_program(engine, text) {
                                 Ok(new_store) => {
                                     current_store = new_store;
+                                    store_version = engine.version();
                                     eprintln!("Sourced and evaluated.");
                                 }
                                 Err(e) => command_error!("Error: {e:#}"),
@@ -1628,6 +1644,7 @@ fn session(
                         Ok(summary) => match engine.evaluate() {
                             Ok(new_store) => {
                                 current_store = new_store;
+                                store_version = engine.version();
                                 eprintln!(
                                     "Loaded {} object(s) ({} replaced) and evaluated.",
                                     summary.added + summary.updated,
@@ -1675,6 +1692,7 @@ fn session(
                     match engine.evaluate() {
                         Ok(new_store) => {
                             current_store = new_store;
+                            store_version = engine.version();
                             eprintln!(
                                 "Applied delta: +{added} ~{updated} -{removed} \
                                  ({unchanged} unchanged, {} removed but not live) and evaluated.",
@@ -1705,6 +1723,7 @@ fn session(
                         Ok(n) => match engine.evaluate() {
                             Ok(new_store) => {
                                 current_store = new_store;
+                                store_version = engine.version();
                                 eprintln!("Inserted {n} fact(s) into {relation} and evaluated.");
                             }
                             Err(e) => command_error!("Error: {e:#}"),
@@ -1740,7 +1759,6 @@ fn session(
                                     let removed = engine.retract_fact(&old_rel, &old_tuple);
                                     engine.add_fact(new_rel, new_tuple);
                                     if engine.has_session() {
-                                        current_store_stale = true;
                                         if removed {
                                             println!("Replaced.");
                                         } else {
@@ -1752,6 +1770,7 @@ fn session(
                                         match engine.evaluate() {
                                             Ok(new_store) => {
                                                 current_store = new_store;
+                                                store_version = engine.version();
                                                 if removed {
                                                     println!("Replaced.");
                                                 } else {
@@ -1791,12 +1810,12 @@ fn session(
                             }
                             if engine.add_fact(rel, tuple) {
                                 if engine.has_session() {
-                                    current_store_stale = true;
                                     eprintln!("Asserted.");
                                 } else {
                                     match engine.evaluate() {
                                         Ok(new_store) => {
                                             current_store = new_store;
+                                            store_version = engine.version();
                                             eprintln!("Asserted.");
                                         }
                                         Err(e) => command_error!("Error: {e:#}"),
@@ -1821,12 +1840,12 @@ fn session(
                         Ok((rel, tuple)) => {
                             if engine.retract_fact(&rel, &tuple) {
                                 if engine.has_session() {
-                                    current_store_stale = true;
                                     eprintln!("Retracted.");
                                 } else {
                                     match engine.evaluate() {
                                         Ok(new_store) => {
                                             current_store = new_store;
+                                            store_version = engine.version();
                                             eprintln!("Retracted.");
                                         }
                                         Err(e) => command_error!("Error: {e:#}"),
@@ -1849,8 +1868,14 @@ fn session(
                     let parts: Vec<&str> = rest.trim().splitn(3, char::is_whitespace).collect();
                     match parts.as_slice() {
                         [kind, namespace, selector] => {
+                            // run_match retracts the facts it asserts, so a store that was
+                            // current before it still is.
+                            let in_sync = engine.version() == store_version;
                             if !run_match(engine, Some(kind), namespace, selector, format) {
                                 command_failed = true;
+                            }
+                            if in_sync {
+                                store_version = engine.version();
                             }
                         }
                         _ => command_error!(
@@ -1868,8 +1893,14 @@ fn session(
                     let parts: Vec<&str> = rest.trim().splitn(2, char::is_whitespace).collect();
                     match parts.as_slice() {
                         [namespace, selector] => {
+                            // run_match retracts the facts it asserts, so a store that was
+                            // current before it still is.
+                            let in_sync = engine.version() == store_version;
                             if !run_match(engine, None, namespace, selector, format) {
                                 command_failed = true;
+                            }
+                            if in_sync {
+                                store_version = engine.version();
                             }
                         }
                         _ => command_error!("Usage: k8s::match-all <namespace> <selector>"),

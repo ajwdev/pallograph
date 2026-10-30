@@ -479,7 +479,9 @@ impl CompiledProgram {
     }
 }
 
-pub trait Backend {
+/// `Send` so an `Engine` can be shared across threads (e.g. a cluster watcher
+/// feeding it while the REPL reads).
+pub trait Backend: Send {
     fn evaluate(&self, edb: &[(String, Vec<Value>)], rule_sources: &[String]) -> Result<EvalStore>;
 
     /// Whether `::why` can explain facts with this backend. The interpreter
@@ -779,6 +781,10 @@ pub struct Engine {
     /// mutations are fed directly to the worker rather than waiting for a full
     /// recompute.
     session: Option<crate::dd::session::DdSession>,
+    /// Stands in for the DD epoch when there is no session (the
+    /// interpreter), so [`Self::version`] works on both backends. Counts
+    /// changes to the facts or rules; unused while a session is live.
+    batch_version: u64,
     /// How many times a fact insert rebuilt the live session. Lets tests
     /// check that a batch insert rebuilds at most once.
     #[cfg(test)]
@@ -942,6 +948,7 @@ impl Engine {
             rule_sources,
             backend,
             session,
+            batch_version: 0,
             #[cfg(test)]
             rebuild_count: 0,
         })
@@ -986,6 +993,7 @@ impl Engine {
     pub fn add_rule(&mut self, rule: String) -> Result<()> {
         let new_head = extract_head_pred(&rule);
         self.rule_sources.push(rule);
+        self.note_change();
         if let Some(s) = &mut self.session {
             s.add_idb(new_head.as_deref(), &self.edb, &self.rule_sources)?;
         }
@@ -1063,6 +1071,7 @@ impl Engine {
     fn push_fact(&mut self, entry: (String, Vec<Value>)) {
         self.edb_index.insert(entry.clone());
         self.edb.push(entry);
+        self.note_change();
     }
 
     /// Re-spawn the live session from the current EDB and rules, if there
@@ -1099,6 +1108,7 @@ impl Engine {
         self.edb = inputs.edb.clone();
         self.edb_index = self.edb.iter().cloned().collect();
         self.rule_sources = inputs.rule_sources.clone();
+        self.note_change();
         self.try_rebuild_session()
     }
 
@@ -1127,6 +1137,7 @@ impl Engine {
             s.retract(relation.to_string(), row);
         }
         let entry = self.edb.remove(pos);
+        self.note_change();
         // The EDB can hold a fact more than once (two objects that emit the
         // same fact each add a copy); the index keeps the fact until the
         // last copy goes.
@@ -1258,8 +1269,32 @@ impl Engine {
         self.rule_sources.len()
     }
 
+    /// The version of the engine's state: it moves forward on every change
+    /// to the facts (EDB) or rules, so a reader can tell whether an
+    /// `EvalStore` it took earlier is out of date.
+    ///
+    /// With a DD session this is the session's epoch: the worker has settled
+    /// there, so everything committed before it has propagated through every
+    /// rule. The interpreter has no epoch; it evaluates on demand and is
+    /// always settled, so a change counter stands in (`batch_version`).
+    pub fn version(&self) -> u64 {
+        match &self.session {
+            Some(s) => s.epoch(),
+            None => self.batch_version,
+        }
+    }
+
+    /// Move the interpreter's stand-in version on. With a session, the
+    /// mutator's commit or rebuild moves the epoch instead.
+    fn note_change(&mut self) {
+        if self.session.is_none() {
+            self.batch_version += 1;
+        }
+    }
+
     pub fn truncate_rules(&mut self, len: usize) {
         self.rule_sources.truncate(len);
+        self.note_change();
         if let Some(s) = &mut self.session {
             let _ = s.rebuild(&self.edb, &self.rule_sources);
         }
@@ -1883,6 +1918,96 @@ mod tests {
             );
             assert_eq!(tiers(&engine), [(s("x"), s("api"))]);
             assert_eq!(rows(&engine, "k8s").len(), 1);
+        }
+    }
+
+    /// An `Engine` can move to another thread, so a cluster watcher and the
+    /// REPL can share one.
+    #[test]
+    fn engine_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Engine>();
+    }
+
+    /// Every change to the facts or rules moves the version; reads and
+    /// no-op writes leave it alone.
+    #[test]
+    fn version_moves_on_every_change() {
+        let startup = objects(vec![config_map("x", "web")]);
+        for mut engine in object_engines(startup) {
+            let mut seen = engine.version();
+            let mut moved = |engine: &Engine| {
+                let changed = engine.version() != seen;
+                seen = engine.version();
+                changed
+            };
+
+            engine.evaluate().unwrap();
+            let _ = engine.evaluate_query_on(
+                &engine.evaluate().unwrap(),
+                &["path".to_string()],
+                "q(X) :- path(X, \"d\").".to_string(),
+            );
+            assert!(!moved(&engine), "reads");
+
+            assert!(engine.add_fact("edge".to_string(), vec![s("d"), s("e")]));
+            assert!(moved(&engine), "add_fact");
+            assert!(!engine.add_fact("edge".to_string(), vec![s("d"), s("e")]));
+            assert!(!moved(&engine), "duplicate add_fact");
+            let saved = engine.save_inputs();
+            assert!(engine.retract_fact("edge", &[s("d"), s("e")]));
+            assert!(moved(&engine), "retract_fact");
+            assert!(!engine.retract_fact("edge", &[s("d"), s("e")]));
+            assert!(!moved(&engine), "missing retract_fact");
+            engine.upsert_objects(objects(vec![config_map("x", "api")]));
+            assert!(moved(&engine), "upsert_objects");
+            let rules = engine.rules_len();
+            engine
+                .add_rule("reach_d(X) :- path(X, \"d\").".to_string())
+                .unwrap();
+            assert!(moved(&engine), "add_rule");
+            engine.truncate_rules(rules);
+            assert!(moved(&engine), "truncate_rules");
+            engine.restore_inputs(&saved).unwrap();
+            assert!(moved(&engine), "restore_inputs");
+        }
+    }
+
+    /// On DD the version is the session's epoch, and it moves forward on
+    /// every change: a commit, a rule layered on, or a rebuild (new
+    /// relation, provenance `define`, `rollback`) that would otherwise
+    /// restart the worker at epoch 1.
+    #[test]
+    fn dd_version_is_the_session_epoch_and_never_goes_back() {
+        for provenance in [false, true] {
+            let (edb, rules) = diamond();
+            let mut engine =
+                Engine::from_parts(edb, rules, Box::new(DdBackend { provenance })).unwrap();
+            let saved = engine.save_inputs();
+            let mut last = engine.version();
+            let mut step = |engine: &Engine, what: &str| {
+                let session = engine.session.as_ref().unwrap();
+                assert_eq!(engine.version(), session.epoch(), "{what}");
+                assert!(
+                    engine.version() > last,
+                    "{what}: {last} -> {}",
+                    engine.version()
+                );
+                last = engine.version();
+            };
+
+            engine.add_fact("edge".to_string(), vec![s("d"), s("e")]);
+            step(&engine, "commit");
+            let rebuilds = engine.rebuild_count;
+            engine.add_fact("node".to_string(), vec![s("a")]);
+            assert_eq!(engine.rebuild_count, rebuilds + 1);
+            step(&engine, "rebuild for a new relation");
+            engine
+                .add_rule("reach_d(X) :- path(X, \"d\").".to_string())
+                .unwrap();
+            step(&engine, "add_rule");
+            engine.restore_inputs(&saved).unwrap();
+            step(&engine, "restore_inputs");
         }
     }
 

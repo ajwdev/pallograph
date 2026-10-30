@@ -47,6 +47,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
@@ -79,9 +80,9 @@ pub enum Command {
     Insert { rel: String, row: Row },
     /// Retract one row from a relation (not visible until next Commit).
     Remove { rel: String, row: Row },
-    /// Advance to the next epoch, step until settled, then ack.
-    /// Blocks the caller (via ack channel) until the worker has quiesced.
-    Commit { ack: Sender<()> },
+    /// Advance to the next epoch, step until settled, then ack with the new
+    /// epoch. Blocks the caller (via ack channel) until the worker has quiesced.
+    Commit { ack: Sender<u64> },
     /// Snapshot a relation from the sink and send it back.
     /// Milestone A: the worker reads the mutex on behalf of the caller so
     /// the API is uniform; Milestone B will cursor the trace instead.
@@ -622,6 +623,11 @@ pub struct DdSession {
     /// Relations that have provenance annotations: everything built at spawn
     /// when `provenance` is on. Rules layered on afterwards are not included.
     annotated_relations: std::collections::HashSet<String>,
+    /// The epoch the worker last settled at: its output frontier is `{epoch}`,
+    /// so every change committed before it has propagated through every rule.
+    /// Set from the worker's own acks, never counted here, and carried
+    /// across `rebuild` so it never goes backwards.
+    epoch: AtomicU64,
 }
 
 impl LazyProvenance for DdSession {
@@ -656,6 +662,18 @@ impl DdSession {
         edb: &[(String, Vec<Value>)],
         rule_sources: &[String],
         provenance: bool,
+    ) -> Result<Self> {
+        Self::spawn_at(edb, rule_sources, provenance, 1)
+    }
+
+    /// Spawn like [`DdSession::spawn_with_provenance`], seeding the worker so
+    /// it settles at `start_epoch` rather than 1. `rebuild` uses this to keep
+    /// the session's epoch moving forward across a respawn.
+    fn spawn_at(
+        edb: &[(String, Vec<Value>)],
+        rule_sources: &[String],
+        provenance: bool,
+        start_epoch: u64,
     ) -> Result<Self> {
         // -----------------------------------------------------------------------
         // Compile all strata while we still have &rule_sources available.
@@ -1089,7 +1107,7 @@ impl DdSession {
             }
 
             // ------------------------------------------------------------------
-            // Seed the worker with the initial EDB at epoch 1, then settle.
+            // Seed the worker with the initial EDB, then settle at `start_epoch`.
             // ------------------------------------------------------------------
             for (rel, rows) in edb_by_rel.iter() {
                 if let Some(handle) = handles.get_mut(rel) {
@@ -1099,11 +1117,11 @@ impl DdSession {
                 }
             }
             for handle in handles.values_mut() {
-                handle.advance_to(1);
+                handle.advance_to(start_epoch);
                 handle.flush();
             }
             // Step until the initial EDB is fully propagated.
-            worker.step_or_park_while(None, || probe.less_than(&1u64));
+            worker.step_or_park_while(None, || probe.less_than(&start_epoch));
 
             // Tell `spawn()` the initial seed/settle is done and it's safe to
             // hand the session to the caller.
@@ -1115,7 +1133,7 @@ impl DdSession {
             // The epoch monotonically increases.  Insert/Remove commands buffer
             // diffs into the InputSession; Commit advances the epoch and steps
             // the worker until the probe clears, then acks.  Shutdown exits.
-            let mut epoch: u64 = 1;
+            let mut epoch: u64 = start_epoch;
             // One error trace per dataflow (the initial one plus each layer).
             let mut error_traces: Vec<RowTrace> = vec![error_trace];
 
@@ -1155,7 +1173,7 @@ impl DdSession {
                                 trace.set_logical_compaction(frontier);
                                 trace.set_physical_compaction(frontier);
                             }
-                            let _ = ack.send(());
+                            let _ = ack.send(epoch);
                         }
                         Command::Query { rel, resp } => {
                             let result = live_errors(&mut error_traces).map(|()| {
@@ -1500,6 +1518,7 @@ impl DdSession {
             inputs: known_inputs,
             provenance,
             annotated_relations,
+            epoch: AtomicU64::new(start_epoch),
         })
     }
 
@@ -1522,11 +1541,20 @@ impl DdSession {
         let _ = self.tx.send(Command::Remove { rel, row });
     }
 
-    /// Flush buffered deltas and block until the worker has settled.
+    /// Flush buffered deltas and block until the worker has settled at the
+    /// next epoch.
     pub fn commit(&self) {
         let (ack_tx, ack_rx) = bounded(1);
         let _ = self.tx.send(Command::Commit { ack: ack_tx });
-        let _ = ack_rx.recv();
+        if let Ok(epoch) = ack_rx.recv() {
+            self.epoch.store(epoch, Ordering::Release);
+        }
+    }
+
+    /// The epoch the worker last settled at (see the `epoch` field). Each
+    /// `commit` moves it forward by one, and so does a `rebuild`.
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
     }
 
     /// Query current results for `rel`.
@@ -1651,7 +1679,12 @@ impl DdSession {
             ack: ack_tx,
         });
         match ack_rx.recv()? {
-            AddOutcome::Layered => Ok(()),
+            // The rule set changed, so move the epoch on: a reader holding
+            // results from the current epoch must see them as out of date.
+            AddOutcome::Layered => {
+                self.commit();
+                Ok(())
+            }
             AddOutcome::NeedsRebuild => self.rebuild(edb, all_rule_sources),
             AddOutcome::Error(msg) => Err(anyhow::anyhow!(
                 "dd backend cannot evaluate this rule:\n{msg}"
@@ -1668,13 +1701,15 @@ impl DdSession {
     /// Rebuild the session from scratch (for rule changes).
     ///
     /// Shuts down the existing worker, spawns a new one with the updated
-    /// `rule_sources`, and re-seeds it with `edb`.
+    /// `rule_sources`, and re-seeds it with `edb`. The new worker settles one
+    /// epoch past the old one, so the epoch never goes backwards.
     pub fn rebuild(&mut self, edb: &[(String, Vec<Value>)], rule_sources: &[String]) -> Result<()> {
         // Shutdown the existing worker (joining it) before spawning the next one
         // so we never have two workers alive simultaneously.
         let provenance = self.provenance;
+        let start_epoch = self.epoch() + 1;
         self.shutdown_worker();
-        *self = Self::spawn_with_provenance(edb, rule_sources, provenance)?;
+        *self = Self::spawn_at(edb, rule_sources, provenance, start_epoch)?;
         Ok(())
     }
 

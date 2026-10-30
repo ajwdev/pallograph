@@ -229,7 +229,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     for path in &cli.rules {
         rule_sources.extend(engine::read_rule_sources(path)?);
     }
-    let mut engine = Engine::with_rule_sources(edb, objects, rule_sources, backend)?;
+    let engine = Engine::with_rule_sources(edb, objects, rule_sources, backend)?;
     if cli.explain {
         let mut cp = engine.compile()?;
         cp.dump_plan()?;
@@ -238,10 +238,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
 
     let store = engine.evaluate()?;
 
+    let engine = std::sync::Mutex::new(engine);
     let rc = repl::load_rc(cli.rcfile.as_deref(), cli.no_rc);
     let status = match &cli.script {
-        Some(path) => repl::run_script(&mut engine, store, cli.format, path, rc)?,
-        None => repl::run(&mut engine, store, cli.format, rc)?,
+        Some(path) => repl::run_script(&engine, store, cli.format, path, rc)?,
+        None => repl::run(&engine, store, cli.format, rc)?,
     };
     Ok(ExitCode::from(status.exit_code()))
 }
