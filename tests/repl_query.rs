@@ -872,3 +872,15 @@ fn rollback_restores_startup_object_after_load_k8s() {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
+
+/// `_(R) :- ...` projects the result to the head variables only: the join
+/// key `N` stays a body variable, so it is not reported.
+#[test]
+fn query_projects_to_head_variables() {
+    let (stdout, stderr) = run_session("?- _(Ns) :- host_network_pod(Ns, N)\n::quit\n");
+    assert!(stdout.contains("Ns = "), "stdout: {stdout}");
+    // The projected-out variable must not appear as a bound column. `Ns = `
+    // is fine; a bare `N = ` would mean N leaked into the head.
+    assert!(!stdout.contains("N = "), "N leaked into the head: {stdout}");
+    assert!(stderr.contains("Found"), "stderr: {stderr}");
+}

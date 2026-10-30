@@ -323,6 +323,9 @@ fn print_help() {
     println!(
         "  ?- <atom>, <atom>, ...                 - conjunctive query; name variables with uppercase (X) to see their bindings"
     );
+    println!(
+        "  ?- _(<var>, ...) :- <atom>, ...       - project: anonymous head, report only the head variables; the rest are join keys"
+    );
     println!("  query <body>                           - long form of ?-");
     println!(
         "  show                                   - list documented relations (arity + description)"
@@ -1164,6 +1167,11 @@ fn session(
                     .or_else(|| line.strip_prefix("?- "))
                 {
                     let raw_body = raw_body.trim();
+                    // Optional projection via an anonymous head: `_(R, N) :-
+                    // atom, atom` reports only the head variables; the rest act
+                    // as join keys. Without a head, every named variable in the
+                    // body is reported (the original behaviour).
+                    let (projection, raw_body) = split_projection(raw_body);
                     let active = active_store(&current_store, &snapshots, &in_use);
                     // A typo'd relation is an empty result on the interpreter and
                     // an opaque error on DD; catch it up front either way.
@@ -1221,7 +1229,7 @@ fn session(
                         command_error!("No variables to bind. Name one (e.g. X).");
                         continue;
                     }
-                    let (body, vars) = match auto_complete_partial(raw_body, active, &cols) {
+                    let (body, mut vars) = match auto_complete_partial(raw_body, active, &cols) {
                         Some((new_body, added)) => {
                             let mut all = existing;
                             all.extend(added);
@@ -1230,6 +1238,24 @@ fn session(
                         None => (raw_body.to_string(), existing),
                     };
                     let body = body.as_str();
+
+                    // A projection list narrows the reported columns to the
+                    // named variables; each must be bound somewhere in the body.
+                    if let Some(proj) = projection {
+                        let unbound: Vec<&str> = proj
+                            .iter()
+                            .filter(|p| !vars.contains(p))
+                            .map(String::as_str)
+                            .collect();
+                        if !unbound.is_empty() {
+                            command_error!(
+                                "Projection variable(s) not bound by the body: {}.",
+                                unbound.join(", ")
+                            );
+                            continue;
+                        }
+                        vars = proj;
+                    }
 
                     // A query is a read: evaluate just the query rule over
                     // the active state's facts (live or a `use`d snapshot)
@@ -2080,6 +2106,55 @@ fn split_commands(input: &str) -> Vec<String> {
 
 /// Extract uppercase variable names from a Mangle rule body, in order of first
 /// appearance. Skips string literals and single underscores.
+/// Parse an optional anonymous-rule head from a `?-`/`query` body. The form
+/// `_(R, N) :- atom, atom` (an anonymous head, as in LogiQL) reports only the
+/// variables named in the head; the rest act as join keys. Returns
+/// `(Some(vars), body)` when the body begins with such a head, otherwise
+/// `(None, whole_body)`, keeping the "report every named variable" behaviour.
+/// The head name is a bare `_`, and the closing paren is matched outside
+/// strings and brackets so a struct or list in the args can't end it early.
+fn split_projection(raw: &str) -> (Option<Vec<String>>, &str) {
+    let raw = raw.trim_start();
+    // The anonymous head is `_` then `(`; anything else is a plain body. A
+    // real body atom's predicate starts with a lowercase letter, so a leading
+    // `_(` is unambiguous.
+    let Some(rest) = raw
+        .strip_prefix('_')
+        .map(str::trim_start)
+        .and_then(|r| r.strip_prefix('('))
+    else {
+        return (None, raw);
+    };
+    let mut depth = 1i32;
+    let mut in_string = false;
+    for (i, ch) in rest.char_indices() {
+        match ch {
+            '"' => in_string = !in_string,
+            _ if in_string => {}
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    // Only a head when `:-` follows the arg list; otherwise
+                    // treat the whole line as an ordinary body.
+                    let Some(body) = rest[i + 1..].trim_start().strip_prefix(":-") else {
+                        return (None, raw);
+                    };
+                    let vars = rest[..i]
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    return (Some(vars), body.trim_start());
+                }
+            }
+            _ => {}
+        }
+    }
+    (None, raw)
+}
+
 fn extract_vars(body: &str) -> Vec<String> {
     let mut vars: Vec<String> = Vec::new();
     let mut in_string = false;
