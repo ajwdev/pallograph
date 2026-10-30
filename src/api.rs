@@ -9,12 +9,16 @@
 //! Commands move onto the [`Core`] trait one at a time. Until one has, the
 //! REPL reaches the engine and snapshots through [`LocalCore`]'s own methods.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Result;
 use mangle_common::Value;
+use mangle_interpreter::ProvenanceEntry;
 
+use crate::dd::build::Annotation;
+use crate::dd::session::LazyProvenance;
+use crate::dd::value::{Row, SENTINEL_EDB};
 use crate::engine::{Engine, EvalStore};
 use crate::query::{
     self, body_relations, count_top_level_args, extract_vars, single_atom, split_atom,
@@ -97,6 +101,101 @@ pub trait Core {
     /// anonymous head (`_(X, Y) :- ...`) naming the columns to report. A
     /// query is a read and leaves nothing behind.
     fn query(&self, at: &At, query: &str) -> Result<Rows, QueryError>;
+
+    /// Explain how each fact matching `fact` was derived (its provenance).
+    /// `fact` is one atom: constants pick facts out and `_` (or a missing
+    /// trailing argument) matches anything. No matching facts is an empty
+    /// list, not an error.
+    fn provenance(&self, at: &At, fact: &str) -> Result<Vec<ProvenanceTree>, ProvenanceError>;
+}
+
+/// How deep a provenance tree goes before its branches stop at
+/// [`Derivation::DepthLimit`].
+const PROVENANCE_MAX_DEPTH: usize = 12;
+
+/// A fact and how it came to hold.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProvenanceTree {
+    pub relation: String,
+    pub row: Vec<Value>,
+    pub derivation: Derivation,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Derivation {
+    /// Loaded from the cluster or added, not derived (EDB).
+    Input,
+    /// Derived by a rule. A fact derivable several ways still gets one proof:
+    /// the interpreter records only the derivation that first inserted it,
+    /// and the DD backend rebuilds one with the fewest steps.
+    Rule(RuleApplication),
+    /// Derived by a rule with no positive premises.
+    NoPremises,
+    /// The fact is already being explained further up this branch.
+    Cycle,
+    /// Deeper than the limit, so not expanded.
+    DepthLimit,
+    /// Provenance has no answer for this fact.
+    Unexplained(Unexplained),
+}
+
+/// One rule firing: the facts it joined, and the negated premises that held
+/// because no matching fact existed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleApplication {
+    pub premises: Vec<ProvenanceTree>,
+    pub absent: Vec<AbsentFact>,
+}
+
+/// A negated premise, `!relation(args)`, that held. `None` marks a position
+/// the rule left open.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AbsentFact {
+    pub relation: String,
+    pub args: Vec<Option<Value>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unexplained {
+    /// The session records no provenance.
+    NotRecorded,
+    /// The snapshot was taken without provenance.
+    NotCaptured,
+    /// The relation has no provenance annotations.
+    NotTracked,
+    /// A fact with no annotation, which is a provenance bug.
+    NoAnnotation,
+    /// No grounding of the fact's rule was found.
+    NoGrounding,
+}
+
+impl Unexplained {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Unexplained::NotRecorded => "no provenance for this session",
+            Unexplained::NotCaptured => "no provenance captured for this snapshot",
+            Unexplained::NotTracked => "no provenance tracked for this relation",
+            Unexplained::NoAnnotation => "no annotation: provenance bug",
+            Unexplained::NoGrounding => "no grounding found",
+        }
+    }
+}
+
+/// Why a provenance request was refused or failed. Each displays as the line
+/// the REPL prints for it.
+#[derive(Debug, thiserror::Error)]
+pub enum ProvenanceError {
+    #[error(
+        "why needs provenance, which is off for this session. Re-run with \
+         `--backend dd --provenance`, or use `--backend interpreter`."
+    )]
+    NotEnabled,
+    #[error("No snapshot named '{0}'.")]
+    UnknownSnapshot(String),
+    #[error("Parse error: {0}")]
+    Parse(String),
+    #[error("Error: {0:#}")]
+    Evaluation(anyhow::Error),
 }
 
 /// The live state evaluated at some engine version.
@@ -330,6 +429,209 @@ impl Core for LocalCore {
             relation: None,
         })
     }
+
+    fn provenance(&self, at: &At, fact: &str) -> Result<Vec<ProvenanceTree>, ProvenanceError> {
+        let engine = self.engine();
+        if !engine.supports_provenance() {
+            return Err(ProvenanceError::NotEnabled);
+        }
+        let snapshots = self.snapshots();
+        let live_store;
+        let (store, frozen): (&EvalStore, Option<&FrozenState>) = match at {
+            At::Live => {
+                live_store = self
+                    .live_store(&engine)
+                    .map_err(ProvenanceError::Evaluation)?;
+                (&live_store, None)
+            }
+            At::Snapshot(name) => {
+                let frozen = snapshots
+                    .get(name)
+                    .ok_or_else(|| ProvenanceError::UnknownSnapshot(name.clone()))?;
+                (&frozen.store, Some(frozen))
+            }
+        };
+        let parsed =
+            query::parse_query(fact.trim()).map_err(|e| ProvenanceError::Parse(e.to_string()))?;
+        let relation = parsed.predicate.as_str();
+
+        // A live DD session holds the current rows; a frozen snapshot is
+        // read from its own store, as it has no session.
+        let session_rows: Vec<Vec<Value>>;
+        let rows: &[Vec<Value>] = if frozen.is_none() && engine.has_session() {
+            session_rows = engine
+                .query_live(relation)
+                .map_err(ProvenanceError::Evaluation)?;
+            &session_rows
+        } else {
+            store.scan(relation)
+        };
+        let matched = query::filter_tuples(rows, &parsed);
+
+        if engine.has_session() {
+            // DD: one shortest proof, rebuilt on demand from the live
+            // session's annotations, or from the copy a snapshot froze.
+            let provenance: Option<&dyn LazyProvenance> = match frozen {
+                Some(frozen) => frozen
+                    .lazy_provenance
+                    .as_ref()
+                    .map(|p| p as &dyn LazyProvenance),
+                None => engine
+                    .provenance_session()
+                    .map(|s| s as &dyn LazyProvenance),
+            };
+            Ok(matched
+                .into_iter()
+                .map(|tuple| {
+                    let derivation = match provenance {
+                        None if frozen.is_some() => {
+                            Derivation::Unexplained(Unexplained::NotCaptured)
+                        }
+                        None => Derivation::Unexplained(Unexplained::NotRecorded),
+                        Some(provenance) if !provenance.has_provenance_for(relation) => {
+                            Derivation::Unexplained(Unexplained::NotTracked)
+                        }
+                        Some(provenance) => {
+                            let row = Row::from(tuple.as_slice());
+                            let annotation = provenance.why_height(relation, &row);
+                            lazy_derivation(provenance, &row, annotation, 1)
+                        }
+                    };
+                    ProvenanceTree {
+                        relation: relation.to_string(),
+                        row: tuple.clone(),
+                        derivation,
+                    }
+                })
+                .collect())
+        } else {
+            // Interpreter: the store (frozen under a snapshot) carries the
+            // derivation it recorded for each fact.
+            let index = recorded_derivations(&store.provenance);
+            Ok(matched
+                .into_iter()
+                .map(|tuple| ProvenanceTree {
+                    relation: relation.to_string(),
+                    row: tuple.clone(),
+                    derivation: recorded_derivation(&index, relation, tuple, 1, &mut Vec::new()),
+                })
+                .collect())
+        }
+    }
+}
+
+/// The premises the interpreter recorded for each derived fact, keyed by
+/// the fact. It records a fact only when an insert first adds it, so there
+/// is one entry per fact.
+type RecordedDerivations = HashMap<(String, Vec<Value>), Vec<(String, Vec<Value>)>>;
+
+fn recorded_derivations(entries: &[ProvenanceEntry]) -> RecordedDerivations {
+    let mut index = RecordedDerivations::new();
+    for entry in entries {
+        index
+            .entry(entry.derived.clone())
+            .or_insert_with(|| entry.premises.clone());
+    }
+    index
+}
+
+/// How the interpreter derived `relation(row)`, as it recorded it.
+/// `visited` holds the facts being explained further up this branch, so a
+/// recursive rule stops at [`Derivation::Cycle`] instead of looping.
+fn recorded_derivation(
+    index: &RecordedDerivations,
+    relation: &str,
+    row: &[Value],
+    depth: usize,
+    visited: &mut Vec<(String, Vec<Value>)>,
+) -> Derivation {
+    if depth > PROVENANCE_MAX_DEPTH {
+        return Derivation::DepthLimit;
+    }
+    let key = (relation.to_string(), row.to_vec());
+    if visited.contains(&key) {
+        return Derivation::Cycle;
+    }
+    let Some(premises) = index.get(&key) else {
+        return Derivation::Input;
+    };
+    visited.push(key);
+    let premises = premises
+        .iter()
+        .map(|(premise_relation, premise_row)| ProvenanceTree {
+            relation: premise_relation.clone(),
+            row: premise_row.clone(),
+            derivation: recorded_derivation(
+                index,
+                premise_relation,
+                premise_row,
+                depth + 1,
+                visited,
+            ),
+        })
+        .collect();
+    visited.pop();
+    Derivation::Rule(RuleApplication {
+        premises,
+        absent: Vec::new(),
+    })
+}
+
+/// One proof of `row` with the fewest steps, rebuilt by walking the DD
+/// session's lazy provenance annotations backwards. Needs no cycle check:
+/// each premise's height is strictly below its parent's.
+///
+/// `annotation` is the fact's `(rule_id, height)`: looked up once for the
+/// top-level fact and taken from the premise when recursing, so each node
+/// costs one `why_step` and no extra lookup.
+fn lazy_derivation(
+    provenance: &dyn LazyProvenance,
+    row: &Row,
+    annotation: Option<Annotation>,
+    depth: usize,
+) -> Derivation {
+    if depth > PROVENANCE_MAX_DEPTH {
+        return Derivation::DepthLimit;
+    }
+    let (rule_id, height) = match annotation {
+        Some((SENTINEL_EDB, _)) => return Derivation::Input,
+        Some(annotation) => annotation,
+        // Every fact in a provenance session has an annotation.
+        None => return Derivation::Unexplained(Unexplained::NoAnnotation),
+    };
+    let Some(grounding) = provenance.why_step(rule_id, row, height) else {
+        return Derivation::Unexplained(Unexplained::NoGrounding);
+    };
+    if grounding.premises.is_empty() && grounding.negated.is_empty() {
+        return Derivation::NoPremises;
+    }
+    let premises = grounding
+        .premises
+        .iter()
+        .map(|premise| ProvenanceTree {
+            relation: premise.rel.clone(),
+            row: premise.row.clone().into_values(),
+            derivation: lazy_derivation(
+                provenance,
+                &premise.row,
+                Some((premise.rule_id, premise.height)),
+                depth + 1,
+            ),
+        })
+        .collect();
+    let absent = grounding
+        .negated
+        .iter()
+        .map(|negated| AbsentFact {
+            relation: negated.rel.clone(),
+            args: negated
+                .args
+                .iter()
+                .map(|arg| arg.clone().map(Value::from))
+                .collect(),
+        })
+        .collect();
+    Derivation::Rule(RuleApplication { premises, absent })
 }
 
 /// Lock `mutex`, treating a poisoned lock (a panic while it was held) as
@@ -529,5 +831,131 @@ mod tests {
             assert_eq!(lock(&core.live).version, from + 1);
             assert!(Arc::ptr_eq(&core.last_live(), &evaluated));
         }
+    }
+
+    /// A diamond, a→b→d and a→c→d, so `path("a", "d")` has two derivations,
+    /// plus `lonely` facts derived through a negated premise.
+    fn provenance_core(backend: Box<dyn Backend>) -> LocalCore {
+        let edb = vec![
+            ("edge".to_string(), vec![s("a"), s("b")]),
+            ("edge".to_string(), vec![s("a"), s("c")]),
+            ("edge".to_string(), vec![s("b"), s("d")]),
+            ("edge".to_string(), vec![s("c"), s("d")]),
+            ("node".to_string(), vec![s("d")]),
+        ];
+        let rules = vec![
+            "Decl edge(Src, Dst).\nDecl node(N).\nDecl path(Src, Dst).\nDecl lonely(N).\n\
+             path(X, Y) :- edge(X, Y).\n\
+             path(X, Z) :- path(X, Y), edge(Y, Z).\n\
+             has_out(N) :- edge(N, _).\n\
+             lonely(N) :- node(N), !has_out(N)."
+                .to_string(),
+        ];
+        let engine = Engine::from_parts(edb, rules, backend).unwrap();
+        let live = engine.evaluate().unwrap();
+        LocalCore::new(Arc::new(Mutex::new(engine)), live)
+    }
+
+    fn only_tree(core: &LocalCore, at: &At, fact: &str) -> ProvenanceTree {
+        let mut trees = core.provenance(at, fact).unwrap();
+        assert_eq!(trees.len(), 1, "{fact}");
+        trees.remove(0)
+    }
+
+    fn application(tree: &ProvenanceTree) -> &RuleApplication {
+        match &tree.derivation {
+            Derivation::Rule(application) => application,
+            other => panic!("{}: {other:?}", tree.relation),
+        }
+    }
+
+    /// One proof per fact, even for `path("a", "d")`, which the diamond
+    /// derives two ways; each premise bottoms out at an input fact.
+    #[test]
+    fn provenance_explains_down_to_inputs() {
+        let backends: [Box<dyn Backend>; 2] = [
+            Box::new(InterpreterBackend),
+            Box::new(DdBackend { provenance: true }),
+        ];
+        for backend in backends {
+            let core = provenance_core(backend);
+            let tree = only_tree(&core, &At::Live, "path(\"a\", \"d\")");
+            assert_eq!(tree.row, [s("a"), s("d")]);
+            let [path, edge] = &application(&tree).premises[..] else {
+                panic!("{tree:?}")
+            };
+            assert_eq!(path.relation, "path");
+            assert_eq!(edge.relation, "edge");
+            assert_eq!(edge.derivation, Derivation::Input);
+            let [path_edge] = &application(path).premises[..] else {
+                panic!("{path:?}")
+            };
+            assert_eq!(path_edge.derivation, Derivation::Input);
+
+            assert!(
+                core.provenance(&At::Live, "path(\"d\", _)")
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    /// DD names the negated premise that held.
+    #[test]
+    fn dd_provenance_names_absent_premises() {
+        let core = provenance_core(Box::new(DdBackend { provenance: true }));
+        let tree = only_tree(&core, &At::Live, "lonely(\"d\")");
+        let application = application(&tree);
+        assert_eq!(application.premises[0].relation, "node");
+        assert_eq!(
+            application.absent,
+            [AbsentFact {
+                relation: "has_out".to_string(),
+                args: vec![Some(s("d"))],
+            }]
+        );
+    }
+
+    #[test]
+    fn provenance_refusals_and_unexplained_facts() {
+        let core = provenance_core(Box::new(DdBackend { provenance: false }));
+        assert_eq!(
+            core.provenance(&At::Live, "path(_, _)")
+                .unwrap_err()
+                .to_string(),
+            "why needs provenance, which is off for this session. Re-run with \
+             `--backend dd --provenance`, or use `--backend interpreter`."
+        );
+
+        let core = provenance_core(Box::new(DdBackend { provenance: true }));
+        let unknown = At::Snapshot("nope".to_string());
+        assert_eq!(
+            core.provenance(&unknown, "path(_, _)")
+                .unwrap_err()
+                .to_string(),
+            "No snapshot named 'nope'."
+        );
+        // A snapshot frozen without its provenance can't explain anything.
+        {
+            let engine = core.engine();
+            let frozen = core.live_store(&engine).unwrap().frozen_copy();
+            core.snapshots().insert(
+                "bare".to_string(),
+                FrozenState {
+                    store: frozen,
+                    lazy_provenance: None,
+                    inputs: engine.save_inputs(),
+                },
+            );
+        }
+        let tree = only_tree(
+            &core,
+            &At::Snapshot("bare".to_string()),
+            "path(\"a\", \"b\")",
+        );
+        assert_eq!(
+            tree.derivation,
+            Derivation::Unexplained(Unexplained::NotCaptured)
+        );
     }
 }

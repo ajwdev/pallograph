@@ -6,7 +6,6 @@ use std::io::IsTerminal;
 
 use anyhow::{Context as _, Result};
 use mangle_common::Value;
-use mangle_interpreter::ProvenanceEntry;
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -14,12 +13,11 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
-use crate::api::{At, Core, LocalCore, Rows};
-use crate::dd::session::LazyProvenance;
+use crate::api::{At, Core, Derivation, LocalCore, ProvenanceTree, Rows};
 use crate::edb::{K8sManifestsSource, ObjectFacts, ObjectKey, ShellSource};
 use crate::engine::{ApplySummary, Change, Engine, EvalStore, RelationDoc};
 use crate::load;
-use crate::query::{self, extract_vars, split_projection};
+use crate::query::{extract_vars, split_projection};
 use crate::rbac;
 use crate::smt;
 use crate::snapshot::{Diff, FrozenState};
@@ -961,6 +959,21 @@ fn session(
                     continue;
                 }
 
+                if let Some(fact) = line.strip_prefix("::why ") {
+                    let at = match &in_use {
+                        Some(name) => At::Snapshot(name.clone()),
+                        None => At::Live,
+                    };
+                    match core.provenance(&at, fact) {
+                        Ok(trees) if trees.is_empty() => {
+                            eprintln!("No matching facts for '{}'.", fact.trim());
+                        }
+                        Ok(trees) => trees.iter().for_each(print_provenance),
+                        Err(e) => command_error!("{e}"),
+                    }
+                    continue;
+                }
+
                 // Commands not yet on `Core` hold the engine and the snapshots
                 // for the whole command, so nothing else changes them partway
                 // through.
@@ -1189,89 +1202,6 @@ fn session(
                             pending.push_front((command, false));
                             in_use = Some(name);
                         }
-                    }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("::why ") {
-                    if !engine.supports_provenance() {
-                        command_error!(
-                            "why needs provenance, which is off for this session. \
-                             Re-run with `--backend dd --provenance`, or use \
-                             `--backend interpreter`."
-                        );
-                        continue;
-                    }
-                    let rest = rest.trim();
-                    let active = active_store(&current_store, &snapshots, &in_use);
-                    match query::parse_query(rest) {
-                        Ok(q) => {
-                            // A live session is the source of truth: mutators
-                            // don't refresh `current_store` while one exists.
-                            // Under `use`, the frozen store is always read
-                            // directly: it has no live session of its own.
-                            let live: Vec<Vec<Value>>;
-                            let rows: &[Vec<Value>] = if in_use.is_none() && engine.has_session() {
-                                live = match engine.query_live(&q.predicate) {
-                                    Ok(rows) => rows,
-                                    Err(e) => {
-                                        command_error!("Error: {e:#}");
-                                        continue;
-                                    }
-                                };
-                                &live
-                            } else {
-                                active.scan(&q.predicate)
-                            };
-                            let matched = query::filter_tuples(rows, &q);
-                            if matched.is_empty() {
-                                eprintln!("No matching facts for '{rest}'.");
-                            } else if engine.has_session() {
-                                // DD backend: lazy provenance, one shortest proof
-                                // reconstructed on demand from the live session,
-                                // or from the copy `snapshot` froze under `use`.
-                                let provenance: Option<&dyn LazyProvenance> = match &in_use {
-                                    Some(name) => snapshots
-                                        .get(name)
-                                        .and_then(|s| s.lazy_provenance.as_ref())
-                                        .map(|p| p as &dyn LazyProvenance),
-                                    None => engine
-                                        .provenance_session()
-                                        .map(|s| s as &dyn LazyProvenance),
-                                };
-                                for tuple in matched {
-                                    println!("{}({})", q.predicate, join_values(tuple));
-                                    let Some(provenance) = provenance else {
-                                        if in_use.is_some() {
-                                            println!(
-                                                "  └─ (no provenance captured for this snapshot)"
-                                            );
-                                        } else {
-                                            println!("  └─ (no provenance for this session)");
-                                        }
-                                        continue;
-                                    };
-                                    if !provenance.has_provenance_for(&q.predicate) {
-                                        println!(
-                                            "  └─ (no provenance: `?-` query results are not tracked)"
-                                        );
-                                        continue;
-                                    }
-                                    let row = crate::dd::value::Row::from(tuple.as_slice());
-                                    let annotation = provenance.why_height(&q.predicate, &row);
-                                    print_why_lazy(provenance, &row, annotation, 1);
-                                }
-                            } else {
-                                // Interpreter: the active store (frozen under
-                                // `use`) carries its own provenance.
-                                let index = build_provenance_index(&active.provenance);
-                                for tuple in matched {
-                                    println!("{}({})", q.predicate, join_values(tuple));
-                                    print_why(&index, &q.predicate, tuple, 1, &mut Vec::new());
-                                }
-                            }
-                        }
-                        Err(e) => command_error!("Parse error: {e}"),
                     }
                     continue;
                 }
@@ -2826,75 +2756,6 @@ fn pretty_format_atom(s: &str) -> String {
     b
 }
 
-/// Build a map from (relation, tuple) → list of premise-sets that derived it.
-/// A single fact may have been derived by multiple rules/paths.
-fn build_provenance_index(
-    entries: &[ProvenanceEntry],
-) -> HashMap<(String, Vec<Value>), Vec<Vec<(String, Vec<Value>)>>> {
-    let mut index: HashMap<(String, Vec<Value>), Vec<Vec<(String, Vec<Value>)>>> = HashMap::new();
-    for entry in entries {
-        index
-            .entry(entry.derived.clone())
-            .or_default()
-            .push(entry.premises.clone());
-    }
-    index
-}
-
-const WHY_MAX_DEPTH: usize = 12;
-
-fn print_why(
-    index: &HashMap<(String, Vec<Value>), Vec<Vec<(String, Vec<Value>)>>>,
-    rel: &str,
-    tuple: &[Value],
-    depth: usize,
-    visited: &mut Vec<(String, Vec<Value>)>,
-) {
-    let key = (rel.to_string(), tuple.to_vec());
-    if depth > WHY_MAX_DEPTH {
-        println!("{}... (depth limit)", "  ".repeat(depth));
-        return;
-    }
-    if visited.contains(&key) {
-        println!(
-            "{}↻ (cycle: {}({}))",
-            "  ".repeat(depth),
-            rel,
-            tuple
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        return;
-    }
-
-    let indent = "  ".repeat(depth);
-    match index.get(&key) {
-        None => {
-            println!("{}└─ (EDB fact)", indent);
-        }
-        Some(premise_sets) => {
-            for (i, premises) in premise_sets.iter().enumerate() {
-                if premise_sets.len() > 1 {
-                    println!("{}├─ via rule {}:", indent, i + 1);
-                }
-                visited.push(key.clone());
-                for (p_rel, p_tuple) in premises {
-                    let args = p_tuple
-                        .iter()
-                        .map(|v| v.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    println!("{}  {}({})", indent, p_rel, args);
-                    print_why(index, p_rel, p_tuple, depth + 1, visited);
-                }
-                visited.pop();
-            }
-        }
-    }
-}
-
 fn join_values(tuple: &[Value]) -> String {
     tuple
         .iter()
@@ -2903,64 +2764,47 @@ fn join_values(tuple: &[Value]) -> String {
         .join(", ")
 }
 
-/// Render one minimal-height proof of `rel(tuple)` by backward-chaining the
-/// DD session's lazy provenance annotations. Unlike [`print_why`], this
-/// shows a single shortest derivation rather than every derivation, and needs
-/// no cycle check: each premise's height is strictly below its parent's.
-///
-/// `annotation` is the fact's `(rule_id, height)`: looked up once by the
-/// caller for the top-level fact, and taken from the `Premise` when recursing,
-/// so each node costs one `why_step` and no extra lookup.
-fn print_why_lazy(
-    provenance: &dyn LazyProvenance,
-    row: &crate::dd::value::Row,
-    annotation: Option<crate::dd::build::Annotation>,
-    depth: usize,
-) {
-    use crate::dd::value::SENTINEL_EDB;
+/// Print a fact's provenance as `why` shows it: the fact, then how it was
+/// derived, one premise per line, indented by depth.
+fn print_provenance(tree: &ProvenanceTree) {
+    println!("{}({})", tree.relation, join_values(&tree.row));
+    print_derivation(tree, 1);
+}
 
+fn print_derivation(tree: &ProvenanceTree, depth: usize) {
     let indent = "  ".repeat(depth);
-    if depth > WHY_MAX_DEPTH {
-        println!("{indent}... (depth limit)");
-        return;
-    }
-    let (rule_id, height) = match annotation {
-        Some((SENTINEL_EDB, _)) => {
-            println!("{indent}└─ (EDB fact)");
-            return;
+    match &tree.derivation {
+        Derivation::Input => println!("{indent}└─ (EDB fact)"),
+        Derivation::NoPremises => println!("{indent}└─ (rule with no positive premises)"),
+        Derivation::Unexplained(why) => println!("{indent}└─ ({})", why.reason()),
+        Derivation::DepthLimit => println!("{indent}... (depth limit)"),
+        Derivation::Cycle => println!(
+            "{indent}↻ (cycle: {}({}))",
+            tree.relation,
+            join_values(&tree.row)
+        ),
+        Derivation::Rule(application) => {
+            for premise in &application.premises {
+                println!(
+                    "{indent}  {}({})",
+                    premise.relation,
+                    join_values(&premise.row)
+                );
+                print_derivation(premise, depth + 1);
+            }
+            for absent in &application.absent {
+                let args: Vec<String> = absent
+                    .args
+                    .iter()
+                    .map(|arg| arg.as_ref().map_or("_".to_string(), Value::to_string))
+                    .collect();
+                println!(
+                    "{indent}  !{}({}) (absent)",
+                    absent.relation,
+                    args.join(", ")
+                );
+            }
         }
-        Some(annotation) => annotation,
-        None => {
-            // Every fact in a provenance session has an annotation, so this
-            // is a bug; say so rather than pass it off as a base fact.
-            println!("{indent}└─ (no annotation: provenance bug)");
-            return;
-        }
-    };
-    let Some(grounding) = provenance.why_step(rule_id, row, height) else {
-        println!("{indent}└─ (no grounding found)");
-        return;
-    };
-    if grounding.premises.is_empty() && grounding.negated.is_empty() {
-        println!("{indent}└─ (rule with no positive premises)");
-        return;
-    }
-    for p in &grounding.premises {
-        let values = p.row.clone().into_values();
-        println!("{indent}  {}({})", p.rel, join_values(&values));
-        print_why_lazy(provenance, &p.row, Some((p.rule_id, p.height)), depth + 1);
-    }
-    for n in &grounding.negated {
-        let args = n
-            .args
-            .iter()
-            .map(|a| match a {
-                Some(v) => Value::from(v.clone()).to_string(),
-                None => "_".to_string(),
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("{indent}  !{}({}) (absent)", n.rel, args);
     }
 }
 
