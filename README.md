@@ -53,6 +53,10 @@ Run `help` in the REPL for the full command list. Commands are bare paths
 used to disambiguate (e.g. `::rbac::diff` vs `::diff`). Queries start with `?-`.
 Tab completes command paths, relation names, and file arguments.
 
+When a query is slow, `explain <body>` shows the plan the engine will run and a
+cost estimate for it, without running it; see
+[`docs/explain.md`](docs/explain.md).
+
 Startup commands are read from `$XDG_CONFIG_HOME/pallograph/pallographrc` (then
 `./.pallographrc`); use `alias <name> <command...>` there for shorthands, e.g.
 `alias ca rbac::cluster-admin`. `--rcfile <file>` and `--no-rc` override.

@@ -872,3 +872,63 @@ fn rollback_restores_startup_object_after_load_k8s() {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
+
+/// `_(R) :- ...` projects the result to the head variables only: the join
+/// key `N` stays a body variable, so it is not reported.
+#[test]
+fn query_projects_to_head_variables() {
+    let (stdout, stderr) = run_session("?- _(Ns) :- host_network_pod(Ns, N)\n::quit\n");
+    assert!(stdout.contains("Ns = "), "stdout: {stdout}");
+    // The projected-out variable must not appear as a bound column. `Ns = `
+    // is fine; a bare `N = ` would mean N leaked into the head.
+    assert!(!stdout.contains("N = "), "N leaked into the head: {stdout}");
+    assert!(stderr.contains("Found"), "stderr: {stderr}");
+}
+
+/// `explain` plans a query and prints the operator tree without running it.
+#[test]
+fn explain_prints_plan() {
+    let (stdout, _) = run_session("explain k8s(_, \"Pod\", Ns, N, R)\n::quit\n");
+    assert!(stdout.contains("Stratum"), "no stratum header: {stdout}");
+    assert!(
+        stdout.contains("Iterate on k8s"),
+        "no k8s iterate: {stdout}"
+    );
+    assert!(
+        stdout.contains("Insert `__query`"),
+        "no query insert: {stdout}"
+    );
+}
+
+/// A plan with only scans and constant-key lookups has a measured cost: the
+/// total is labelled exact, with no `~` estimate marker.
+#[test]
+fn explain_cost_exact_for_constant_key() {
+    let (stdout, _) = run_session("explain k8s(_, \"Pod\", Ns, N, R)\n::quit\n");
+    assert!(stdout.contains("Cost ("), "no cost section: {stdout}");
+    assert!(
+        stdout.contains("lookup col 1 = \"Pod\":") && stdout.contains("match)"),
+        "no exact constant-key match count: {stdout}"
+    );
+    assert!(
+        stdout.contains("row visits (exact)"),
+        "total not labelled exact: {stdout}"
+    );
+}
+
+/// A lookup keyed on a variable (bound per outer row) has no single match
+/// count, so its fan-out is an average: the line and the total carry `~` and
+/// the total is labelled an estimate.
+#[test]
+fn explain_cost_estimate_for_variable_key() {
+    let (stdout, _) =
+        run_session("explain k8s(_, \"Pod\", Ns, N, R), host_network_pod(Ns, N)\n::quit\n");
+    assert!(
+        stdout.contains("/key over"),
+        "no averaged per-key fan-out: {stdout}"
+    );
+    assert!(
+        stdout.contains("row visits (estimate"),
+        "total not labelled estimate: {stdout}"
+    );
+}

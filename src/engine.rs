@@ -93,6 +93,15 @@ pub struct RelationDoc {
     pub columns: Vec<ColumnDoc>,
 }
 
+/// One line of `explain`'s cost estimate: a relation the plan iterates, how
+/// many rows each probe visits, and whether that figure is an average (a
+/// variable index key) rather than an exact count.
+struct CostStep {
+    label: String,
+    rows: u128,
+    estimate: bool,
+}
+
 pub struct CompiledProgram {
     ir: Ir,
     strata: Vec<HashSet<&'static str>>, // static lifetime because of global interner in Arena
@@ -413,17 +422,154 @@ impl CompiledProgram {
         self.fprint_op(&mut std::io::stdout(), op, level)
     }
 
-    pub fn dump_plan(&mut self) -> Result<()> {
-        for (i, pred_names) in self.strata.iter().enumerate() {
-            println!(
-                "● Stratum {i} ({})",
-                pred_names
-                    .iter()
-                    .map(|s| format!("`{}`", s))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+    /// Walk the plan's spine, collecting one cost step per nested `Iterate`: a
+    /// label describing how the relation is probed (scan, or index lookup with
+    /// its key and match count) and the rows each probe visits. A nested-loop
+    /// join multiplies these.
+    fn cost_steps(&self, op: &Op, store: &EvalStore, out: &mut Vec<CostStep>) {
+        match op {
+            Op::Iterate { source, body } => {
+                let step = match source {
+                    DataSource::Scan { relation, .. } | DataSource::ScanDelta { relation, .. } => {
+                        let name = self.ir.resolve_name(*relation);
+                        CostStep {
+                            label: format!("{name} (scan)"),
+                            rows: store.scan(name).len() as u128,
+                            estimate: false,
+                        }
+                    }
+                    DataSource::IndexLookup {
+                        relation,
+                        col_idx,
+                        key,
+                        ..
+                    } => {
+                        let name = self.ir.resolve_name(*relation);
+                        let rows = store.scan(name);
+                        let total = rows.len();
+                        let key_str = self.format_operand(key);
+                        match self.const_value(key) {
+                            // Constant key: exactly the rows that match it, the
+                            // true fan-out of a single probe.
+                            Some(val) => {
+                                let matched = rows
+                                    .iter()
+                                    .filter(|r| r.get(*col_idx) == Some(&val))
+                                    .count();
+                                CostStep {
+                                    label: format!(
+                                        "{name} (lookup col {col_idx} = {key_str}: {matched}/{total} match)"
+                                    ),
+                                    rows: matched as u128,
+                                    estimate: false,
+                                }
+                            }
+                            // Variable key bound per outer row: no single match
+                            // count, so use the average rows per distinct key.
+                            None => {
+                                let distinct = rows
+                                    .iter()
+                                    .filter_map(|r| r.get(*col_idx))
+                                    .collect::<HashSet<_>>()
+                                    .len();
+                                let avg = if distinct == 0 {
+                                    0
+                                } else {
+                                    total.div_ceil(distinct)
+                                };
+                                CostStep {
+                                    label: format!(
+                                        "{name} (lookup col {col_idx} = {key_str}: ~{avg}/key over {distinct} keys)"
+                                    ),
+                                    rows: avg as u128,
+                                    estimate: true,
+                                }
+                            }
+                        }
+                    }
+                };
+                out.push(step);
+                self.cost_steps(body, store, out);
+            }
+            Op::Filter { body, .. }
+            | Op::MatchField { body, .. }
+            | Op::IterateList { body, .. } => self.cost_steps(body, store, out),
+            _ => {}
+        }
+    }
 
+    /// Resolve an index-lookup key to a concrete value when it is a constant,
+    /// so matching rows can be counted. A variable key is bound per outer row
+    /// and has no value here, so this returns `None`.
+    fn const_value(&self, key: &Operand) -> Option<Value> {
+        match key {
+            Operand::Const(Constant::String(id)) => {
+                Some(Value::String(self.ir.resolve_string(*id).to_string()))
+            }
+            Operand::Const(Constant::Name(id)) => {
+                Some(Value::Name(self.ir.resolve_name(*id).to_string()))
+            }
+            Operand::Const(Constant::Number(n)) => Some(Value::Number(*n)),
+            _ => None,
+        }
+    }
+
+    /// Print a cost estimate for a planned rule: the rows each nested `Iterate`
+    /// visits per probe (a full scan, the rows matching a constant key, or the
+    /// average rows per key for a variable lookup) and their product down the
+    /// join. Index-aware, so a join keyed on a low-cardinality column shows its
+    /// large fan-out. A variable key's figure is an average rather than a
+    /// measured count; `~` marks those, on the step and on the total they feed,
+    /// and the total line says whether it is exact or an estimate.
+    fn print_cost(&self, op: &Op, store: &EvalStore) {
+        let mut steps: Vec<CostStep> = Vec::new();
+        self.cost_steps(op, store, &mut steps);
+        if steps.is_empty() {
+            return;
+        }
+        let estimated = steps.iter().any(|s| s.estimate);
+        println!("  Cost (rows visited per probe, multiplied down the join):");
+        let width = steps.iter().map(|s| s.label.len()).max().unwrap_or(0);
+        let mut product: u128 = 1;
+        for step in &steps {
+            let mark = if step.estimate { "~" } else { " " };
+            println!("    {:<width$}  {mark}{} rows", step.label, step.rows);
+            product = product.saturating_mul(step.rows);
+        }
+        let terms = steps
+            .iter()
+            .map(|s| {
+                if s.estimate {
+                    format!("~{}", s.rows)
+                } else {
+                    s.rows.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" x ");
+        if estimated {
+            println!(
+                "    => {terms} = ~{product} row visits (estimate; ~ is an averaged per-key fan-out)"
+            );
+        } else {
+            println!("    => {terms} = {product} row visits (exact)");
+        }
+    }
+
+    pub fn dump_plan(&mut self) -> Result<()> {
+        self.dump_plan_filtered(None, None)
+    }
+
+    /// Dump the planner's physical operator tree for just the rules whose head
+    /// is `pred` (and the stratum that holds them). Backs the REPL `explain`
+    /// command, which plans a single synthesized `__query` rule. With a `store`,
+    /// a cost estimate (live row counts and index fan-out) follows each plan.
+    pub fn dump_plan_for(&mut self, pred: &str, store: Option<&EvalStore>) -> Result<()> {
+        self.dump_plan_filtered(Some(pred), store)
+    }
+
+    fn dump_plan_filtered(&mut self, only: Option<&str>, store: Option<&EvalStore>) -> Result<()> {
+        for (i, pred_names) in self.strata.iter().enumerate() {
             // Step B: collect rule_ids — must finish before calling Planner (&mut ir)
             let mut initial_ids: Vec<InstId> = vec![];
             let mut delta_ids: Vec<(InstId, NameId)> = vec![];
@@ -435,6 +581,9 @@ impl CompiledProgram {
                     let name = self.ir.resolve_name(*predicate);
 
                     if !pred_names.contains(name) {
+                        continue;
+                    }
+                    if only.is_some_and(|want| want != name) {
                         continue;
                     }
                     initial_ids.push(mangle_ir::InstId::new(idx));
@@ -456,11 +605,23 @@ impl CompiledProgram {
                 continue;
             }
 
+            println!(
+                "● Stratum {i} ({})",
+                pred_names
+                    .iter()
+                    .map(|s| format!("`{}`", s))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+
             // Step C: plan each rule and print the physical Op tree
             for rule_id in initial_ids {
                 let planner = mangle_analysis::Planner::new(&mut self.ir);
                 let op = planner.plan_rule(rule_id)?;
                 self.print_op(&op, 1)?;
+                if let Some(store) = store {
+                    self.print_cost(&op, store);
+                }
             }
 
             if !delta_ids.is_empty() {
@@ -1339,6 +1500,22 @@ impl Engine {
             }
         }
         self.backend.evaluate(&edb, std::slice::from_ref(&rule))
+    }
+
+    /// Compile the engine's rules together with `query_rule` and print the
+    /// planner's physical operator tree for that rule only, without evaluating
+    /// it. Backs the REPL `explain` command so a `?-` query's join plan can be
+    /// inspected: which atom leads the join, the index lookups, the filters.
+    /// The plan depends on the rules, not the loaded facts, so it is the same
+    /// whether the live state or a `use`d snapshot is active.
+    pub fn explain_query(&self, query_rule: &str, store: &EvalStore) -> Result<()> {
+        let mut sources = vec![EDB_DECLS];
+        for s in &self.rule_sources {
+            sources.push(s.as_str());
+        }
+        sources.push(query_rule);
+        let mut compiled = CompiledProgram::new(&sources)?;
+        compiled.dump_plan_for("__query", Some(store))
     }
 
     /// Names of every relation the engine knows: declared, defined by a rule
