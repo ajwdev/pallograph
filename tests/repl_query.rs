@@ -884,3 +884,18 @@ fn query_projects_to_head_variables() {
     assert!(!stdout.contains("N = "), "N leaked into the head: {stdout}");
     assert!(stderr.contains("Found"), "stderr: {stderr}");
 }
+
+/// `explain` plans a query and prints the operator tree without running it.
+#[test]
+fn explain_prints_plan() {
+    let (stdout, _) = run_session("explain k8s(_, \"Pod\", Ns, N, R)\n::quit\n");
+    assert!(stdout.contains("Stratum"), "no stratum header: {stdout}");
+    assert!(
+        stdout.contains("Iterate on k8s"),
+        "no k8s iterate: {stdout}"
+    );
+    assert!(
+        stdout.contains("Insert `__query`"),
+        "no query insert: {stdout}"
+    );
+}

@@ -41,6 +41,7 @@ fn command_completions() -> &'static [&'static str] {
         "show",
         "why",
         "query",
+        "explain",
         "define",
         "source",
         "load",
@@ -84,6 +85,7 @@ fn command_usage(head: &str) -> Option<&'static str> {
     Some(match head {
         "why" => "why <pred>(<args>...)",
         "query" => "query <body>   (or ?- <body>)",
+        "explain" => "explain <body>   (plan a query without running it)",
         "define" => "define <rule>.",
         "source" => "source <src>",
         "load" => "load <relation> <source>   (source is a file path or ! <cmd>)",
@@ -170,7 +172,7 @@ fn plan_completion(before: &str, aliases: &[String], relations: &[String]) -> Co
         "source" | "k8s::load" => CompletionPlan::Files,
         // `load <rel> <src>`: file-complete the second argument on.
         "load" if before[..word_start].split_whitespace().count() >= 2 => CompletionPlan::Files,
-        "show" | "why" | "query" | "smtlib" | "?-" => {
+        "show" | "why" | "query" | "explain" | "smtlib" | "?-" => {
             let cands = relations
                 .iter()
                 .filter(|r| r.starts_with(word))
@@ -327,6 +329,9 @@ fn print_help() {
         "  ?- _(<var>, ...) :- <atom>, ...       - project: anonymous head, report only the head variables; the rest are join keys"
     );
     println!("  query <body>                           - long form of ?-");
+    println!(
+        "  explain <body>                         - show the planner's operator tree for a query (don't run it)"
+    );
     println!(
         "  show                                   - list documented relations (arity + description)"
     );
@@ -1159,6 +1164,23 @@ fn session(
                         for n in names {
                             print_relation_detail(n, active, docs.get(n));
                         }
+                    }
+                    continue;
+                }
+                if let Some(raw) = line.strip_prefix("::explain ") {
+                    let raw = raw.trim();
+                    // Same body grammar as `?-`, projection included: an
+                    // anonymous head `_(R) :- ...` just sets the query rule's
+                    // head columns. This only compiles and plans, never runs.
+                    let (projection, body) = split_projection(raw);
+                    let vars = projection.unwrap_or_else(|| extract_vars(body));
+                    if vars.is_empty() {
+                        command_error!("No variables to bind. Name one (e.g. X).");
+                        continue;
+                    }
+                    let rule = format!("__query({}) :- {body}.", vars.join(", "));
+                    if let Err(e) = engine.explain_query(&rule) {
+                        command_error!("Error: {e:#}");
                     }
                     continue;
                 }

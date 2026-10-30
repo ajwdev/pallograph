@@ -414,16 +414,18 @@ impl CompiledProgram {
     }
 
     pub fn dump_plan(&mut self) -> Result<()> {
-        for (i, pred_names) in self.strata.iter().enumerate() {
-            println!(
-                "● Stratum {i} ({})",
-                pred_names
-                    .iter()
-                    .map(|s| format!("`{}`", s))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+        self.dump_plan_filtered(None)
+    }
 
+    /// Dump the planner's physical operator tree for just the rules whose head
+    /// is `pred` (and the stratum that holds them). Backs the REPL `explain`
+    /// command, which plans a single synthesized `__query` rule.
+    pub fn dump_plan_for(&mut self, pred: &str) -> Result<()> {
+        self.dump_plan_filtered(Some(pred))
+    }
+
+    fn dump_plan_filtered(&mut self, only: Option<&str>) -> Result<()> {
+        for (i, pred_names) in self.strata.iter().enumerate() {
             // Step B: collect rule_ids — must finish before calling Planner (&mut ir)
             let mut initial_ids: Vec<InstId> = vec![];
             let mut delta_ids: Vec<(InstId, NameId)> = vec![];
@@ -435,6 +437,9 @@ impl CompiledProgram {
                     let name = self.ir.resolve_name(*predicate);
 
                     if !pred_names.contains(name) {
+                        continue;
+                    }
+                    if only.is_some_and(|want| want != name) {
                         continue;
                     }
                     initial_ids.push(mangle_ir::InstId::new(idx));
@@ -455,6 +460,15 @@ impl CompiledProgram {
             if initial_ids.is_empty() {
                 continue;
             }
+
+            println!(
+                "● Stratum {i} ({})",
+                pred_names
+                    .iter()
+                    .map(|s| format!("`{}`", s))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
 
             // Step C: plan each rule and print the physical Op tree
             for rule_id in initial_ids {
@@ -1339,6 +1353,22 @@ impl Engine {
             }
         }
         self.backend.evaluate(&edb, std::slice::from_ref(&rule))
+    }
+
+    /// Compile the engine's rules together with `query_rule` and print the
+    /// planner's physical operator tree for that rule only, without evaluating
+    /// it. Backs the REPL `explain` command so a `?-` query's join plan can be
+    /// inspected: which atom leads the join, the index lookups, the filters.
+    /// The plan depends on the rules, not the loaded facts, so it is the same
+    /// whether the live state or a `use`d snapshot is active.
+    pub fn explain_query(&self, query_rule: &str) -> Result<()> {
+        let mut sources = vec![EDB_DECLS];
+        for s in &self.rule_sources {
+            sources.push(s.as_str());
+        }
+        sources.push(query_rule);
+        let mut compiled = CompiledProgram::new(&sources)?;
+        compiled.dump_plan_for("__query")
     }
 
     /// Names of every relation the engine knows: declared, defined by a rule
