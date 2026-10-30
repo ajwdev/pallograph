@@ -24,6 +24,7 @@ pub struct FrozenState {
     pub inputs: EngineInputs,
 }
 
+#[derive(Debug)]
 pub struct Diff {
     pub added: BTreeMap<String, BTreeSet<Vec<Value>>>,
     pub removed: BTreeMap<String, BTreeSet<Vec<Value>>>,
