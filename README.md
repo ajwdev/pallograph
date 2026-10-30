@@ -163,6 +163,19 @@ Other flags worth knowing:
 - `--format default|compact|table|ndjson`: output format.
 - `--script <file>`: run commands from a file (`-` for stdin) instead of the
   REPL; see "Script it" above.
+- `--watch`: watch every `k8s` datasource, as if each set `watch = true`
+  (see below). Mainly for running without a config file.
+
+**Watching a cluster.** Set `watch = true` on a `k8s` datasource to keep
+watching it instead of listing it once at startup (one watched datasource
+per profile for now). Each command sees the cluster as of when it started,
+and a `live: 2 updated, 1 removed` line says what changed since the last
+one. Pair it with `--backend dd`, which applies each batch of changes
+incrementally; the interpreter re-evaluates everything. While watching, the
+watcher owns the cluster's objects: `rollback` is refused, and a `+`/`-`
+edit to a watched object lasts until that object next changes. Snapshots
+still work, so `snapshot morning` then later `rbac::diff morning` shows
+what the cluster gained since.
 
 ## How it works
 

@@ -118,6 +118,30 @@ fn expand_pattern(pattern: &str) -> Box<dyn Iterator<Item = Result<std::path::Pa
     }
 }
 
+/// The resources to read from a cluster, from [`CLUSTER_RESOURCES`].
+pub(crate) fn cluster_resources() -> impl Iterator<Item = ApiResource> {
+    CLUSTER_RESOURCES
+        .iter()
+        .map(|&(group, version, kind, plural)| ApiResource {
+            group: group.to_string(),
+            version: version.to_string(),
+            api_version: if group.is_empty() {
+                version.to_string()
+            } else {
+                format!("{group}/{version}")
+            },
+            kind: kind.to_string(),
+            plural: plural.to_string(),
+        })
+}
+
+/// True when the cluster doesn't serve the API at all (ex: no Karpenter
+/// CRDs). An unknown group is a plain-text 404, not a NotFound Status, so
+/// this matches on the code.
+pub(crate) fn is_not_served(error: &kube::Error) -> bool {
+    matches!(error, kube::Error::Api(status) if status.code == 404)
+}
+
 pub struct ClusterSource {
     objects: Vec<(DynamicObject, Option<(String, String)>)>,
 }
@@ -130,29 +154,15 @@ pub struct ShellSource {
 impl ClusterSource {
     pub async fn fetch(client: Client) -> Result<Self> {
         let mut objects = Vec::new();
-        for &(group, version, kind, plural) in CLUSTER_RESOURCES {
-            let ar = ApiResource {
-                group: group.to_string(),
-                version: version.to_string(),
-                api_version: if group.is_empty() {
-                    version.to_string()
-                } else {
-                    format!("{group}/{version}")
-                },
-                kind: kind.to_string(),
-                plural: plural.to_string(),
-            };
+        for ar in cluster_resources() {
             let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
             let list = match api.list(&ListParams::default()).await {
                 Ok(list) => list,
-                // The cluster doesn't serve this API (ex: no Karpenter CRDs).
-                // An unknown group is a plain-text 404, not a NotFound
-                // Status, so match on the code.
-                Err(kube::Error::Api(status)) if status.code == 404 => {
-                    eprintln!("    {kind}: {} not served, skipping", ar.api_version);
+                Err(e) if is_not_served(&e) => {
+                    eprintln!("    {}: {} not served, skipping", ar.kind, ar.api_version);
                     continue;
                 }
-                Err(e) => return Err(e).with_context(|| format!("listing {kind}")),
+                Err(e) => return Err(e).with_context(|| format!("listing {}", ar.kind)),
             };
             for obj in list {
                 objects.push((obj, Some((ar.api_version.clone(), ar.kind.clone()))));
@@ -339,22 +349,35 @@ pub struct ObjectFacts {
 /// Like [`populate`], but keeps each object's facts apart (in source order)
 /// so the engine can replace them when the same object is loaded again.
 pub fn object_facts(source: &mut dyn FactSource) -> Result<Vec<ObjectFacts>> {
-    let mut objects = Vec::new();
-    for (obj, type_hint) in source.k8s_objects()? {
-        let type_hint = type_hint.as_ref().map(|(av, k)| (av.as_str(), k.as_str()));
-        let (api_version, kind) = resolve_type(&obj, type_hint);
-        let key = ObjectKey::new(
-            api_version,
-            kind,
-            &obj.namespace().unwrap_or_default(),
-            &obj.name_any(),
-        );
-        objects.push(ObjectFacts {
-            key,
-            facts: emitted_facts(&obj, type_hint),
-        });
+    Ok(source
+        .k8s_objects()?
+        .iter()
+        .map(|(obj, type_hint)| {
+            let type_hint = type_hint.as_ref().map(|(av, k)| (av.as_str(), k.as_str()));
+            single_object_facts(obj, type_hint)
+        })
+        .collect())
+}
+
+/// One object run through the projection pipeline. `type_hint` is its
+/// (apiVersion, kind) when the source knows it (cluster lists and watches
+/// leave them off each item).
+pub fn single_object_facts(obj: &DynamicObject, type_hint: Option<(&str, &str)>) -> ObjectFacts {
+    ObjectFacts {
+        key: object_key(obj, type_hint),
+        facts: emitted_facts(obj, type_hint),
     }
-    Ok(objects)
+}
+
+/// The key `obj` is loaded under.
+pub fn object_key(obj: &DynamicObject, type_hint: Option<(&str, &str)>) -> ObjectKey {
+    let (api_version, kind) = resolve_type(obj, type_hint);
+    ObjectKey::new(
+        api_version,
+        kind,
+        &obj.namespace().unwrap_or_default(),
+        &obj.name_any(),
+    )
 }
 
 /// Drain all facts from a MemStore into a Vec for later replay.

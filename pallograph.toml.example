@@ -16,6 +16,9 @@ default_profile = "dev"
 # Live Kubernetes cluster via KUBECONFIG / in-cluster auth.
 [datasources.prod]
 source = "k8s"
+# Keep watching it instead of listing it once at startup (pairs best with
+# --backend dd). At most one watched datasource per profile for now.
+# watch = true
 
 # Local directory or file of k8s JSON manifests.
 [datasources.local]

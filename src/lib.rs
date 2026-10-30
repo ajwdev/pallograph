@@ -22,3 +22,4 @@ pub(crate) mod selector;
 pub mod smt;
 pub mod snapshot;
 pub(crate) mod value;
+pub mod watch;

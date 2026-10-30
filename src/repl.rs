@@ -17,12 +17,13 @@ use rustyline::{Context, Helper};
 
 use crate::dd::session::LazyProvenance;
 use crate::edb::{K8sManifestsSource, ObjectFacts, ObjectKey, ShellSource};
-use crate::engine::{Change, Engine, EvalStore, RelationDoc};
+use crate::engine::{ApplySummary, Change, Engine, EvalStore, RelationDoc};
 use crate::load;
 use crate::query;
 use crate::rbac;
 use crate::smt;
 use crate::snapshot::{Diff, FrozenState};
+use crate::watch::WatchStatus;
 
 struct ReplHelper {
     path_completer: FilenameCompleter,
@@ -369,7 +370,7 @@ fn print_help() {
         "  snapshot <name>                        - save current eval state, and the facts and rules it came from, as a named snapshot"
     );
     println!(
-        "  rollback <name>                        - restore the facts and rules saved by snapshot <name>, re-evaluate (the snapshot stays; each one holds a copy of the facts)"
+        "  rollback <name>                        - restore the facts and rules saved by snapshot <name>, re-evaluate (the snapshot stays; each one holds a copy of the facts; not with --watch)"
     );
     println!(
         "  diff <name>                            - diff the state in use (live, unless `use` points elsewhere) against a named snapshot"
@@ -603,6 +604,22 @@ fn run_match(
     true
 }
 
+/// The line printed before a command when the cluster watcher changed the
+/// live state since the last one, e.g. `live: 2 updated, 1 removed`. None
+/// when nothing changed.
+fn live_changes_line(summary: ApplySummary) -> Option<String> {
+    let parts: Vec<String> = [
+        (summary.added, "added"),
+        (summary.updated, "updated"),
+        (summary.retracted, "removed"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, what)| format!("{count} {what}"))
+    .collect();
+    (!parts.is_empty()).then(|| format!("live: {}", parts.join(", ")))
+}
+
 /// The interactive prompt, red like the rest of the REPL's chrome. `use`
 /// with no snapshot (`None`) points it back at the plain prompt; `use
 /// <name>` names the snapshot queries are pointed at.
@@ -770,6 +787,7 @@ pub fn run(
     store: EvalStore,
     format: OutputFormat,
     rc: Vec<String>,
+    watch: Option<&WatchStatus>,
 ) -> Result<SessionStatus> {
     // Banner is interactive chrome: skip it when stdout is redirected so a
     // piped session (e.g. `... | pallograph --format ndjson > out.json`) yields
@@ -797,6 +815,7 @@ pub fn run(
         store,
         format,
         rc,
+        watch,
         Input::Editor { rl, history_path },
     )
 }
@@ -810,6 +829,7 @@ pub fn run_script(
     format: OutputFormat,
     path: &std::path::Path,
     rc: Vec<String>,
+    watch: Option<&WatchStatus>,
 ) -> Result<SessionStatus> {
     let reader: Box<dyn std::io::BufRead> = if path == std::path::Path::new("-") {
         Box::new(std::io::stdin().lock())
@@ -818,7 +838,7 @@ pub fn run_script(
             .with_context(|| format!("opening script {}", path.display()))?;
         Box::new(std::io::BufReader::new(file))
     };
-    session(engine, store, format, rc, Input::Script(reader))
+    session(engine, store, format, rc, watch, Input::Script(reader))
 }
 
 /// Lock the shared engine, treating a poisoned lock (a panic while it was
@@ -832,6 +852,7 @@ fn session(
     store: EvalStore,
     format: OutputFormat,
     rc: Vec<String>,
+    watch: Option<&WatchStatus>,
     mut input: Input,
 ) -> Result<SessionStatus> {
     // A script stops at its first failed line; the REPL carries on.
@@ -968,6 +989,9 @@ fn session(
                 // changes it partway through.
                 let mut engine_guard = lock_engine(engine);
                 let engine = &mut *engine_guard;
+                if let Some(line) = watch.and_then(|w| live_changes_line(w.take())) {
+                    eprintln!("{line}");
+                }
                 let is_mutator = line.starts_with(['+', '-', '~']);
                 if engine.version() != store_version && !is_mutator {
                     match engine.evaluate() {
@@ -1408,6 +1432,14 @@ fn session(
 
                 if line == "::rollback" || line.starts_with("::rollback ") {
                     if refuse_if_in_use(&in_use, &mut command_failed) {
+                        continue;
+                    }
+                    if watch.is_some() {
+                        // A rollback swaps the whole EDB behind the watcher's back,
+                        // so objects deleted since the snapshot would come back.
+                        command_error!(
+                            "rollback is unavailable while watching a cluster: the watcher owns the live state."
+                        );
                         continue;
                     }
                     let name = line.strip_prefix("::rollback").unwrap_or("").trim();
@@ -3893,6 +3925,23 @@ mod query_helper_tests {
         assert_eq!(
             prompt(Some("before")),
             "\x1b[1;31mpallograph (before)>\x1b[0m "
+        );
+    }
+
+    /// The watcher's line names only what changed, and nothing at all when
+    /// nothing did. A retract of an object already gone changed nothing.
+    #[test]
+    fn live_changes_line_names_what_changed() {
+        assert_eq!(live_changes_line(ApplySummary::default()), None);
+        let summary = ApplySummary {
+            updated: 2,
+            retracted: 1,
+            removed_absent: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            live_changes_line(summary).as_deref(),
+            Some("live: 2 updated, 1 removed")
         );
     }
 
