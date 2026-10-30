@@ -899,3 +899,36 @@ fn explain_prints_plan() {
         "no query insert: {stdout}"
     );
 }
+
+/// A plan with only scans and constant-key lookups has a measured cost: the
+/// total is labelled exact, with no `~` estimate marker.
+#[test]
+fn explain_cost_exact_for_constant_key() {
+    let (stdout, _) = run_session("explain k8s(_, \"Pod\", Ns, N, R)\n::quit\n");
+    assert!(stdout.contains("Cost ("), "no cost section: {stdout}");
+    assert!(
+        stdout.contains("lookup col 1 = \"Pod\":") && stdout.contains("match)"),
+        "no exact constant-key match count: {stdout}"
+    );
+    assert!(
+        stdout.contains("row visits (exact)"),
+        "total not labelled exact: {stdout}"
+    );
+}
+
+/// A lookup keyed on a variable (bound per outer row) has no single match
+/// count, so its fan-out is an average: the line and the total carry `~` and
+/// the total is labelled an estimate.
+#[test]
+fn explain_cost_estimate_for_variable_key() {
+    let (stdout, _) =
+        run_session("explain k8s(_, \"Pod\", Ns, N, R), host_network_pod(Ns, N)\n::quit\n");
+    assert!(
+        stdout.contains("/key over"),
+        "no averaged per-key fan-out: {stdout}"
+    );
+    assert!(
+        stdout.contains("row visits (estimate"),
+        "total not labelled estimate: {stdout}"
+    );
+}

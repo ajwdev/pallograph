@@ -1179,7 +1179,9 @@ fn session(
                         continue;
                     }
                     let rule = format!("__query({}) :- {body}.", vars.join(", "));
-                    if let Err(e) = engine.explain_query(&rule) {
+                    // The active store backs the cost estimate's row counts.
+                    let active = active_store(&current_store, &snapshots, &in_use);
+                    if let Err(e) = engine.explain_query(&rule, active) {
                         command_error!("Error: {e:#}");
                     }
                     continue;
