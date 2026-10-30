@@ -19,7 +19,7 @@ use mangle_interpreter::ProvenanceEntry;
 use crate::dd::build::Annotation;
 use crate::dd::session::LazyProvenance;
 use crate::dd::value::{Row, SENTINEL_EDB};
-use crate::engine::{Engine, EvalStore};
+use crate::engine::{Engine, EvalStore, RelationDoc};
 use crate::query::{
     self, body_relations, count_top_level_args, extract_vars, single_atom, split_atom,
     split_projection, suggest,
@@ -117,6 +117,58 @@ pub trait Core {
     /// The facts added and removed going from `before` to `after`, in every
     /// relation or only in `relation`.
     fn diff(&self, before: &At, after: &At, relation: Option<&str>) -> Result<Diff, DiffError>;
+
+    /// Describe relations: with no `names`, every relation holding facts in
+    /// the state, sorted by name; otherwise each of `names`, in order, known
+    /// or not.
+    fn relations(&self, at: &At, names: &[&str]) -> Result<Vec<RelationInfo>, ReadError>;
+
+    /// Add a fact to the live state. `false` if it was already there.
+    fn assert_fact(&self, fact: Fact) -> Result<bool, WriteError>;
+
+    /// Remove a fact from the live state. `false` if it wasn't there.
+    fn retract_fact(&self, fact: &Fact) -> Result<bool, WriteError>;
+
+    /// Remove `old` and add `new` in one step. `false` if `old` wasn't there;
+    /// `new` is added either way.
+    fn replace_fact(&self, old: &Fact, new: Fact) -> Result<bool, WriteError>;
+
+    /// Add a rule to the live state. A rule that doesn't compile or evaluate
+    /// is rejected and the rules are left as they were.
+    fn define(&self, rule: &str) -> Result<(), WriteError>;
+}
+
+/// A relation, as `show` describes it.
+#[derive(Debug, Clone)]
+pub struct RelationInfo {
+    pub name: String,
+    /// The width of the relation's rows, when the state holds any.
+    pub arity: Option<usize>,
+    /// From the relation's `Decl`, if it has one.
+    pub doc: Option<RelationDoc>,
+}
+
+/// One ground fact: a relation and a row of constants.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fact {
+    pub relation: String,
+    pub row: Vec<Value>,
+}
+
+/// Why a write was refused or failed. Each displays as the line the REPL
+/// prints for it.
+#[derive(Debug, thiserror::Error)]
+pub enum WriteError {
+    #[error("arity mismatch: {relation}/{arity} expects {arity} arg(s), got {given}")]
+    ArityMismatch {
+        relation: String,
+        arity: usize,
+        given: usize,
+    },
+    /// The write landed but the state didn't evaluate afterwards, or a rule
+    /// was rejected.
+    #[error("Error: {0:#}")]
+    Evaluation(anyhow::Error),
 }
 
 /// A snapshot just taken.
@@ -264,35 +316,40 @@ impl State<'_> {
     }
 }
 
-/// Why an [`At`] didn't resolve. Each method's own error takes it in.
-enum StateError {
+/// Why a read at an [`At`] failed: the snapshot doesn't exist, or the live
+/// state didn't evaluate. Methods with more ways to fail take it into their
+/// own error type.
+#[derive(Debug, thiserror::Error)]
+pub enum ReadError {
+    #[error("No snapshot named '{0}'.")]
     UnknownSnapshot(String),
+    #[error("Error: {0:#}")]
     Evaluation(anyhow::Error),
 }
 
-impl From<StateError> for QueryError {
-    fn from(error: StateError) -> Self {
+impl From<ReadError> for QueryError {
+    fn from(error: ReadError) -> Self {
         match error {
-            StateError::UnknownSnapshot(name) => QueryError::UnknownSnapshot(name),
-            StateError::Evaluation(e) => QueryError::Evaluation(e),
+            ReadError::UnknownSnapshot(name) => QueryError::UnknownSnapshot(name),
+            ReadError::Evaluation(e) => QueryError::Evaluation(e),
         }
     }
 }
 
-impl From<StateError> for ProvenanceError {
-    fn from(error: StateError) -> Self {
+impl From<ReadError> for ProvenanceError {
+    fn from(error: ReadError) -> Self {
         match error {
-            StateError::UnknownSnapshot(name) => ProvenanceError::UnknownSnapshot(name),
-            StateError::Evaluation(e) => ProvenanceError::Evaluation(e),
+            ReadError::UnknownSnapshot(name) => ProvenanceError::UnknownSnapshot(name),
+            ReadError::Evaluation(e) => ProvenanceError::Evaluation(e),
         }
     }
 }
 
-impl From<StateError> for DiffError {
-    fn from(error: StateError) -> Self {
+impl From<ReadError> for DiffError {
+    fn from(error: ReadError) -> Self {
         match error {
-            StateError::UnknownSnapshot(name) => DiffError::UnknownSnapshot(name),
-            StateError::Evaluation(e) => DiffError::Evaluation(e),
+            ReadError::UnknownSnapshot(name) => DiffError::UnknownSnapshot(name),
+            ReadError::Evaluation(e) => DiffError::Evaluation(e),
         }
     }
 }
@@ -362,6 +419,18 @@ impl LocalCore {
         store
     }
 
+    /// Catch the live state up after a write. A DD session already holds the
+    /// change and the next read reads it from there, so a run of writes stays
+    /// fast. The interpreter evaluates now, so a write that breaks a rule
+    /// fails here rather than on some later read.
+    fn settle(&self, engine: &Engine) -> Result<(), WriteError> {
+        if !engine.has_session() {
+            let store = engine.evaluate().map_err(WriteError::Evaluation)?;
+            self.remember_live(engine, store);
+        }
+        Ok(())
+    }
+
     /// The live state as last evaluated, which may be behind the engine.
     /// For tab completion, where an older list of relations is fine.
     pub fn last_live(&self) -> Arc<EvalStore> {
@@ -385,16 +454,16 @@ impl LocalCore {
         engine: &Engine,
         snapshots: &'a BTreeMap<String, FrozenState>,
         at: &At,
-    ) -> Result<State<'a>, StateError> {
+    ) -> Result<State<'a>, ReadError> {
         match at {
             At::Live => self
                 .live_store(engine)
                 .map(State::Live)
-                .map_err(StateError::Evaluation),
+                .map_err(ReadError::Evaluation),
             At::Snapshot(name) => snapshots
                 .get(name)
                 .map(State::Frozen)
-                .ok_or_else(|| StateError::UnknownSnapshot(name.clone())),
+                .ok_or_else(|| ReadError::UnknownSnapshot(name.clone())),
         }
     }
 
@@ -676,6 +745,92 @@ impl Core for LocalCore {
             diff.removed.retain(|name, _| name == relation);
         }
         Ok(diff)
+    }
+
+    fn relations(&self, at: &At, names: &[&str]) -> Result<Vec<RelationInfo>, ReadError> {
+        let engine = self.engine();
+        let snapshots = self.snapshots();
+        let state = self.read_state(&engine, &snapshots, at)?;
+        let store = state.store();
+        let mut docs = engine.relation_docs().unwrap_or_default();
+        let names: Vec<String> = if names.is_empty() {
+            // Names starting with `:` are built-ins, not relations anyone
+            // declared.
+            let mut held: Vec<String> = store
+                .relation_names()
+                .filter(|name| !name.starts_with(':'))
+                .map(str::to_string)
+                .collect();
+            held.sort_unstable();
+            held
+        } else {
+            names.iter().map(|name| name.to_string()).collect()
+        };
+        Ok(names
+            .into_iter()
+            .map(|name| RelationInfo {
+                arity: store.scan(&name).first().map(Vec::len),
+                doc: docs.remove(&name),
+                name,
+            })
+            .collect())
+    }
+
+    fn assert_fact(&self, fact: Fact) -> Result<bool, WriteError> {
+        let mut engine = self.engine();
+        check_arity(&engine, &fact)?;
+        if !engine.add_fact(fact.relation, fact.row) {
+            return Ok(false);
+        }
+        self.settle(&engine)?;
+        Ok(true)
+    }
+
+    fn retract_fact(&self, fact: &Fact) -> Result<bool, WriteError> {
+        let mut engine = self.engine();
+        if !engine.retract_fact(&fact.relation, &fact.row) {
+            return Ok(false);
+        }
+        self.settle(&engine)?;
+        Ok(true)
+    }
+
+    fn replace_fact(&self, old: &Fact, new: Fact) -> Result<bool, WriteError> {
+        let mut engine = self.engine();
+        check_arity(&engine, &new)?;
+        let removed = engine.retract_fact(&old.relation, &old.row);
+        engine.add_fact(new.relation, new.row);
+        self.settle(&engine)?;
+        Ok(removed)
+    }
+
+    fn define(&self, rule: &str) -> Result<(), WriteError> {
+        let mut engine = self.engine();
+        let checkpoint = engine.rules_len();
+        let rule = format!("{}.", rule.trim().trim_end_matches('.').trim());
+        let result = engine.add_rule(rule).and_then(|()| engine.evaluate());
+        match result {
+            Ok(store) => {
+                self.remember_live(&engine, store);
+                Ok(())
+            }
+            Err(e) => {
+                engine.truncate_rules(checkpoint);
+                Err(WriteError::Evaluation(e))
+            }
+        }
+    }
+}
+
+/// Refuse a fact whose width doesn't match its relation's existing facts.
+fn check_arity(engine: &Engine, fact: &Fact) -> Result<(), WriteError> {
+    match engine.relation_arity(&fact.relation) {
+        Some(arity) if arity != fact.row.len() => Err(WriteError::ArityMismatch {
+            relation: fact.relation.clone(),
+            arity,
+            given: fact.row.len(),
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -1177,6 +1332,90 @@ mod tests {
                     .to_string(),
                 "No snapshot named 'nope'."
             );
+        }
+    }
+
+    fn fact(relation: &str, row: &[&str]) -> Fact {
+        Fact {
+            relation: relation.to_string(),
+            row: row.iter().map(|value| s(value)).collect(),
+        }
+    }
+
+    #[test]
+    fn relations_lists_what_the_state_holds_or_names_asked_for() {
+        for core in cores() {
+            let listed = core.relations(&At::Live, &[]).unwrap();
+            let names: Vec<&str> = listed.iter().map(|r| r.name.as_str()).collect();
+            // Sorted. DD also lists the prelude's declared input relations
+            // while they're empty; the interpreter only lists ones with facts.
+            assert!(names.is_sorted(), "{names:?}");
+            let edge = listed.iter().find(|r| r.name == "edge").unwrap();
+            assert_eq!(edge.arity, Some(2));
+            assert!(names.contains(&"path"), "{names:?}");
+            let columns: Vec<&str> = edge
+                .doc
+                .as_ref()
+                .unwrap()
+                .columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect();
+            assert_eq!(columns, ["Src", "Dst"]);
+
+            let asked = core.relations(&At::Live, &["path", "nosuch"]).unwrap();
+            assert_eq!(asked[1].name, "nosuch");
+            assert_eq!((asked[1].arity, asked[1].doc.is_none()), (None, true));
+        }
+    }
+
+    /// Each write shows up in the next read, on both backends (DD reads it
+    /// from the session, the interpreter evaluates on the write).
+    #[test]
+    fn writes_show_up_in_the_next_read() {
+        let paths_from_c =
+            |core: &LocalCore| sorted(core.query(&At::Live, "path(\"c\", Y)").unwrap()).rows;
+        for core in cores() {
+            assert!(core.assert_fact(fact("edge", &["c", "d"])).unwrap());
+            assert!(!core.assert_fact(fact("edge", &["c", "d"])).unwrap());
+            assert_eq!(paths_from_c(&core), [vec![s("d")]]);
+
+            assert!(
+                core.replace_fact(&fact("edge", &["c", "d"]), fact("edge", &["c", "e"]))
+                    .unwrap()
+            );
+            assert!(
+                !core
+                    .replace_fact(&fact("edge", &["c", "x"]), fact("edge", &["c", "f"]))
+                    .unwrap()
+            );
+            assert_eq!(paths_from_c(&core), [vec![s("e")], vec![s("f")]]);
+
+            assert!(core.retract_fact(&fact("edge", &["c", "e"])).unwrap());
+            assert!(!core.retract_fact(&fact("edge", &["c", "e"])).unwrap());
+            assert_eq!(paths_from_c(&core), [vec![s("f")]]);
+
+            assert_eq!(
+                core.assert_fact(fact("edge", &["c"]))
+                    .unwrap_err()
+                    .to_string(),
+                "arity mismatch: edge/2 expects 2 arg(s), got 1"
+            );
+        }
+    }
+
+    /// A rule that doesn't compile is rejected and leaves the rules as they
+    /// were; a good one is queryable straight away.
+    #[test]
+    fn define_adds_good_rules_and_rejects_bad_ones() {
+        for core in cores() {
+            let rules = core.engine().rules_len();
+            assert!(core.define("reach_c(X) :- path(X, ").is_err());
+            assert_eq!(core.engine().rules_len(), rules);
+
+            core.define("reach_c(X) :- path(X, \"c\").").unwrap();
+            let reach = sorted(core.query(&At::Live, "reach_c(X)").unwrap());
+            assert_eq!(reach.rows, [vec![s("a")], vec![s("b")]]);
         }
     }
 }
