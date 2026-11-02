@@ -6,8 +6,6 @@ use mangle_common::Value;
 use mangle_interpreter::MemStore;
 use serde_json::Value as Json;
 
-use crate::engine::Engine;
-
 /// Read bytes from `source`: if it starts with `!`, execute the rest as a shell command and
 /// capture stdout; otherwise treat it as a file path.
 pub fn read_source(source: &str) -> Result<Vec<u8>> {
@@ -52,38 +50,14 @@ pub fn load_tuples_into_store(store: &mut MemStore, relation: &str, source: &str
     Ok(count)
 }
 
-/// Load flat tuples from `source` into `relation` on `engine`.
+/// Read flat tuples from `source` (a file path, or `! <command>` for a
+/// command's output), for loading into a relation.
 ///
 /// Accepted formats:
 /// - Top-level JSON array of arrays: `[["a","b"], ["c","d"]]`
 /// - NDJSON: one JSON array per line
-///
-/// Returns the number of facts inserted. Arity validation is deferred to the next
-/// `engine.evaluate()` call — Mangle will surface a clear error on mismatch.
-pub fn load_tuples(engine: &mut Engine, relation: &str, source: &str) -> Result<usize> {
-    let bytes = read_source(source)?;
-    let tuples = parse_tuples(&bytes)?;
-    // Determine expected arity: from existing EDB facts, or from the first tuple in this batch.
-    let expected = engine
-        .relation_arity(relation)
-        .or_else(|| tuples.first().map(|t| t.len()));
-    if let Some(arity) = expected {
-        for (i, tuple) in tuples.iter().enumerate() {
-            if tuple.len() != arity {
-                bail!(
-                    "arity mismatch: {relation}/{arity} expects {arity} column(s), \
-                     but tuple {i} has {} — check your query or source",
-                    tuple.len()
-                );
-            }
-        }
-    }
-
-    Ok(engine.add_facts(
-        tuples
-            .into_iter()
-            .map(|tuple| (relation.to_string(), tuple)),
-    ))
+pub fn read_tuples(source: &str) -> Result<Vec<Vec<Value>>> {
+    parse_tuples(&read_source(source)?)
 }
 
 fn parse_tuples(bytes: &[u8]) -> Result<Vec<Vec<Value>>> {
@@ -218,21 +192,10 @@ mod tests {
     }
 
     #[test]
-    fn load_via_shell() {
-        let store = mangle_interpreter::MemStore::new();
-        let mut engine = Engine::new(
-            store,
-            std::path::Path::new("rules"),
-            Box::new(crate::engine::InterpreterBackend),
-        )
-        .expect("engine");
-
-        let n = load_tuples(
-            &mut engine,
-            "can",
-            r#"! printf '[["alice","default","","pods","get"]]'"#,
-        )
-        .expect("load via shell");
-        assert_eq!(n, 1);
+    fn read_via_shell() {
+        let tuples = read_tuples(r#"! printf '[["alice","default","","pods","get"]]'"#)
+            .expect("read via shell");
+        assert_eq!(tuples.len(), 1);
+        assert_eq!(tuples[0].len(), 5);
     }
 }
