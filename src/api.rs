@@ -29,6 +29,7 @@ use crate::query::{
 use crate::rbac::diff::{AccessDiff, access_diff};
 use crate::rbac::{PermissionTables, RbacAccessModel, Violation};
 use crate::selector::parse_selector;
+use crate::smt::SmtEncoder;
 use crate::smt::scheduling::{self, CoverageGap, PlacementResult, UnschedulablePod};
 use crate::snapshot::{Diff, FrozenState};
 use crate::source::source_program;
@@ -215,6 +216,15 @@ pub trait Core {
     /// that no Karpenter NodePool can satisfy.
     fn sched_karpenter_gaps(&self, at: &At, max_gaps: usize)
     -> Result<Vec<CoverageGap>, ReadError>;
+
+    /// The join plan the planner picks for a `?-` query body, with a cost
+    /// estimate from the state's row counts, as text. Plans without
+    /// evaluating.
+    fn explain(&self, at: &At, query: &str) -> Result<String, QueryError>;
+
+    /// The SMT-LIB encoding of `relations` in the state at `at`, as Z3 would
+    /// see them.
+    fn smtlib(&self, at: &At, relations: &[&str]) -> Result<String, ReadError>;
 }
 
 /// A permission to check with [`Core::rbac_reaches`].
@@ -1165,9 +1175,55 @@ impl Core for LocalCore {
             scheduling::find_karpenter_coverage_gaps(store, max_gaps)
         })
     }
+
+    fn explain(&self, at: &At, query: &str) -> Result<String, QueryError> {
+        // Same body grammar as `?-`, projection included: an anonymous head
+        // `_(R) :- ...` just sets the query rule's head columns.
+        let (projection, body) = split_projection(query.trim());
+        let vars = projection.unwrap_or_else(|| extract_vars(body));
+        if vars.is_empty() {
+            return Err(QueryError::NoVariables);
+        }
+        let rule = format!("__query({}) :- {body}.", vars.join(", "));
+        let engine = self.engine();
+        let snapshots = self.snapshots();
+        // The plan depends only on the rules; the state's row counts back
+        // the cost estimate.
+        let state = self.read_state(&engine, &snapshots, at)?;
+        engine
+            .explain_query(&rule, state.store())
+            .map_err(QueryError::Evaluation)
+    }
+
+    fn smtlib(&self, at: &At, relations: &[&str]) -> Result<String, ReadError> {
+        self.with_store(at, |store| {
+            let config = z3::Config::new();
+            let context = z3::Context::new(&config);
+            let mut encoder = SmtEncoder::new(&context);
+            encoder.load(store, relations);
+            encoder.to_smtlib()
+        })
+    }
 }
 
 impl LocalCore {
+    /// Put back the facts and rules saved by snapshot `name` and evaluate
+    /// them. Not part of [`Core`]: on a shared core it would reset the live
+    /// state under every client (and under a cluster watcher).
+    pub fn rollback(&self, name: &str) -> Result<(), ReadError> {
+        let mut engine = self.engine();
+        let snapshots = self.snapshots();
+        let frozen = snapshots
+            .get(name)
+            .ok_or_else(|| ReadError::UnknownSnapshot(name.to_string()))?;
+        engine
+            .restore_inputs(&frozen.inputs)
+            .map_err(ReadError::Evaluation)?;
+        let store = engine.evaluate().map_err(ReadError::Evaluation)?;
+        self.remember_live(&engine, store);
+        Ok(())
+    }
+
     /// Run `analysis` over the state at `at`, for the checks that read a
     /// whole store.
     fn with_store<T>(
@@ -1944,6 +2000,56 @@ mod tests {
             let missing = At::Snapshot("nope".to_string());
             assert_eq!(
                 core.sched_node_selector(&missing).unwrap_err().to_string(),
+                "No snapshot named 'nope'."
+            );
+        }
+    }
+
+    /// `explain` returns the plan as text without running the query; a
+    /// query with nothing to report is refused like `?-`.
+    #[test]
+    fn explain_returns_the_plan_without_running_it() {
+        for core in cores() {
+            let version = core.version();
+            let plan = core.explain(&At::Live, "path(\"a\", Y)").unwrap();
+            assert!(plan.contains("__query"), "{plan}");
+            assert!(plan.contains("Iterate on path"), "{plan}");
+            assert!(plan.contains("Cost (rows visited per probe"), "{plan}");
+            assert_eq!(
+                core.explain(&At::Live, "path(\"a\", \"b\")")
+                    .unwrap_err()
+                    .to_string(),
+                "No variables to bind. Name one (e.g. X)."
+            );
+            assert_eq!(core.version(), version);
+        }
+    }
+
+    #[test]
+    fn smtlib_encodes_the_relations_asked_for() {
+        for core in cores() {
+            let smtlib = core.smtlib(&At::Live, &["edge"]).unwrap();
+            assert!(smtlib.contains("edge"), "{smtlib}");
+        }
+    }
+
+    /// `rollback` puts back a snapshot's facts and rules.
+    #[test]
+    fn rollback_restores_a_snapshot() {
+        for core in cores() {
+            core.snapshot("before").unwrap();
+            core.assert_fact(fact("edge", &["c", "d"])).unwrap();
+            core.define("reach_d(X) :- path(X, \"d\").").unwrap();
+            core.rollback("before").unwrap();
+            assert!(
+                core.query(&At::Live, "path(\"c\", Y)")
+                    .unwrap()
+                    .rows
+                    .is_empty()
+            );
+            assert!(core.query(&At::Live, "reach_d(X)").is_err());
+            assert_eq!(
+                core.rollback("nope").unwrap_err().to_string(),
                 "No snapshot named 'nope'."
             );
         }

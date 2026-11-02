@@ -43,6 +43,33 @@ Only the non-obvious parts:
   - `DdBackend` (`src/dd/`) - incremental evaluation on differential-dataflow.
     Provenance (`\why`) is lazy and opt-in (`--provenance`); see
     `docs/lazy-provenance.md`.
+- `src/api.rs` - the `Core` trait, everything a client asks of the core:
+  queries, provenance (the REPL's `why`; the API says "provenance"),
+  snapshots and diffs, fact and rule writes, loading, selector matches,
+  the `rbac::`/`sched::` checks, `explain` and `smtlib`. An `At { Live,
+  Snapshot }` picks the state a read sees. `LocalCore` answers in-process:
+  it owns the shared `Engine` (behind a mutex, which a cluster watcher also
+  feeds), the named snapshots, and the live state cached by
+  `Engine::version()`. The REPL goes through `Core` for every command, so
+  a remote client (gRPC, planned) can implement the same trait; keep new
+  commands on it. Results are plain Rust types, and each error displays as
+  the line the REPL prints. `LocalCore::rollback` is deliberately not on
+  the trait: on a shared core it would reset everyone's live state.
+- Clients do the I/O; the core does anything that has to agree with the
+  rules. The REPL reads files and runs `!` commands; the core turns k8s
+  objects into facts (`edb::single_object_facts`) and splits a sourced
+  file into facts and rules (`src/source.rs`). `src/delta.rs` diffs two
+  renders of the same manifests for `k8s::apply-delta`.
+- `?-` and `k8s::match` are reads: they evaluate over the state plus a
+  query rule or extra facts (`Engine::evaluate_query_on`,
+  `Engine::evaluate_with`) and leave nothing in the engine. Name a result
+  with `define` to reuse it.
+- `Engine::version()` is the DD worker's settled epoch (the interpreter
+  counts changes instead). Rebuilds continue from it, so it never goes
+  backwards; it is the one notion of time, not a second counter.
+- `src/watch.rs` - with `watch = true` on a `k8s` datasource (or
+  `--watch`), kube watchers keep the engine current through
+  `Engine::apply_changes`, one DD commit per batch.
 - `src/builtins.txt` - built-in K8s/EKS principals filtered from SMT output.
   Its header documents how to regenerate it.
 - `api-resources.txt` (repo root) is `include_str!`'d by the fixture
@@ -81,6 +108,15 @@ Running locally:
 cargo run --bin pallograph -- -C pallograph.toml.example --profile dev
 cargo run --bin pallograph -- --backend dd --provenance ...
 ```
+
+To check a refactor leaves output alone, build `main` alongside (ex:
+`git archive origin/main` into a scratch directory, with its own
+`CARGO_TARGET_DIR`) and diff both binaries' stdout and stderr over the
+same `--script` on both backends. Some output isn't reproducible between
+runs of the same binary, so rule that out before calling a difference a
+regression: interpreter row order (and GroupBy relations like
+`k8s_object_count`), which gaps and placement Z3 reports for `sched::`,
+and the order of strata in `--explain`. Compare those sorted.
 
 Benchmarks live in `benches/` (criterion), split by fixture size
 (`small_*`, `medium_*`) plus `smt_access`; ex: `cargo bench --bench

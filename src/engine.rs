@@ -418,10 +418,6 @@ impl CompiledProgram {
         }
     }
 
-    fn print_op(&self, op: &Op, level: usize) -> Result<()> {
-        self.fprint_op(&mut std::io::stdout(), op, level)
-    }
-
     /// Walk the plan's spine, collecting one cost step per nested `Iterate`: a
     /// label describing how the relation is probed (scan, or index lookup with
     /// its key and match count) and the rows each probe visits. A nested-loop
@@ -521,19 +517,22 @@ impl CompiledProgram {
     /// large fan-out. A variable key's figure is an average rather than a
     /// measured count; `~` marks those, on the step and on the total they feed,
     /// and the total line says whether it is exact or an estimate.
-    fn print_cost(&self, op: &Op, store: &EvalStore) {
+    fn write_cost(&self, w: &mut impl std::io::Write, op: &Op, store: &EvalStore) -> Result<()> {
         let mut steps: Vec<CostStep> = Vec::new();
         self.cost_steps(op, store, &mut steps);
         if steps.is_empty() {
-            return;
+            return Ok(());
         }
         let estimated = steps.iter().any(|s| s.estimate);
-        println!("  Cost (rows visited per probe, multiplied down the join):");
+        writeln!(
+            w,
+            "  Cost (rows visited per probe, multiplied down the join):"
+        )?;
         let width = steps.iter().map(|s| s.label.len()).max().unwrap_or(0);
         let mut product: u128 = 1;
         for step in &steps {
             let mark = if step.estimate { "~" } else { " " };
-            println!("    {:<width$}  {mark}{} rows", step.label, step.rows);
+            writeln!(w, "    {:<width$}  {mark}{} rows", step.label, step.rows)?;
             product = product.saturating_mul(step.rows);
         }
         let terms = steps
@@ -548,27 +547,37 @@ impl CompiledProgram {
             .collect::<Vec<_>>()
             .join(" x ");
         if estimated {
-            println!(
+            writeln!(
+                w,
                 "    => {terms} = ~{product} row visits (estimate; ~ is an averaged per-key fan-out)"
-            );
+            )?;
         } else {
-            println!("    => {terms} = {product} row visits (exact)");
+            writeln!(w, "    => {terms} = {product} row visits (exact)")?;
         }
+        Ok(())
     }
 
     pub fn dump_plan(&mut self) -> Result<()> {
-        self.dump_plan_filtered(None, None)
+        self.write_plan(&mut std::io::stdout(), None, None)
     }
 
-    /// Dump the planner's physical operator tree for just the rules whose head
-    /// is `pred` (and the stratum that holds them). Backs the REPL `explain`
-    /// command, which plans a single synthesized `__query` rule. With a `store`,
-    /// a cost estimate (live row counts and index fan-out) follows each plan.
-    pub fn dump_plan_for(&mut self, pred: &str, store: Option<&EvalStore>) -> Result<()> {
-        self.dump_plan_filtered(Some(pred), store)
+    /// The planner's physical operator tree for just the rules whose head is
+    /// `pred` (and the stratum that holds them), as text. Backs the REPL
+    /// `explain` command, which plans a single synthesized `__query` rule. With
+    /// a `store`, a cost estimate (live row counts and index fan-out) follows
+    /// each plan.
+    pub fn plan_for(&mut self, pred: &str, store: Option<&EvalStore>) -> Result<String> {
+        let mut out = Vec::new();
+        self.write_plan(&mut out, Some(pred), store)?;
+        Ok(String::from_utf8(out)?)
     }
 
-    fn dump_plan_filtered(&mut self, only: Option<&str>, store: Option<&EvalStore>) -> Result<()> {
+    fn write_plan(
+        &mut self,
+        w: &mut impl std::io::Write,
+        only: Option<&str>,
+        store: Option<&EvalStore>,
+    ) -> Result<()> {
         for (i, pred_names) in self.strata.iter().enumerate() {
             // Step B: collect rule_ids — must finish before calling Planner (&mut ir)
             let mut initial_ids: Vec<InstId> = vec![];
@@ -605,35 +614,36 @@ impl CompiledProgram {
                 continue;
             }
 
-            println!(
+            writeln!(
+                w,
                 "● Stratum {i} ({})",
                 pred_names
                     .iter()
                     .map(|s| format!("`{}`", s))
                     .collect::<Vec<_>>()
                     .join(", ")
-            );
+            )?;
 
             // Step C: plan each rule and print the physical Op tree
             for rule_id in initial_ids {
                 let planner = mangle_analysis::Planner::new(&mut self.ir);
                 let op = planner.plan_rule(rule_id)?;
-                self.print_op(&op, 1)?;
+                self.fprint_op(w, &op, 1)?;
                 if let Some(store) = store {
-                    self.print_cost(&op, store);
+                    self.write_cost(w, &op, store)?;
                 }
             }
 
             if !delta_ids.is_empty() {
-                println!("↻ Recursive");
+                writeln!(w, "↻ Recursive")?;
                 for (rule_id, pred) in delta_ids {
                     let planner = mangle_analysis::Planner::new(&mut self.ir).with_delta(pred);
                     let op = planner.plan_rule(rule_id)?;
-                    self.print_op(&op, 1)?;
+                    self.fprint_op(w, &op, 1)?;
                 }
             }
 
-            println!();
+            writeln!(w)?;
         }
 
         Ok(())
@@ -1521,20 +1531,20 @@ impl Engine {
         self.backend.evaluate(&edb, std::slice::from_ref(&rule))
     }
 
-    /// Compile the engine's rules together with `query_rule` and print the
-    /// planner's physical operator tree for that rule only, without evaluating
+    /// Compile the engine's rules together with `query_rule` and return the
+    /// planner's physical operator tree for that rule only, as text, without evaluating
     /// it. Backs the REPL `explain` command so a `?-` query's join plan can be
     /// inspected: which atom leads the join, the index lookups, the filters.
     /// The plan depends on the rules, not the loaded facts, so it is the same
     /// whether the live state or a `use`d snapshot is active.
-    pub fn explain_query(&self, query_rule: &str, store: &EvalStore) -> Result<()> {
+    pub fn explain_query(&self, query_rule: &str, store: &EvalStore) -> Result<String> {
         let mut sources = vec![EDB_DECLS];
         for s in &self.rule_sources {
             sources.push(s.as_str());
         }
         sources.push(query_rule);
         let mut compiled = CompiledProgram::new(&sources)?;
-        compiled.dump_plan_for("__query", Some(store))
+        compiled.plan_for("__query", Some(store))
     }
 
     /// Names of every relation the engine knows: declared, defined by a rule

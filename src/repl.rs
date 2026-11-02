@@ -20,7 +20,6 @@ use crate::api::{
 use crate::edb::{FactSource, K8sManifestsSource, ShellSource};
 use crate::engine::{ApplySummary, EvalStore, RelationDoc};
 use crate::load;
-use crate::query::{extract_vars, split_projection};
 use crate::rbac;
 use crate::rbac::diff::AccessDiff;
 use crate::smt;
@@ -1292,21 +1291,50 @@ fn session(
                     continue;
                 }
 
-                // Commands not yet on `Core` hold the engine and the snapshots
-                // for the whole command, so nothing else changes them partway
-                // through.
-                let mut engine_guard = core.engine();
-                let engine = &mut *engine_guard;
-                let snapshots = core.snapshots();
-                // The live state, re-evaluated if the engine moved on since the
-                // last command.
-                let current_store = match core.live_store(engine) {
-                    Ok(store) => store,
-                    Err(e) => {
-                        command_error!("Error: {e:#}");
-                        core.last_live()
+                if let Some(query) = line.strip_prefix("::explain ") {
+                    match core.explain(&current_at(&in_use), query) {
+                        Ok(plan) => print!("{plan}"),
+                        Err(e) => command_error!("{e}"),
                     }
-                };
+                    continue;
+                }
+
+                if let Some(rest) = line.strip_prefix("::smtlib ") {
+                    let relations: Vec<&str> = rest.split_whitespace().collect();
+                    if relations.is_empty() {
+                        command_error!("Usage: smtlib <relation> [relation ...]");
+                        continue;
+                    }
+                    match core.smtlib(&current_at(&in_use), &relations) {
+                        Ok(smtlib) => println!("{smtlib}"),
+                        Err(e) => command_error!("{e}"),
+                    }
+                    continue;
+                }
+
+                if line == "::rollback" || line.starts_with("::rollback ") {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
+                        continue;
+                    }
+                    if watch.is_some() {
+                        // A rollback swaps the whole EDB behind the watcher's back,
+                        // so objects deleted since the snapshot would come back.
+                        command_error!(
+                            "rollback is unavailable while watching a cluster: the watcher owns the live state."
+                        );
+                        continue;
+                    }
+                    let name = line.strip_prefix("::rollback").unwrap_or("").trim();
+                    if name.is_empty() {
+                        command_error!("Usage: rollback <name>");
+                        continue;
+                    }
+                    match core.rollback(name) {
+                        Ok(()) => println!("Rolled back to snapshot '{name}'."),
+                        Err(e) => command_error!("{e}"),
+                    }
+                    continue;
+                }
 
                 if let Some(cmd) = line.strip_prefix('!') {
                     let cmd = cmd.trim();
@@ -1409,76 +1437,6 @@ fn session(
                     eprintln!("Output format: {}.", format.label());
                     continue;
                 }
-                if let Some(raw) = line.strip_prefix("::explain ") {
-                    let raw = raw.trim();
-                    // Same body grammar as `?-`, projection included: an
-                    // anonymous head `_(R) :- ...` just sets the query rule's
-                    // head columns. This only compiles and plans, never runs.
-                    let (projection, body) = split_projection(raw);
-                    let vars = projection.unwrap_or_else(|| extract_vars(body));
-                    if vars.is_empty() {
-                        command_error!("No variables to bind. Name one (e.g. X).");
-                        continue;
-                    }
-                    let rule = format!("__query({}) :- {body}.", vars.join(", "));
-                    // The active store backs the cost estimate's row counts.
-                    let active = active_store(&current_store, &snapshots, &in_use);
-                    if let Err(e) = engine.explain_query(&rule, active) {
-                        command_error!("Error: {e:#}");
-                    }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("::smtlib ") {
-                    let relations: Vec<&str> = rest.split_whitespace().collect();
-                    if relations.is_empty() {
-                        command_error!("Usage: smtlib <relation> [relation ...]");
-                    } else {
-                        let active = active_store(&current_store, &snapshots, &in_use);
-                        let cfg = z3::Config::new();
-                        let ctx = z3::Context::new(&cfg);
-                        let mut enc = smt::SmtEncoder::new(&ctx);
-                        enc.load(active, &relations);
-                        println!("{}", enc.to_smtlib());
-                    }
-                    continue;
-                }
-
-                if line == "::rollback" || line.starts_with("::rollback ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    if watch.is_some() {
-                        // A rollback swaps the whole EDB behind the watcher's back,
-                        // so objects deleted since the snapshot would come back.
-                        command_error!(
-                            "rollback is unavailable while watching a cluster: the watcher owns the live state."
-                        );
-                        continue;
-                    }
-                    let name = line.strip_prefix("::rollback").unwrap_or("").trim();
-                    if name.is_empty() {
-                        command_error!("Usage: rollback <name>");
-                        continue;
-                    }
-                    let Some(frozen) = snapshots.get(name) else {
-                        command_error!("No snapshot named '{name}'.");
-                        continue;
-                    };
-                    if let Err(e) = engine.restore_inputs(&frozen.inputs) {
-                        command_error!("Error: {e:#}");
-                        continue;
-                    }
-                    match engine.evaluate() {
-                        Ok(new_store) => {
-                            core.remember_live(engine, new_store);
-                            println!("Rolled back to snapshot '{name}'.");
-                        }
-                        Err(e) => command_error!("Error: {e:#}"),
-                    }
-                    continue;
-                }
-
                 // Subsystem container-commands. A bare namespace lists its
                 // subcommands; `ns::sub` runs one. The k8s object commands have
                 // their own blocks above, so a leftover `::k8s::` here is an
