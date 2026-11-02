@@ -13,7 +13,7 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
-use crate::api::{At, Core, Derivation, LocalCore, ProvenanceTree, Rows};
+use crate::api::{At, Core, Derivation, Fact, LocalCore, ProvenanceTree, RelationInfo, Rows};
 use crate::edb::{K8sManifestsSource, ObjectFacts, ObjectKey, ShellSource};
 use crate::engine::{ApplySummary, Change, Engine, EvalStore, RelationDoc};
 use crate::load;
@@ -222,11 +222,33 @@ fn arity_display(store_arity: Option<usize>, doc: Option<&RelationDoc>) -> Strin
         .unwrap_or_else(|| "?".to_string())
 }
 
+/// Print `show`'s list view: one line per relation with its arity and
+/// description. Undocumented relations (intermediates, mostly) are only
+/// counted unless `show_all`.
+fn print_relation_list(relations: &[RelationInfo], show_all: bool) {
+    let mut hidden = 0;
+    for relation in relations {
+        let description = relation.doc.as_ref().and_then(|d| d.description.as_deref());
+        if description.is_none() && !show_all {
+            hidden += 1;
+            continue;
+        }
+        let description = description.map(|d| format!("  — {d}")).unwrap_or_default();
+        let arity = arity_display(relation.arity, relation.doc.as_ref());
+        println!("  {}/{arity}{description}", relation.name);
+    }
+    if hidden > 0 {
+        println!("  ({hidden} undocumented relation(s) hidden; show --all to include)");
+    }
+}
+
 /// Print a psql `\d`-style detail block for one relation: its description and a
 /// per-column listing of name, type, and description. Falls back to a bare
 /// arity line when the relation has no `Decl` (e.g. derived predicates).
-fn print_relation_detail(name: &str, store: &EvalStore, doc: Option<&RelationDoc>) {
-    let arity = arity_display(store.scan(name).first().map(|t| t.len()), doc);
+fn print_relation_detail(relation: &RelationInfo) {
+    let name = &relation.name;
+    let doc = relation.doc.as_ref();
+    let arity = arity_display(relation.arity, doc);
     println!("{name}/{arity}");
     let Some(doc) = doc else {
         return;
@@ -641,6 +663,14 @@ fn active_store<'a>(
     }
 }
 
+/// Where reads go: the snapshot `use` points at, or the live state.
+fn current_at(in_use: &Option<String>) -> At {
+    match in_use {
+        Some(name) => At::Snapshot(name.clone()),
+        None => At::Live,
+    }
+}
+
 /// Return `true` and refuse a state-changing command (`+`, `-`, `~`,
 /// `define`, `load`, `k8s::load`, `apply-delta`, `source`,
 /// `snapshot`, `rollback`) while a snapshot is in use: a frozen state never changes, so there is
@@ -948,10 +978,7 @@ fn session(
                     .strip_prefix("::query ")
                     .or_else(|| line.strip_prefix("?- "))
                 {
-                    let at = match &in_use {
-                        Some(name) => At::Snapshot(name.clone()),
-                        None => At::Live,
-                    };
+                    let at = current_at(&in_use);
                     match core.query(&at, body) {
                         Ok(rows) => print_rows(format, &rows),
                         Err(e) => command_error!("{e}"),
@@ -960,10 +987,7 @@ fn session(
                 }
 
                 if let Some(fact) = line.strip_prefix("::why ") {
-                    let at = match &in_use {
-                        Some(name) => At::Snapshot(name.clone()),
-                        None => At::Live,
-                    };
+                    let at = current_at(&in_use);
                     match core.provenance(&at, fact) {
                         Ok(trees) if trees.is_empty() => {
                             eprintln!("No matching facts for '{}'.", fact.trim());
@@ -1034,10 +1058,7 @@ fn session(
                 if let Some((rest, one_relation)) = diff_args {
                     let mut parts: Vec<&str> = rest.split_whitespace().collect();
                     let relation = if one_relation { parts.pop() } else { None };
-                    let current = match &in_use {
-                        Some(name) => At::Snapshot(name.clone()),
-                        None => At::Live,
-                    };
+                    let current = current_at(&in_use);
                     let (before, after) = match parts.as_slice() {
                         [name] => (At::Snapshot(name.to_string()), current),
                         [name1, name2] => (
@@ -1062,6 +1083,97 @@ fn session(
                     continue;
                 }
 
+                if line == "::show" || line.starts_with("::show ") {
+                    let tokens: Vec<&str> = line
+                        .strip_prefix("::show")
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .collect();
+                    // `--all`/`*` reveals undocumented intermediate relations in the
+                    // list view; remaining tokens are explicit relation names.
+                    let show_all = tokens.iter().any(|t| *t == "--all" || *t == "*");
+                    let names: Vec<&str> = tokens
+                        .into_iter()
+                        .filter(|t| *t != "--all" && *t != "*")
+                        .collect();
+                    match core.relations(&current_at(&in_use), &names) {
+                        Ok(relations) if names.is_empty() => {
+                            print_relation_list(&relations, show_all);
+                        }
+                        // Detail view: a psql \d-style block per requested relation.
+                        Ok(relations) => relations.iter().for_each(print_relation_detail),
+                        Err(e) => command_error!("{e}"),
+                    }
+                    continue;
+                }
+
+                if let Some(rule) = line.strip_prefix("::define ") {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
+                        continue;
+                    }
+                    match core.define(rule) {
+                        Ok(()) => eprintln!("Rule added and evaluated."),
+                        Err(e) => command_error!("{e}"),
+                    }
+                    continue;
+                }
+
+                // ~pred(old_args). pred(new_args).  — replace one ground fact
+                if let Some(rest) = line.strip_prefix('~') {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
+                        continue;
+                    }
+                    let Some((old_atom, new_atom)) = split_two_atoms(rest.trim()) else {
+                        command_error!("Usage: ~pred(old_args). pred(new_args).");
+                        continue;
+                    };
+                    let parsed = parse_fact(old_atom)
+                        .and_then(|old| parse_fact(new_atom).map(|new| (old, new)));
+                    match parsed {
+                        Ok((old, new)) => match core.replace_fact(&old, new) {
+                            Ok(true) => println!("Replaced."),
+                            Ok(false) => {
+                                println!("Warning: old fact not found; new fact inserted.")
+                            }
+                            Err(e) => command_error!("{e}"),
+                        },
+                        Err(e) => command_error!("Parse error: {e}"),
+                    }
+                    continue;
+                }
+
+                // +pred(args).  — insert ground fact
+                if let Some(inner) = line.strip_prefix('+') {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
+                        continue;
+                    }
+                    match parse_fact(inner.trim_end_matches('.').trim()) {
+                        Ok(fact) => match core.assert_fact(fact) {
+                            Ok(true) => eprintln!("Asserted."),
+                            Ok(false) => eprintln!("Fact already exists."),
+                            Err(e) => command_error!("{e}"),
+                        },
+                        Err(e) => command_error!("Parse error: {e}"),
+                    }
+                    continue;
+                }
+
+                // -pred(args).  — retract ground fact
+                if let Some(inner) = line.strip_prefix('-') {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
+                        continue;
+                    }
+                    match parse_fact(inner.trim_end_matches('.').trim()) {
+                        Ok(fact) => match core.retract_fact(&fact) {
+                            Ok(true) => eprintln!("Retracted."),
+                            Ok(false) => eprintln!("No matching fact found."),
+                            Err(e) => command_error!("{e}"),
+                        },
+                        Err(e) => command_error!("Parse error: {e}"),
+                    }
+                    continue;
+                }
+
                 // Commands not yet on `Core` hold the engine and the snapshots
                 // for the whole command, so nothing else changes them partway
                 // through.
@@ -1069,18 +1181,12 @@ fn session(
                 let engine = &mut *engine_guard;
                 let snapshots = core.snapshots();
                 // The live state, re-evaluated if the engine moved on since the
-                // last command. `+`, `-` and `~` skip this so a run of them on
-                // a DD session stays fast; the next other command catches up.
-                let is_mutator = line.starts_with(['+', '-', '~']);
-                let current_store = if is_mutator {
-                    core.last_live()
-                } else {
-                    match core.live_store(engine) {
-                        Ok(store) => store,
-                        Err(e) => {
-                            command_error!("Error: {e:#}");
-                            core.last_live()
-                        }
+                // last command.
+                let current_store = match core.live_store(engine) {
+                    Ok(store) => store,
+                    Err(e) => {
+                        command_error!("Error: {e:#}");
+                        core.last_live()
                     }
                 };
 
@@ -1183,61 +1289,6 @@ fn session(
                         }
                     }
                     eprintln!("Output format: {}.", format.label());
-                    continue;
-                }
-                if line == "::show" || line.starts_with("::show ") {
-                    let tokens: Vec<&str> = line
-                        .strip_prefix("::show")
-                        .unwrap_or("")
-                        .split_whitespace()
-                        .collect();
-                    // `--all`/`*` reveals undocumented intermediate relations in the
-                    // list view; remaining tokens are explicit relation names.
-                    let show_all = tokens.iter().any(|t| *t == "--all" || *t == "*");
-                    let names: Vec<&str> = tokens
-                        .into_iter()
-                        .filter(|t| *t != "--all" && *t != "*")
-                        .collect();
-                    let docs = engine.relation_docs().unwrap_or_default();
-                    let active = active_store(&current_store, &snapshots, &in_use);
-                    if names.is_empty() {
-                        // List view. By default only documented relations are shown;
-                        // undocumented intermediates are hidden unless --all is given.
-                        let mut names: Vec<&str> = active
-                            .relation_names()
-                            .filter(|n| !n.starts_with(':'))
-                            .collect();
-                        names.sort_unstable();
-                        let mut hidden = 0;
-                        for n in names {
-                            let documented = docs
-                                .get(n)
-                                .map(|d| d.description.is_some())
-                                .unwrap_or(false);
-                            if !documented && !show_all {
-                                hidden += 1;
-                                continue;
-                            }
-                            let desc = docs
-                                .get(n)
-                                .and_then(|d| d.description.as_deref())
-                                .map(|d| format!("  — {d}"))
-                                .unwrap_or_default();
-                            let arity =
-                                arity_display(active.scan(n).first().map(|t| t.len()), docs.get(n));
-                            println!("  {n}/{arity}{desc}");
-                        }
-                        if hidden > 0 {
-                            println!(
-                                "  ({hidden} undocumented relation(s) hidden; show --all to include)"
-                            );
-                        }
-                    } else {
-                        // Detail view: a psql \d-style block per requested relation.
-                        for n in names {
-                            print_relation_detail(n, active, docs.get(n));
-                        }
-                    }
                     continue;
                 }
                 if let Some(raw) = line.strip_prefix("::explain ") {
@@ -1356,31 +1407,6 @@ fn session(
                         _ => command_error!(
                             "Usage: rbac::diff <snap>  or  rbac::diff <snap1> <snap2>"
                         ),
-                    }
-                    continue;
-                }
-
-                if let Some(rule) = line.strip_prefix("::define ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let checkpoint = engine.rules_len();
-                    if let Err(e) =
-                        engine.add_rule(format!("{}.", rule.trim_end_matches('.').trim()))
-                    {
-                        engine.truncate_rules(checkpoint);
-                        command_error!("Error: {e:#}");
-                        continue;
-                    }
-                    match engine.evaluate() {
-                        Ok(new_store) => {
-                            core.remember_live(engine, new_store);
-                            eprintln!("Rule added and evaluated.");
-                        }
-                        Err(e) => {
-                            engine.truncate_rules(checkpoint);
-                            command_error!("Error: {e:#}");
-                        }
                     }
                     continue;
                 }
@@ -1506,130 +1532,6 @@ fn session(
                             Err(e) => command_error!("Error: {e:#}"),
                         },
                         Err(e) => command_error!("Load error: {e:#}"),
-                    }
-                    continue;
-                }
-
-                // ~pred(old...). pred(new...).  — atomic replace (retract + insert, one eval)
-                if let Some(rest) = line.strip_prefix('~') {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let rest = rest.trim();
-                    // Split into two atoms at the boundary between "). " and the next predicate.
-                    match split_two_atoms(rest) {
-                        Some((old_atom, new_atom)) => {
-                            let result = parse_ground_tuple(old_atom).and_then(|(rel, tuple)| {
-                                parse_ground_tuple(new_atom).map(|n| ((rel, tuple), n))
-                            });
-                            match result {
-                                Ok(((old_rel, old_tuple), (new_rel, new_tuple))) => {
-                                    if let Some(arity) = engine.relation_arity(&new_rel)
-                                        && new_tuple.len() != arity
-                                    {
-                                        command_error!(
-                                            "arity mismatch: {new_rel}/{arity} expects {arity} arg(s), got {}",
-                                            new_tuple.len()
-                                        );
-                                        continue;
-                                    }
-                                    let removed = engine.retract_fact(&old_rel, &old_tuple);
-                                    engine.add_fact(new_rel, new_tuple);
-                                    if engine.has_session() {
-                                        if removed {
-                                            println!("Replaced.");
-                                        } else {
-                                            println!(
-                                                "Warning: old fact not found; new fact inserted."
-                                            );
-                                        }
-                                    } else {
-                                        match engine.evaluate() {
-                                            Ok(new_store) => {
-                                                core.remember_live(engine, new_store);
-                                                if removed {
-                                                    println!("Replaced.");
-                                                } else {
-                                                    println!(
-                                                        "Warning: old fact not found; new fact inserted."
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => command_error!("Error: {e:#}"),
-                                        }
-                                    }
-                                }
-                                Err(e) => command_error!("Parse error: {e}"),
-                            }
-                        }
-                        None => command_error!("Usage: ~pred(old_args). pred(new_args)."),
-                    }
-                    continue;
-                }
-
-                // +pred(args).  — insert ground fact
-                if let Some(inner) = line.strip_prefix('+') {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let inner = inner.trim_end_matches('.').trim();
-                    match parse_ground_tuple(inner) {
-                        Ok((rel, tuple)) => {
-                            if let Some(arity) = engine.relation_arity(&rel)
-                                && tuple.len() != arity
-                            {
-                                command_error!(
-                                    "arity mismatch: {rel}/{arity} expects {arity} arg(s), got {}",
-                                    tuple.len()
-                                );
-                                continue;
-                            }
-                            if engine.add_fact(rel, tuple) {
-                                if engine.has_session() {
-                                    eprintln!("Asserted.");
-                                } else {
-                                    match engine.evaluate() {
-                                        Ok(new_store) => {
-                                            core.remember_live(engine, new_store);
-                                            eprintln!("Asserted.");
-                                        }
-                                        Err(e) => command_error!("Error: {e:#}"),
-                                    }
-                                }
-                            } else {
-                                eprintln!("Fact already exists.");
-                            }
-                        }
-                        Err(e) => command_error!("Parse error: {e}"),
-                    }
-                    continue;
-                }
-
-                // -pred(args).  — retract ground fact
-                if let Some(inner) = line.strip_prefix('-') {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let inner = inner.trim_end_matches('.').trim();
-                    match parse_ground_tuple(inner) {
-                        Ok((rel, tuple)) => {
-                            if engine.retract_fact(&rel, &tuple) {
-                                if engine.has_session() {
-                                    eprintln!("Retracted.");
-                                } else {
-                                    match engine.evaluate() {
-                                        Ok(new_store) => {
-                                            core.remember_live(engine, new_store);
-                                            eprintln!("Retracted.");
-                                        }
-                                        Err(e) => command_error!("Error: {e:#}"),
-                                    }
-                                }
-                            } else {
-                                eprintln!("No matching fact found.");
-                            }
-                        }
-                        Err(e) => command_error!("Parse error: {e}"),
                     }
                     continue;
                 }
@@ -2749,6 +2651,12 @@ fn split_two_atoms(s: &str) -> Option<(&str, &str)> {
         }
     }
     None
+}
+
+/// [`parse_ground_tuple`], as the [`Fact`] the core takes.
+fn parse_fact(input: &str) -> anyhow::Result<Fact> {
+    let (relation, row) = parse_ground_tuple(input)?;
+    Ok(Fact { relation, row })
 }
 
 /// Parse a ground atom like `pred("a", /b, 42, {/k: ["v"]})` into
