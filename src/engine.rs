@@ -1482,6 +1482,25 @@ impl Engine {
         self.backend.evaluate(&self.edb, &self.rule_sources)
     }
 
+    /// Evaluate the whole program over `inputs` (a snapshot's saved facts and
+    /// rules; `None` for the engine's current ones) plus `extra` facts, in a
+    /// throwaway batch evaluation. Never touches the live engine or its
+    /// session, so it reads a "what if these facts held too" state without
+    /// writing it.
+    pub fn evaluate_with(
+        &self,
+        inputs: Option<&EngineInputs>,
+        extra: &[(String, Vec<Value>)],
+    ) -> Result<EvalStore> {
+        let (edb, rule_sources) = match inputs {
+            Some(inputs) => (&inputs.edb, &inputs.rule_sources),
+            None => (&self.edb, &self.rule_sources),
+        };
+        let mut edb = edb.clone();
+        edb.extend(extra.iter().cloned());
+        self.backend.evaluate(&edb, rule_sources)
+    }
+
     /// Evaluate `rule` as the only rule source, against a frozen state's rows
     /// for `relations` as the only input facts (EDB). Used by `use <name>` so
     /// a `?-` query under a snapshot runs just the query rule over the frozen

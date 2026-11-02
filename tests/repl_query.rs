@@ -550,7 +550,8 @@ fn use_unknown_snapshot_is_refused() {
 }
 
 /// While a snapshot is in use, every state-changing command is refused
-/// with the same message.
+/// with the same message. (`k8s::match` is a read, so it is not; see
+/// `use_snapshot_matches_frozen_labels`.)
 #[test]
 fn use_refuses_state_changes() {
     for backend in ["interpreter", "dd"] {
@@ -560,8 +561,6 @@ fn use_refuses_state_changes() {
              define baz(X) :- bar(X).\n\
              snapshot again\n\
              rollback before\n\
-             k8s::match Pod kube-system foo=bar\n\
-             k8s::match-all kube-system foo=bar\n\
              ::quit\n",
             before_bob_setup()
         );
@@ -569,7 +568,32 @@ fn use_refuses_state_changes() {
         let refusals = stderr
             .matches("Snapshot 'before' is in use; use to return to the live state.")
             .count();
-        assert_eq!(refusals, 6, "{backend}: {stderr}");
+        assert_eq!(refusals, 4, "{backend}: {stderr}");
+    }
+}
+
+/// `k8s::match` under `use` matches the snapshot's labels, not the live
+/// ones: a pod relabelled after the snapshot matches its old label there.
+#[test]
+fn use_snapshot_matches_frozen_labels() {
+    for backend in ["interpreter", "dd"] {
+        let commands = "+k8s(\"v1\", \"Pod\", \"pallograph-probe\", \"p1\", {/x: 1}).\n\
+             +object_label(\"v1\", \"Pod\", \"pallograph-probe\", \"p1\", \"probe\", \"web\").\n\
+             snapshot before\n\
+             -object_label(\"v1\", \"Pod\", \"pallograph-probe\", \"p1\", \"probe\", \"web\").\n\
+             +object_label(\"v1\", \"Pod\", \"pallograph-probe\", \"p1\", \"probe\", \"db\").\n\
+             use before k8s::match Pod pallograph-probe probe=web\n\
+             k8s::match Pod pallograph-probe probe=web\n\
+             k8s::match-all pallograph-probe probe=db\n\
+             ::quit\n";
+        let (stdout, stderr) = run_session_with(&["--backend", backend], commands);
+        let matches: Vec<&str> = stdout.lines().filter(|l| l.contains("p1")).collect();
+        assert_eq!(matches.len(), 2, "{backend}: {stdout}\n{stderr}");
+        assert_eq!(
+            stderr.matches("No matches.").count(),
+            1,
+            "{backend}: {stderr}"
+        );
     }
 }
 
