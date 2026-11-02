@@ -118,6 +118,17 @@ pub enum Command {
         max_height: u32,
         resp: Sender<Option<Grounding>>,
     },
+    /// Lazy provenance: reconstruct the whole proof tree for `fact` in one
+    /// pass, down to `max_depth`. `annotation` is the fact's `(rule_id,
+    /// height)`. Drains each relation at most once for the tree, instead of a
+    /// `WhyStep` round trip (and re-drain) per node.
+    WhyProof {
+        rel: String,
+        fact: Row,
+        annotation: Option<Annotation>,
+        max_depth: usize,
+        resp: Sender<ProofTree>,
+    },
     /// Lazy provenance: copy every live row and annotation (leaving out
     /// `?-` query results) and the rules, so `snapshot` can keep a frozen
     /// copy that `why_height`/`why_step` answer from after the live session
@@ -190,6 +201,39 @@ pub struct Premise {
     pub height: u32,
 }
 
+/// A reconstructed proof tree for one fact: how it was derived, with each
+/// positive premise its own subtree. Built in a single pass (see
+/// [`reconstruct_proof_tree`]) so a whole `::why` costs one worker round trip
+/// and drains each relation at most once, rather than one `why_step` per node.
+/// The API layer maps this to its own public tree type.
+#[derive(Debug, Clone)]
+pub struct ProofTree {
+    pub rel: String,
+    pub row: Row,
+    pub node: ProofNode,
+}
+
+/// How a [`ProofTree`] fact was derived.
+#[derive(Debug, Clone)]
+pub enum ProofNode {
+    /// A base fact (EDB; height 0 / `SENTINEL_EDB`).
+    Input,
+    /// A rule with no positive premises (a unit rule or an aggregate).
+    NoPremises,
+    /// A rule firing: its positive premises (each a subtree) and the negated
+    /// atoms that held for it to fire.
+    Rule {
+        premises: Vec<ProofTree>,
+        negated: Vec<NegatedFact>,
+    },
+    /// Deeper than the depth limit, not expanded.
+    DepthLimit,
+    /// The fact has no stored annotation (a provenance bug).
+    NoAnnotation,
+    /// No grounding of the fact's achieving rule was found.
+    NoGrounding,
+}
+
 /// The lazy provenance queries `::why` backward-chains over: answered by a
 /// live [`DdSession`], or by a [`FrozenLazyProvenance`] kept with a snapshot.
 pub trait LazyProvenance {
@@ -200,7 +244,17 @@ pub trait LazyProvenance {
     fn why_height(&self, rel: &str, fact: &Row) -> Option<Annotation>;
     /// One grounding of `rule_id` deriving `head` whose positive premises all
     /// have height below `max_height`, or `None` if there is no such grounding.
-    fn why_step(&self, rule_id: u32, head: &Row, max_height: u32) -> Option<Grounding>;
+    /// Reconstruct the whole proof tree for `fact` in one pass, down to
+    /// `max_depth`. `annotation` is the fact's `(rule_id, height)` from
+    /// [`LazyProvenance::why_height`]. One round trip; each relation is drained
+    /// at most once, unlike a `why_step` per node.
+    fn why_proof(
+        &self,
+        rel: &str,
+        fact: &Row,
+        annotation: Option<Annotation>,
+        max_depth: usize,
+    ) -> ProofTree;
 }
 
 /// A copy of a provenance session's rows, annotations and rules, taken by
@@ -215,6 +269,15 @@ pub struct FrozenLazyProvenance {
     annotated_relations: std::collections::HashSet<String>,
 }
 
+impl FrozenLazyProvenance {
+    /// One backward-chaining step, the per-node primitive
+    /// [`LazyProvenance::why_proof`] is built from. Exercised directly in tests.
+    pub fn why_step(&self, rule_id: u32, head: &Row, max_height: u32) -> Option<Grounding> {
+        let rule = self.rules_by_id.get(&rule_id)?;
+        reconstruct_grounding(rule, head, max_height, &self.rows, &self.annotations)
+    }
+}
+
 impl LazyProvenance for FrozenLazyProvenance {
     fn has_provenance_for(&self, rel: &str) -> bool {
         self.annotated_relations.contains(rel)
@@ -224,14 +287,23 @@ impl LazyProvenance for FrozenLazyProvenance {
         self.annotations.get(rel)?.get(fact).copied()
     }
 
-    fn why_step(&self, rule_id: u32, head: &Row, max_height: u32) -> Option<Grounding> {
-        let rule = self.rules_by_id.get(&rule_id)?;
-        let mut rows_of =
-            |rel: &str| -> Vec<Row> { self.rows.get(rel).cloned().unwrap_or_default() };
-        let mut annotation_of = |rel: &str, tuple: &Row| -> Option<Annotation> {
-            self.annotations.get(rel)?.get(tuple).copied()
-        };
-        reconstruct_grounding(rule, head, max_height, &mut rows_of, &mut annotation_of)
+    fn why_proof(
+        &self,
+        rel: &str,
+        fact: &Row,
+        annotation: Option<Annotation>,
+        max_depth: usize,
+    ) -> ProofTree {
+        reconstruct_proof_tree(
+            &self.rules_by_id,
+            &self.rows,
+            &self.annotations,
+            rel,
+            fact.clone(),
+            annotation,
+            1,
+            max_depth,
+        )
     }
 }
 
@@ -374,7 +446,7 @@ fn drain_trace_rows(trace: &mut RowTrace) -> Vec<Row> {
 /// positive premises all have stored height `< max_height`.
 ///
 /// We replay every body step (exhaustively, mirroring `build_rule`) as an
-/// in-memory nested-loop join over the materialised premise rows (`rows_of`),
+/// in-memory hash join over the materialised premise rows (`rows`),
 /// threading the running wide-row assignment, then filter to those wide rows
 /// whose head projection equals `head` and whose every positive premise passes
 /// the strict-height guard. The first such grounding is returned.
@@ -386,15 +458,17 @@ fn drain_trace_rows(trace: &mut RowTrace) -> Vec<Row> {
 /// - `Reduce` (aggregation) is a leaf: the aggregate is recomputed in-memory to
 ///   match `head`, and the grounding has no positive premises (no descent).
 ///
-/// `rows_of(rel)` yields the live tuples of `rel`; `annotation_of(rel, tuple)` yields
-/// its stored `(rule_id, height)` (EDB facts have height 0 / `SENTINEL_EDB`),
-/// or `None` if it has none, which rejects that candidate grounding.
+/// `rows[rel]` holds the live tuples of `rel`; `annotations[rel][tuple]` holds
+/// its stored `(rule_id, height)` (EDB facts have height 0 / `SENTINEL_EDB`), or
+/// is absent if it has none, which rejects that candidate grounding. Both maps
+/// are built once per proof tree and read by reference, so a node pays no
+/// per-relation clone.
 fn reconstruct_grounding(
     rule: &LoweredRule,
     head: &Row,
     max_height: u32,
-    rows_of: &mut dyn FnMut(&str) -> Vec<Row>,
-    annotation_of: &mut dyn FnMut(&str, &Row) -> Option<Annotation>,
+    rows: &HashMap<String, Vec<Row>>,
+    annotations: &HashMap<String, HashMap<Row, Annotation>>,
 ) -> Option<Grounding> {
     // Build the set of candidate wide rows by replaying Scan/Join.
     let mut wide: Vec<Row> = Vec::new();
@@ -408,7 +482,7 @@ fn reconstruct_grounding(
                 seeded = true;
             }
             Step::Scan { rel, .. } => {
-                wide = rows_of(rel);
+                wide = rows.get(rel).cloned().unwrap_or_default();
                 seeded = true;
             }
             Step::Join {
@@ -420,17 +494,24 @@ fn reconstruct_grounding(
                 if !seeded {
                     return None;
                 }
-                let right_rows = rows_of(rel);
+                // Hash the right side on its key once, then probe per left row,
+                // so this join is O(|left| + |right|) rather than the product.
+                let empty = Vec::new();
+                let right_rows = rows.get(rel).unwrap_or(&empty);
+                let mut index: HashMap<Vec<Val>, Vec<Vec<Val>>> = HashMap::new();
+                for right in right_rows {
+                    let rkey: Vec<Val> =
+                        right_key_cols.iter().map(|&i| right.0[i].clone()).collect();
+                    let new_vals: Vec<Val> =
+                        right_new_cols.iter().map(|&i| right.0[i].clone()).collect();
+                    index.entry(rkey).or_default().push(new_vals);
+                }
                 let mut next: Vec<Row> = Vec::new();
                 for left in &wide {
                     let lkey: Vec<Val> = left_key_cols.iter().map(|&i| left.0[i].clone()).collect();
-                    for right in &right_rows {
-                        let rkey: Vec<Val> =
-                            right_key_cols.iter().map(|&i| right.0[i].clone()).collect();
-                        if lkey == rkey {
-                            next.push(
-                                left.appended(right_new_cols.iter().map(|&i| right.0[i].clone())),
-                            );
+                    if let Some(matches) = index.get(&lkey) {
+                        for new_vals in matches {
+                            next.push(left.appended(new_vals.iter().cloned()));
                         }
                     }
                 }
@@ -451,8 +532,9 @@ fn reconstruct_grounding(
                 // the DD Antijoin builder in build.rs. Height-neutral: negated
                 // atoms are not premises. The surviving grounding's `¬rel(args)`
                 // leaves are surfaced at the Insert step via `rule.negated_atoms`.
-                let neg_rows = rows_of(rel);
-                let neg_keys: Vec<Vec<Val>> = neg_rows
+                let empty = Vec::new();
+                let neg_rows = rows.get(rel).unwrap_or(&empty);
+                let neg_keys: std::collections::HashSet<Vec<Val>> = neg_rows
                     .iter()
                     .filter(|row| const_filters.iter().all(|(col, val)| &row.0[*col] == val))
                     .map(|row| right_key_cols.iter().map(|&i| row.0[i].clone()).collect())
@@ -530,7 +612,10 @@ fn reconstruct_grounding(
                         // seeded with `(SENTINEL_EDB, 0)`), so `None` is a
                         // bug: reject the candidate rather than pass it off
                         // as a base fact.
-                        let Some((rid, h)) = annotation_of(&pa.rel, &premise) else {
+                        let Some((rid, h)) = annotations
+                            .get(&pa.rel)
+                            .and_then(|m| m.get(&premise).copied())
+                        else {
                             ok = false;
                             break;
                         };
@@ -604,6 +689,63 @@ fn reconstruct_grounding(
     None
 }
 
+/// Reconstruct the whole proof tree for `rel(row)` from pre-drained `rows` and
+/// `annotations`, descending to `max_depth`. Every node reuses the same maps,
+/// so a relation is drained once for the tree rather than once per node (the
+/// old per-node `why_step`). `annotation` is the fact's `(rule_id, height)`.
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_proof_tree(
+    rules_by_id: &HashMap<u32, LoweredRule>,
+    rows: &HashMap<String, Vec<Row>>,
+    annotations: &HashMap<String, HashMap<Row, Annotation>>,
+    rel: &str,
+    row: Row,
+    annotation: Option<Annotation>,
+    depth: usize,
+    max_depth: usize,
+) -> ProofTree {
+    let node = if depth > max_depth {
+        ProofNode::DepthLimit
+    } else {
+        match annotation {
+            Some((SENTINEL_EDB, _)) => ProofNode::Input,
+            // Every live fact has an annotation, so this is a provenance bug.
+            None => ProofNode::NoAnnotation,
+            Some((rule_id, height)) => match rules_by_id
+                .get(&rule_id)
+                .and_then(|rule| reconstruct_grounding(rule, &row, height, rows, annotations))
+            {
+                None => ProofNode::NoGrounding,
+                Some(g) if g.premises.is_empty() && g.negated.is_empty() => ProofNode::NoPremises,
+                Some(g) => {
+                    let mut premises = Vec::with_capacity(g.premises.len());
+                    for p in g.premises {
+                        premises.push(reconstruct_proof_tree(
+                            rules_by_id,
+                            rows,
+                            annotations,
+                            &p.rel,
+                            p.row,
+                            Some((p.rule_id, p.height)),
+                            depth + 1,
+                            max_depth,
+                        ));
+                    }
+                    ProofNode::Rule {
+                        premises,
+                        negated: g.negated,
+                    }
+                }
+            },
+        }
+    };
+    ProofTree {
+        rel: rel.to_string(),
+        row,
+        node,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DdSession
 // ---------------------------------------------------------------------------
@@ -639,8 +781,14 @@ impl LazyProvenance for DdSession {
         DdSession::why_height(self, rel, fact)
     }
 
-    fn why_step(&self, rule_id: u32, head: &Row, max_height: u32) -> Option<Grounding> {
-        DdSession::why_step(self, rule_id, head, max_height)
+    fn why_proof(
+        &self,
+        rel: &str,
+        fact: &Row,
+        annotation: Option<Annotation>,
+        max_depth: usize,
+    ) -> ProofTree {
+        DdSession::why_proof(self, rel, fact, annotation, max_depth)
     }
 }
 
@@ -1245,25 +1393,47 @@ impl DdSession {
                                                 .insert(rel_name.clone(), drain_annotations(t));
                                         }
                                     }
-                                    let mut rows_of = |rel: &str| -> Vec<Row> {
-                                        row_cache.get(rel).cloned().unwrap_or_default()
-                                    };
-                                    let mut annotation_of =
-                                        |rel: &str, tuple: &Row| -> Option<Annotation> {
-                                            annotation_cache
-                                                .get(rel)
-                                                .and_then(|m| m.get(tuple).copied())
-                                        };
                                     reconstruct_grounding(
                                         rule,
                                         &head,
                                         max_height,
-                                        &mut rows_of,
-                                        &mut annotation_of,
+                                        &row_cache,
+                                        &annotation_cache,
                                     )
                                 }
                             };
                             let _ = resp.send(result);
+                        }
+                        Command::WhyProof {
+                            rel,
+                            fact,
+                            annotation,
+                            max_depth,
+                            resp,
+                        } => {
+                            // Drain every relation's rows and annotations once,
+                            // then reconstruct the whole tree in memory: one
+                            // drain per relation for the tree, not one per node.
+                            let row_cache: HashMap<String, Vec<Row>> = traces
+                                .iter_mut()
+                                .map(|(r, t)| (r.clone(), drain_trace_rows(t)))
+                                .collect();
+                            let annotation_cache: HashMap<String, HashMap<Row, Annotation>> =
+                                annotation_traces
+                                    .iter_mut()
+                                    .map(|(r, t)| (r.clone(), drain_annotations(t)))
+                                    .collect();
+                            let tree = reconstruct_proof_tree(
+                                &rules_by_id,
+                                &row_cache,
+                                &annotation_cache,
+                                &rel,
+                                fact,
+                                annotation,
+                                1,
+                                max_depth,
+                            );
+                            let _ = resp.send(tree);
                         }
                         Command::FreezeProvenance { resp } => {
                             let result = live_errors(&mut error_traces).map(|()| {
@@ -1635,6 +1805,30 @@ impl DdSession {
             resp: resp_tx,
         });
         resp_rx.recv().unwrap_or(None)
+    }
+
+    /// Reconstruct the whole proof tree for `fact` in one worker round trip.
+    /// `annotation` is the fact's `(rule_id, height)` from [`Self::why_height`].
+    pub fn why_proof(
+        &self,
+        rel: &str,
+        fact: &Row,
+        annotation: Option<Annotation>,
+        max_depth: usize,
+    ) -> ProofTree {
+        let (resp_tx, resp_rx) = bounded(1);
+        let _ = self.tx.send(Command::WhyProof {
+            rel: rel.to_string(),
+            fact: fact.clone(),
+            annotation,
+            max_depth,
+            resp: resp_tx,
+        });
+        resp_rx.recv().unwrap_or_else(|_| ProofTree {
+            rel: rel.to_string(),
+            row: fact.clone(),
+            node: ProofNode::NoGrounding,
+        })
     }
 
     /// Copy this session's lazy provenance, as it stands now, into a

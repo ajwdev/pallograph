@@ -17,9 +17,8 @@ use kube::api::DynamicObject;
 use mangle_common::Value;
 use mangle_interpreter::ProvenanceEntry;
 
-use crate::dd::build::Annotation;
-use crate::dd::session::LazyProvenance;
-use crate::dd::value::{Row, SENTINEL_EDB};
+use crate::dd::session::{LazyProvenance, NegatedFact, ProofNode, ProofTree};
+use crate::dd::value::Row;
 use crate::delta::diff_object_sides;
 use crate::edb::{ObjectFacts, single_object_facts};
 use crate::engine::{ApplySummary, Change, Engine, EvalStore, RelationDoc};
@@ -721,7 +720,14 @@ impl Core for LocalCore {
                         Some(provenance) => {
                             let row = Row::from(tuple.as_slice());
                             let annotation = provenance.why_height(relation, &row);
-                            lazy_derivation(provenance, &row, annotation, 1)
+                            // One round trip builds the whole tree; map it here.
+                            let tree = provenance.why_proof(
+                                relation,
+                                &row,
+                                annotation,
+                                PROVENANCE_MAX_DEPTH,
+                            );
+                            proof_node_to_derivation(tree.node)
                         }
                     };
                     ProvenanceTree {
@@ -1026,61 +1032,42 @@ fn recorded_derivation(
     })
 }
 
-/// One proof of `row` with the fewest steps, rebuilt by walking the DD
-/// session's lazy provenance annotations backwards. Needs no cycle check:
-/// each premise's height is strictly below its parent's.
-///
-/// `annotation` is the fact's `(rule_id, height)`: looked up once for the
-/// top-level fact and taken from the premise when recursing, so each node
-/// costs one `why_step` and no extra lookup.
-fn lazy_derivation(
-    provenance: &dyn LazyProvenance,
-    row: &Row,
-    annotation: Option<Annotation>,
-    depth: usize,
-) -> Derivation {
-    if depth > PROVENANCE_MAX_DEPTH {
-        return Derivation::DepthLimit;
+/// Map a reconstructed [`ProofTree`] to the API's [`ProvenanceTree`]. Pure: the
+/// dd layer already built the whole tree in one pass, so this just converts
+/// types (no further provenance queries).
+fn proof_tree_to_provenance(tree: ProofTree) -> ProvenanceTree {
+    ProvenanceTree {
+        relation: tree.rel,
+        row: tree.row.into_values(),
+        derivation: proof_node_to_derivation(tree.node),
     }
-    let (rule_id, height) = match annotation {
-        Some((SENTINEL_EDB, _)) => return Derivation::Input,
-        Some(annotation) => annotation,
-        // Every fact in a provenance session has an annotation.
-        None => return Derivation::Unexplained(Unexplained::NoAnnotation),
-    };
-    let Some(grounding) = provenance.why_step(rule_id, row, height) else {
-        return Derivation::Unexplained(Unexplained::NoGrounding);
-    };
-    if grounding.premises.is_empty() && grounding.negated.is_empty() {
-        return Derivation::NoPremises;
+}
+
+/// Map a [`ProofNode`] to the API's [`Derivation`].
+fn proof_node_to_derivation(node: ProofNode) -> Derivation {
+    match node {
+        ProofNode::Input => Derivation::Input,
+        ProofNode::NoPremises => Derivation::NoPremises,
+        ProofNode::DepthLimit => Derivation::DepthLimit,
+        ProofNode::NoAnnotation => Derivation::Unexplained(Unexplained::NoAnnotation),
+        ProofNode::NoGrounding => Derivation::Unexplained(Unexplained::NoGrounding),
+        ProofNode::Rule { premises, negated } => Derivation::Rule(RuleApplication {
+            premises: premises.into_iter().map(proof_tree_to_provenance).collect(),
+            absent: negated.into_iter().map(absent_fact).collect(),
+        }),
     }
-    let premises = grounding
-        .premises
-        .iter()
-        .map(|premise| ProvenanceTree {
-            relation: premise.rel.clone(),
-            row: premise.row.clone().into_values(),
-            derivation: lazy_derivation(
-                provenance,
-                &premise.row,
-                Some((premise.rule_id, premise.height)),
-                depth + 1,
-            ),
-        })
-        .collect();
-    let absent = grounding
-        .negated
-        .iter()
-        .map(|negated| AbsentFact {
-            relation: negated.rel.clone(),
-            args: negated
-                .args
-                .iter()
-                .map(|arg| arg.clone().map(Value::from))
-                .collect(),
-        })
-        .collect();
-    Derivation::Rule(RuleApplication { premises, absent })
+}
+
+/// Map a reconstructed negated premise to the API's [`AbsentFact`].
+fn absent_fact(negated: NegatedFact) -> AbsentFact {
+    AbsentFact {
+        relation: negated.rel,
+        args: negated
+            .args
+            .into_iter()
+            .map(|a| a.map(Value::from))
+            .collect(),
+    }
 }
 
 /// Lock `mutex`, treating a poisoned lock (a panic while it was held) as
