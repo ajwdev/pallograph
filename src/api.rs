@@ -13,18 +13,22 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Result;
+use kube::api::DynamicObject;
 use mangle_common::Value;
 use mangle_interpreter::ProvenanceEntry;
 
 use crate::dd::build::Annotation;
 use crate::dd::session::LazyProvenance;
 use crate::dd::value::{Row, SENTINEL_EDB};
-use crate::engine::{Engine, EvalStore, RelationDoc};
+use crate::delta::diff_object_sides;
+use crate::edb::{ObjectFacts, single_object_facts};
+use crate::engine::{ApplySummary, Change, Engine, EvalStore, RelationDoc};
 use crate::query::{
     self, body_relations, count_top_level_args, extract_vars, single_atom, split_atom,
     split_projection, suggest,
 };
 use crate::snapshot::{Diff, FrozenState};
+use crate::source::source_program;
 
 /// Which state a read sees.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +140,45 @@ pub trait Core {
     /// Add a rule to the live state. A rule that doesn't compile or evaluate
     /// is rejected and the rules are left as they were.
     fn define(&self, rule: &str) -> Result<(), WriteError>;
+
+    /// Add a Mangle program: its ground facts as facts, the rest as rules.
+    /// All or nothing: on an error, nothing it added is kept.
+    fn source(&self, program: &str) -> Result<(), WriteError>;
+
+    /// Add rows to `relation`, all of one width. Returns how many were new.
+    fn load_facts(&self, relation: &str, rows: Vec<Vec<Value>>) -> Result<usize, WriteError>;
+
+    /// Load Kubernetes objects, each replacing any object already loaded
+    /// under the same group, kind, namespace and name.
+    fn load_objects(&self, objects: Vec<KubeObject>) -> Result<ApplySummary, WriteError>;
+
+    /// Apply the change from `base` to `head` (two renders of the same
+    /// manifests) to the live objects, as a GitOps sync would: head-only
+    /// objects are added, changed ones replaced, base-only ones removed,
+    /// and identical ones left alone so live drift survives.
+    fn apply_delta(
+        &self,
+        base: Vec<KubeObject>,
+        head: Vec<KubeObject>,
+    ) -> Result<DeltaSummary, WriteError>;
+}
+
+/// A Kubernetes object as read from a cluster or manifest, with its
+/// (apiVersion, kind) when the source gives them separately (cluster lists
+/// leave them off each item). The core turns objects into facts itself, so
+/// they always match its rules.
+pub type KubeObject = (DynamicObject, Option<(String, String)>);
+
+/// What [`Core::apply_delta`] did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DeltaSummary {
+    pub added: usize,
+    pub updated: usize,
+    pub removed: usize,
+    /// In both renders with the same content, so left as live has it.
+    pub unchanged: usize,
+    /// Removed by the delta but already gone from the live state.
+    pub removed_absent: usize,
 }
 
 /// A relation, as `show` describes it.
@@ -163,6 +206,18 @@ pub enum WriteError {
     ArityMismatch {
         relation: String,
         arity: usize,
+        given: usize,
+    },
+    /// A row in a batch for [`Core::load_facts`] was the wrong width; none
+    /// of the batch was added.
+    #[error(
+        "Load error: arity mismatch: {relation}/{arity} expects {arity} column(s), \
+         but tuple {index} has {given} — check your query or source"
+    )]
+    RowArityMismatch {
+        relation: String,
+        arity: usize,
+        index: usize,
         given: usize,
     },
     /// The write landed but the state didn't evaluate afterwards, or a rule
@@ -428,6 +483,14 @@ impl LocalCore {
             let store = engine.evaluate().map_err(WriteError::Evaluation)?;
             self.remember_live(engine, store);
         }
+        Ok(())
+    }
+
+    /// Evaluate the live state now and keep it, for the loading writes,
+    /// which report the state as evaluated on both backends.
+    fn evaluate_live(&self, engine: &Engine) -> Result<(), WriteError> {
+        let store = engine.evaluate().map_err(WriteError::Evaluation)?;
+        self.remember_live(engine, store);
         Ok(())
     }
 
@@ -820,6 +883,78 @@ impl Core for LocalCore {
             }
         }
     }
+
+    fn source(&self, program: &str) -> Result<(), WriteError> {
+        let mut engine = self.engine();
+        let store = source_program(&mut engine, program).map_err(WriteError::Evaluation)?;
+        self.remember_live(&engine, store);
+        Ok(())
+    }
+
+    fn load_facts(&self, relation: &str, rows: Vec<Vec<Value>>) -> Result<usize, WriteError> {
+        let mut engine = self.engine();
+        // Rows must match the relation's existing facts, or else each other.
+        let width = engine
+            .relation_arity(relation)
+            .or_else(|| rows.first().map(Vec::len));
+        if let Some(arity) = width
+            && let Some((index, row)) = rows.iter().enumerate().find(|(_, row)| row.len() != arity)
+        {
+            return Err(WriteError::RowArityMismatch {
+                relation: relation.to_string(),
+                arity,
+                index,
+                given: row.len(),
+            });
+        }
+        let inserted = engine.add_facts(rows.into_iter().map(|row| (relation.to_string(), row)));
+        self.evaluate_live(&engine)?;
+        Ok(inserted)
+    }
+
+    fn load_objects(&self, objects: Vec<KubeObject>) -> Result<ApplySummary, WriteError> {
+        let objects = project(&objects);
+        let mut engine = self.engine();
+        let summary = engine.upsert_objects(objects);
+        self.evaluate_live(&engine)?;
+        Ok(summary)
+    }
+
+    fn apply_delta(
+        &self,
+        base: Vec<KubeObject>,
+        head: Vec<KubeObject>,
+    ) -> Result<DeltaSummary, WriteError> {
+        let (changes, added, updated, unchanged) =
+            diff_object_sides(project(&base), project(&head));
+        let removed = changes
+            .iter()
+            .filter(|change| matches!(change, Change::Retract(_)))
+            .count();
+        let mut engine = self.engine();
+        let applied = engine.apply_changes(changes);
+        self.evaluate_live(&engine)?;
+        Ok(DeltaSummary {
+            added,
+            updated,
+            removed,
+            unchanged,
+            removed_absent: applied.removed_absent,
+        })
+    }
+}
+
+/// Turn objects into the facts each emits, keyed by object.
+fn project(objects: &[KubeObject]) -> Vec<ObjectFacts> {
+    objects
+        .iter()
+        .map(|(object, type_hint)| {
+            let type_hint = type_hint
+                .as_ref()
+                .map(|(api_version, kind)| (api_version.as_str(), kind.as_str()));
+            single_object_facts(object, type_hint)
+        })
+        .collect()
 }
 
 /// Refuse a fact whose width doesn't match its relation's existing facts.
@@ -1416,6 +1551,112 @@ mod tests {
             core.define("reach_c(X) :- path(X, \"c\").").unwrap();
             let reach = sorted(core.query(&At::Live, "reach_c(X)").unwrap());
             assert_eq!(reach.rows, [vec![s("a")], vec![s("b")]]);
+        }
+    }
+
+    /// A sourced program adds its facts and rules together, or nothing.
+    #[test]
+    fn source_is_all_or_nothing() {
+        for core in cores() {
+            core.source("edge(\"c\", \"d\").\nreach_d(X) :- path(X, \"d\").\n")
+                .unwrap();
+            let reach = sorted(core.query(&At::Live, "reach_d(X)").unwrap());
+            assert_eq!(reach.rows, [vec![s("a")], vec![s("b")], vec![s("c")]]);
+
+            let rules = core.engine().rules_len();
+            assert!(
+                core.source("edge(\"d\", \"e\").\nbroken(X) :- nosuch(X\n")
+                    .is_err()
+            );
+            assert_eq!(core.engine().rules_len(), rules);
+            assert!(
+                core.query(&At::Live, "path(\"d\", Y)")
+                    .unwrap()
+                    .rows
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn load_facts_checks_widths_before_adding_any() {
+        for core in cores() {
+            let rows = vec![
+                vec![s("c"), s("d")],
+                vec![s("c"), s("d")],
+                vec![s("d"), s("e")],
+            ];
+            assert_eq!(core.load_facts("edge", rows).unwrap(), 2);
+            let error = core
+                .load_facts("edge", vec![vec![s("e"), s("f")], vec![s("x")]])
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Load error: arity mismatch: edge/2 expects 2 column(s), but tuple 1 has 1 \
+                 — check your query or source"
+            );
+            assert!(
+                core.query(&At::Live, "edge(\"e\", Y)")
+                    .unwrap()
+                    .rows
+                    .is_empty()
+            );
+        }
+    }
+
+    fn config_map(name: &str, tier: &str) -> KubeObject {
+        let object = serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": name, "namespace": "default"},
+            "data": {"tier": tier},
+        }))
+        .unwrap();
+        (object, None)
+    }
+
+    /// Objects become facts in the core: loading again replaces, and a delta
+    /// adds, updates and removes against the live objects.
+    #[test]
+    fn objects_load_and_apply_as_deltas() {
+        for core in cores() {
+            let loaded = core
+                .load_objects(vec![config_map("web", "a"), config_map("db", "a")])
+                .unwrap();
+            assert_eq!((loaded.added, loaded.updated), (2, 0));
+            let reloaded = core.load_objects(vec![config_map("web", "b")]).unwrap();
+            assert_eq!((reloaded.added, reloaded.updated), (0, 1));
+
+            let delta = core
+                .apply_delta(
+                    vec![
+                        config_map("web", "b"),
+                        config_map("db", "a"),
+                        config_map("old", "a"),
+                    ],
+                    vec![
+                        config_map("web", "c"),
+                        config_map("db", "a"),
+                        config_map("new", "a"),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(
+                delta,
+                DeltaSummary {
+                    added: 1,
+                    updated: 1,
+                    removed: 1,
+                    unchanged: 1,
+                    // `old` was never loaded.
+                    removed_absent: 1,
+                }
+            );
+            let names = sorted(
+                core.query(&At::Live, "k8s(_, \"ConfigMap\", _, N, _)")
+                    .unwrap(),
+            );
+            assert_eq!(names.rows, [vec![s("db")], vec![s("new")], vec![s("web")]]);
         }
     }
 }

@@ -13,16 +13,17 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
-use crate::api::{At, Core, Derivation, Fact, LocalCore, ProvenanceTree, RelationInfo, Rows};
-use crate::delta::diff_object_sides;
-use crate::edb::{K8sManifestsSource, ObjectFacts, ShellSource};
-use crate::engine::{ApplySummary, Change, Engine, EvalStore, RelationDoc};
+use crate::api::{
+    At, Core, Derivation, Fact, KubeObject, LocalCore, ProvenanceTree, RelationInfo, Rows,
+};
+use crate::edb::{FactSource, K8sManifestsSource, ShellSource};
+use crate::engine::{ApplySummary, Engine, EvalStore, RelationDoc};
 use crate::load;
 use crate::query::{extract_vars, split_projection};
 use crate::rbac;
 use crate::smt;
 use crate::snapshot::FrozenState;
-use crate::source::{parse_ground_tuple, source_program, split_two_atoms};
+use crate::source::{parse_ground_tuple, split_two_atoms};
 use crate::watch::WatchStatus;
 
 struct ReplHelper {
@@ -1176,6 +1177,108 @@ fn session(
                     continue;
                 }
 
+                // The loading commands read files and run commands here, on
+                // the client, and hand the core what they read.
+                if let Some(src) = line.strip_prefix("::source ") {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
+                        continue;
+                    }
+                    match load::read_source(src.trim()) {
+                        Ok(bytes) => match std::str::from_utf8(&bytes) {
+                            Ok(text) => match core.source(text) {
+                                Ok(()) => eprintln!("Sourced and evaluated."),
+                                Err(e) => command_error!("{e}"),
+                            },
+                            Err(e) => command_error!("Source error: not valid UTF-8: {e}"),
+                        },
+                        Err(e) => command_error!("Source error: {e:#}"),
+                    }
+                    continue;
+                }
+
+                if let Some(rest) = line.strip_prefix("::k8s::load ") {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
+                        continue;
+                    }
+                    let rest = rest.trim();
+                    let objects = match rest.strip_prefix('!') {
+                        Some(command) => ShellSource {
+                            command: command.trim().to_string(),
+                        }
+                        .k8s_objects(),
+                        None => K8sManifestsSource {
+                            paths: vec![rest.to_string()],
+                        }
+                        .k8s_objects(),
+                    };
+                    match objects {
+                        Ok(objects) => match core.load_objects(objects) {
+                            Ok(summary) => eprintln!(
+                                "Loaded {} object(s) ({} replaced) and evaluated.",
+                                summary.added + summary.updated,
+                                summary.updated
+                            ),
+                            Err(e) => command_error!("{e}"),
+                        },
+                        Err(e) => command_error!("Load error: {e:#}"),
+                    }
+                    continue;
+                }
+
+                if let Some(rest) = line.strip_prefix("::k8s::apply-delta ") {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
+                        continue;
+                    }
+                    let args: Vec<&str> = rest.split_whitespace().collect();
+                    let [base_arg, head_arg] = args.as_slice() else {
+                        command_error!(
+                            "Usage: k8s::apply-delta <base> <head> (a dir, .json file, or - for an empty side)"
+                        );
+                        continue;
+                    };
+                    let sides = load_delta_side(base_arg)
+                        .and_then(|base| Ok((base, load_delta_side(head_arg)?)));
+                    match sides {
+                        Ok((base, head)) => match core.apply_delta(base, head) {
+                            Ok(delta) => eprintln!(
+                                "Applied delta: +{} ~{} -{} ({} unchanged, {} removed but not live) and evaluated.",
+                                delta.added,
+                                delta.updated,
+                                delta.removed,
+                                delta.unchanged,
+                                delta.removed_absent
+                            ),
+                            Err(e) => command_error!("{e}"),
+                        },
+                        Err(e) => command_error!("Delta error: {e:#}"),
+                    }
+                    continue;
+                }
+
+                if let Some(rest) = line.strip_prefix("::load ") {
+                    if refuse_if_in_use(&in_use, &mut command_failed) {
+                        continue;
+                    }
+                    let rest = rest.trim();
+                    // Split on first whitespace: <relation> <source>
+                    let Some((relation, source)) = rest.split_once(char::is_whitespace) else {
+                        command_error!(
+                            "Usage: load <relation> <source>  (source is a file path or ! <cmd>)"
+                        );
+                        continue;
+                    };
+                    match load::read_tuples(source.trim()) {
+                        Ok(rows) => match core.load_facts(relation, rows) {
+                            Ok(n) => {
+                                eprintln!("Inserted {n} fact(s) into {relation} and evaluated.");
+                            }
+                            Err(e) => command_error!("{e}"),
+                        },
+                        Err(e) => command_error!("Load error: {e:#}"),
+                    }
+                    continue;
+                }
+
                 // Commands not yet on `Core` hold the engine and the snapshots
                 // for the whole command, so nothing else changes them partway
                 // through.
@@ -1409,131 +1512,6 @@ fn session(
                         _ => command_error!(
                             "Usage: rbac::diff <snap>  or  rbac::diff <snap1> <snap2>"
                         ),
-                    }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("::source ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let src = rest.trim();
-                    match load::read_source(src) {
-                        Ok(bytes) => match std::str::from_utf8(&bytes) {
-                            Ok(text) => match source_program(engine, text) {
-                                Ok(new_store) => {
-                                    core.remember_live(engine, new_store);
-                                    eprintln!("Sourced and evaluated.");
-                                }
-                                Err(e) => command_error!("Error: {e:#}"),
-                            },
-                            Err(e) => command_error!("Source error: not valid UTF-8: {e}"),
-                        },
-                        Err(e) => command_error!("Source error: {e:#}"),
-                    }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("::k8s::load ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let rest = rest.trim();
-                    let source_result: anyhow::Result<Box<dyn crate::edb::FactSource>> =
-                        if let Some(command) = rest.strip_prefix('!') {
-                            let command = command.trim().to_string();
-                            Ok(Box::new(ShellSource { command }))
-                        } else {
-                            Ok(Box::new(K8sManifestsSource {
-                                paths: vec![rest.to_string()],
-                            }))
-                        };
-                    match source_result.and_then(|mut src| engine.populate_from(src.as_mut())) {
-                        Ok(summary) => match engine.evaluate() {
-                            Ok(new_store) => {
-                                core.remember_live(engine, new_store);
-                                eprintln!(
-                                    "Loaded {} object(s) ({} replaced) and evaluated.",
-                                    summary.added + summary.updated,
-                                    summary.updated
-                                );
-                            }
-                            Err(e) => command_error!("Error: {e:#}"),
-                        },
-                        Err(e) => command_error!("Load error: {e:#}"),
-                    }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("::k8s::apply-delta ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let args: Vec<&str> = rest.split_whitespace().collect();
-                    let [base_arg, head_arg] = args.as_slice() else {
-                        command_error!(
-                            "Usage: k8s::apply-delta <base> <head> (a dir, .json file, or - for an empty side)"
-                        );
-                        continue;
-                    };
-                    // Load both rendered sides into key-indexed maps. This
-                    // is transient per-command state, not a Rust-side view of
-                    // the live EDB: the delta is applied straight back.
-                    let sides = load_delta_side(base_arg).and_then(|base| {
-                        let head = load_delta_side(head_arg)?;
-                        Ok((base, head))
-                    });
-                    let (base, head) = match sides {
-                        Ok(sides) => sides,
-                        Err(e) => {
-                            command_error!("Delta error: {e:#}");
-                            continue;
-                        }
-                    };
-                    let (changes, added, updated, unchanged) = diff_object_sides(base, head);
-                    let removed = changes
-                        .iter()
-                        .filter(|c| matches!(c, Change::Retract(_)))
-                        .count();
-                    let summary = engine.apply_changes(changes);
-                    match engine.evaluate() {
-                        Ok(new_store) => {
-                            core.remember_live(engine, new_store);
-                            eprintln!(
-                                "Applied delta: +{added} ~{updated} -{removed} \
-                                 ({unchanged} unchanged, {} removed but not live) and evaluated.",
-                                summary.removed_absent
-                            );
-                        }
-                        Err(e) => command_error!("Error: {e:#}"),
-                    }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("::load ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let rest = rest.trim();
-                    // Split on first whitespace: <relation> <source>
-                    let (relation, source) = match rest.find(|c: char| c.is_whitespace()) {
-                        Some(idx) => (&rest[..idx], rest[idx + 1..].trim()),
-                        None => {
-                            command_error!(
-                                "Usage: load <relation> <source>  (source is a file path or ! <cmd>)"
-                            );
-                            continue;
-                        }
-                    };
-                    match load::load_tuples(engine, relation, source) {
-                        Ok(n) => match engine.evaluate() {
-                            Ok(new_store) => {
-                                core.remember_live(engine, new_store);
-                                eprintln!("Inserted {n} fact(s) into {relation} and evaluated.");
-                            }
-                            Err(e) => command_error!("Error: {e:#}"),
-                        },
-                        Err(e) => command_error!("Load error: {e:#}"),
                     }
                     continue;
                 }
@@ -2633,18 +2611,18 @@ fn parse_fact(input: &str) -> anyhow::Result<Fact> {
     Ok(Fact { relation, row })
 }
 
-/// Load one side of a `apply-delta` into its rendered objects. A literal
+/// Read one side of an `apply-delta` into its objects. A literal
 /// `-` is an intentionally empty side (a brand-new chart has no base; a
 /// deleted chart has no head), distinct from a path that matches no files,
 /// which still errors like any manifest load.
-fn load_delta_side(arg: &str) -> Result<Vec<ObjectFacts>> {
+fn load_delta_side(arg: &str) -> Result<Vec<KubeObject>> {
     if arg == "-" {
         return Ok(Vec::new());
     }
-    let mut source = K8sManifestsSource {
+    K8sManifestsSource {
         paths: vec![arg.to_string()],
-    };
-    crate::edb::object_facts(&mut source)
+    }
+    .k8s_objects()
 }
 
 /// Longest cell, in characters, before it is cut with a trailing `…`.
