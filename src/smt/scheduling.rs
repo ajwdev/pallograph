@@ -9,6 +9,7 @@ use z3::ast::{Ast, BV, Bool, String as Z3String};
 
 use crate::engine::EvalStore;
 
+#[derive(Debug)]
 pub struct UnschedulablePod {
     pub namespace: String,
     pub name: String,
@@ -101,6 +102,7 @@ pub fn check_node_selector(store: &EvalStore) -> Vec<UnschedulablePod> {
     unschedulable
 }
 
+#[derive(Debug)]
 pub enum PlacementResult {
     /// Valid assignment: pod key → node name
     Sat(Vec<(String, String)>),
@@ -262,6 +264,7 @@ pub fn check_anti_affinity_placement(store: &EvalStore) -> PlacementResult {
     }
 }
 
+#[derive(Debug)]
 pub struct CoverageGap {
     /// The synthesized nodeSelector that no pool can satisfy.
     pub labels: Vec<(String, String)>,

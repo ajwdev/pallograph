@@ -1283,6 +1283,14 @@ fn session(
                     }
                     continue;
                 }
+                if let Some(rest) = line.strip_prefix("::sched::") {
+                    match sched_command(rest.trim(), core, &current_at(&in_use), format) {
+                        CheckResult::Pass => {}
+                        CheckResult::Fail => had_failure = true,
+                        CheckResult::Error => command_failed = true,
+                    }
+                    continue;
+                }
 
                 // Commands not yet on `Core` hold the engine and the snapshots
                 // for the whole command, so nothing else changes them partway
@@ -1485,15 +1493,6 @@ fn session(
                 }
                 if line == "::k8s" {
                     print_subsystem_help("k8s");
-                    continue;
-                }
-                if let Some(rest) = line.strip_prefix("::sched::") {
-                    let active = active_store(&current_store, &snapshots, &in_use);
-                    match sched_command(rest.trim(), active, format) {
-                        CheckResult::Pass => {}
-                        CheckResult::Fail => had_failure = true,
-                        CheckResult::Error => command_failed = true,
-                    }
                     continue;
                 }
                 if let Some(rest) = line.strip_prefix("::k8s::") {
@@ -2097,13 +2096,19 @@ fn rbac_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) ->
 
 /// Run a `sched::` scheduling/placement check. Same `Pass`/`Fail`/`Error`
 /// contract as [`rbac_command`].
-fn sched_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckResult {
+fn sched_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) -> CheckResult {
     let ndjson = format == OutputFormat::Ndjson;
     let subcommand = input.split_whitespace().next().unwrap_or("").trim();
 
     match subcommand {
         "node-selector" => {
-            let unschedulable = smt::scheduling::check_node_selector(store);
+            let unschedulable = match core.sched_node_selector(at) {
+                Ok(unschedulable) => unschedulable,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return CheckResult::Error;
+                }
+            };
             if unschedulable.is_empty() {
                 if ndjson {
                     println!(
@@ -2133,7 +2138,14 @@ fn sched_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckR
         }
         "anti-affinity" => {
             use smt::scheduling::PlacementResult;
-            match smt::scheduling::check_anti_affinity_placement(store) {
+            let placement = match core.sched_anti_affinity(at) {
+                Ok(placement) => placement,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return CheckResult::Error;
+                }
+            };
+            match placement {
                 PlacementResult::Sat(assignment) if assignment.is_empty() => {
                     if ndjson {
                         println!(
@@ -2178,7 +2190,13 @@ fn sched_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckR
             }
         }
         "karpenter" => {
-            let gaps = smt::scheduling::find_karpenter_coverage_gaps(store, 5);
+            let gaps = match core.sched_karpenter_gaps(at, 5) {
+                Ok(gaps) => gaps,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return CheckResult::Error;
+                }
+            };
             if gaps.is_empty() {
                 if ndjson {
                     println!(

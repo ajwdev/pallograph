@@ -29,6 +29,7 @@ use crate::query::{
 use crate::rbac::diff::{AccessDiff, access_diff};
 use crate::rbac::{PermissionTables, RbacAccessModel, Violation};
 use crate::selector::parse_selector;
+use crate::smt::scheduling::{self, CoverageGap, PlacementResult, UnschedulablePod};
 use crate::snapshot::{Diff, FrozenState};
 use crate::source::source_program;
 
@@ -202,6 +203,18 @@ pub trait Core {
 
     /// What changed in RBAC access going from `before` to `after`.
     fn rbac_diff(&self, before: &At, after: &At) -> Result<AccessDiff, ReadError>;
+
+    /// Pods with a nodeSelector no node satisfies (Z3 finds no node: unsat).
+    fn sched_node_selector(&self, at: &At) -> Result<Vec<UnschedulablePod>, ReadError>;
+
+    /// A placement of every pod with required anti-affinity onto the nodes
+    /// that respects it, or [`PlacementResult::Unsat`] when none exists.
+    fn sched_anti_affinity(&self, at: &At) -> Result<PlacementResult, ReadError>;
+
+    /// Up to `max_gaps` nodeSelectors, drawn from the NodePools' own labels,
+    /// that no Karpenter NodePool can satisfy.
+    fn sched_karpenter_gaps(&self, at: &At, max_gaps: usize)
+    -> Result<Vec<CoverageGap>, ReadError>;
 }
 
 /// A permission to check with [`Core::rbac_reaches`].
@@ -1134,15 +1147,43 @@ impl Core for LocalCore {
         let after = tables(self.read_state(&engine, &snapshots, after)?);
         Ok(access_diff(&before, &after))
     }
+
+    fn sched_node_selector(&self, at: &At) -> Result<Vec<UnschedulablePod>, ReadError> {
+        self.with_store(at, scheduling::check_node_selector)
+    }
+
+    fn sched_anti_affinity(&self, at: &At) -> Result<PlacementResult, ReadError> {
+        self.with_store(at, scheduling::check_anti_affinity_placement)
+    }
+
+    fn sched_karpenter_gaps(
+        &self,
+        at: &At,
+        max_gaps: usize,
+    ) -> Result<Vec<CoverageGap>, ReadError> {
+        self.with_store(at, |store| {
+            scheduling::find_karpenter_coverage_gaps(store, max_gaps)
+        })
+    }
 }
 
 impl LocalCore {
-    /// The RBAC access model over the state at `at`.
-    fn rbac_model(&self, at: &At) -> Result<RbacAccessModel, ReadError> {
+    /// Run `analysis` over the state at `at`, for the checks that read a
+    /// whole store.
+    fn with_store<T>(
+        &self,
+        at: &At,
+        analysis: impl FnOnce(&EvalStore) -> T,
+    ) -> Result<T, ReadError> {
         let engine = self.engine();
         let snapshots = self.snapshots();
         let state = self.read_state(&engine, &snapshots, at)?;
-        Ok(RbacAccessModel::from_store(state.store()))
+        Ok(analysis(state.store()))
+    }
+
+    /// The RBAC access model over the state at `at`.
+    fn rbac_model(&self, at: &At) -> Result<RbacAccessModel, ReadError> {
+        self.with_store(at, RbacAccessModel::from_store)
     }
 }
 
@@ -1883,6 +1924,26 @@ mod tests {
                     .err()
                     .unwrap()
                     .to_string(),
+                "No snapshot named 'nope'."
+            );
+        }
+    }
+
+    /// The scheduling checks read the state at `At`. With no pods, nodes or
+    /// NodePools there's nothing unschedulable and no gap; anti-affinity
+    /// with no nodes at all reports no placement (`Unsat`), even with no pods.
+    #[test]
+    fn sched_checks_read_the_state_asked_for() {
+        for core in cores() {
+            assert!(core.sched_node_selector(&At::Live).unwrap().is_empty());
+            assert!(matches!(
+                core.sched_anti_affinity(&At::Live).unwrap(),
+                PlacementResult::Unsat
+            ));
+            assert!(core.sched_karpenter_gaps(&At::Live, 5).unwrap().is_empty());
+            let missing = At::Snapshot("nope".to_string());
+            assert_eq!(
+                core.sched_node_selector(&missing).unwrap_err().to_string(),
                 "No snapshot named 'nope'."
             );
         }
