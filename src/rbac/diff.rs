@@ -4,7 +4,7 @@
 //! Access diff between two sets of RBAC grants (`rbac::diff`), computed in
 //! Rust over `PermissionTables`. No Z3 involved.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::facts::{ns_covers, value_covers};
 use super::{PermissionEntry, PermissionTables, Subject};
@@ -174,6 +174,143 @@ fn can_diff_witnesses(have: &PermissionTables, not_have: &PermissionTables) -> V
             verb,
         })
         .collect()
+}
+
+/// What changed in RBAC access from one state to another (`rbac::diff`).
+pub struct AccessDiff {
+    /// Permissions granted directly that weren't before, and the reverse.
+    pub can_gained: Vec<CanDiff>,
+    pub can_lost: Vec<CanDiff>,
+    /// The same, counting what each principal can reach by escalating.
+    pub effective_gained: Vec<EffectiveChange>,
+    pub effective_lost: Vec<EffectiveChange>,
+    /// Each principal whose access changed, those that gained anything
+    /// first. A permission that changed both directly and effectively
+    /// counts once.
+    pub verdicts: Vec<PrincipalVerdict>,
+}
+
+impl AccessDiff {
+    /// Permissions gained across every principal, the count that fails the
+    /// check.
+    pub fn total_gained(&self) -> usize {
+        self.verdicts.iter().map(|verdict| verdict.gained).sum()
+    }
+
+    pub fn total_lost(&self) -> usize {
+        self.verdicts.iter().map(|verdict| verdict.lost).sum()
+    }
+}
+
+/// One escalation-aware change, with the identities and groups the principal
+/// reaches it through. Empty `via` means the principal holds it directly.
+pub struct EffectiveChange {
+    pub diff: EffDiff,
+    pub via: BTreeSet<Subject>,
+}
+
+pub struct PrincipalVerdict {
+    pub principal: Subject,
+    pub gained: usize,
+    pub lost: usize,
+}
+
+/// Every change in access from `before` to `after`. Escalation targets for
+/// gains are read from `after`, for losses from `before`: the state where
+/// the permission was held.
+pub fn access_diff(before: &PermissionTables, after: &PermissionTables) -> AccessDiff {
+    let can_gained = check_permission_expansion(before, after);
+    let can_lost = check_permission_contraction(before, after);
+    let effective_gained = check_effective_can_expansion(before, after);
+    let effective_lost = check_effective_can_contraction(before, after);
+    let verdicts =
+        per_principal_verdicts(&can_gained, &can_lost, &effective_gained, &effective_lost);
+    let with_targets = |diffs: Vec<EffDiff>, tables: &PermissionTables| {
+        diffs
+            .into_iter()
+            .map(|diff| {
+                let permission = (
+                    diff.namespace.clone(),
+                    diff.apigroup.clone(),
+                    diff.resource.clone(),
+                    diff.verb.clone(),
+                );
+                let via = tables.escalation_via(&diff.principal, &permission);
+                EffectiveChange { diff, via }
+            })
+            .collect()
+    };
+    AccessDiff {
+        can_gained,
+        can_lost,
+        effective_gained: with_targets(effective_gained, after),
+        effective_lost: with_targets(effective_lost, before),
+        verdicts,
+    }
+}
+
+/// Count each principal's gained and lost permissions, a permission changed
+/// both directly and effectively once. Principals that gained anything sort
+/// first, then by principal.
+fn per_principal_verdicts(
+    can_gained: &[CanDiff],
+    can_lost: &[CanDiff],
+    effective_gained: &[EffDiff],
+    effective_lost: &[EffDiff],
+) -> Vec<PrincipalVerdict> {
+    type Key = (Subject, String, String, String, String);
+    let key = |p: &Subject, ns: &str, g: &str, r: &str, v: &str| -> Key {
+        (
+            p.clone(),
+            ns.to_string(),
+            g.to_string(),
+            r.to_string(),
+            v.to_string(),
+        )
+    };
+    let keys = |can: &[CanDiff], effective: &[EffDiff]| -> BTreeSet<Key> {
+        can.iter()
+            .map(|d| {
+                key(
+                    &d.principal,
+                    &d.namespace,
+                    &d.apigroup,
+                    &d.resource,
+                    &d.verb,
+                )
+            })
+            .chain(effective.iter().map(|d| {
+                key(
+                    &d.principal,
+                    &d.namespace,
+                    &d.apigroup,
+                    &d.resource,
+                    &d.verb,
+                )
+            }))
+            .collect()
+    };
+    let mut counts: BTreeMap<Subject, (usize, usize)> = BTreeMap::new();
+    for (principal, ..) in keys(can_gained, effective_gained) {
+        counts.entry(principal).or_default().0 += 1;
+    }
+    for (principal, ..) in keys(can_lost, effective_lost) {
+        counts.entry(principal).or_default().1 += 1;
+    }
+    let mut verdicts: Vec<PrincipalVerdict> = counts
+        .into_iter()
+        .map(|(principal, (gained, lost))| PrincipalVerdict {
+            principal,
+            gained,
+            lost,
+        })
+        .collect();
+    verdicts.sort_by(|a, b| {
+        (b.gained > 0)
+            .cmp(&(a.gained > 0))
+            .then(a.principal.cmp(&b.principal))
+    });
+    verdicts
 }
 
 fn eff_diff_witnesses(have: &PermissionTables, not_have: &PermissionTables) -> Vec<EffDiff> {
@@ -538,5 +675,39 @@ mod tests {
         );
         assert!(can(check_permission_expansion(&with, &without)).is_empty());
         assert!(effective(check_effective_can_expansion(&with, &without)).is_empty());
+    }
+
+    /// The report counts each principal's changes once, puts principals
+    /// that gained anything first, and marks a directly held gain as having
+    /// no escalation target.
+    #[test]
+    fn access_diff_counts_each_change_once_and_orders_gains_first() {
+        let store = |grants: &[(&str, &str)]| {
+            let mut store = MemStore::new();
+            for (user, verb) in grants {
+                store.add_fact("direct_perm", user_grant(user, "default", "", "pods", verb));
+            }
+            store
+        };
+        let before = tables_from_store(&store(&[("alice", "get"), ("bob", "get")]));
+        let after = tables_from_store(&store(&[("bob", "get"), ("bob", "delete")]));
+
+        let diff = access_diff(&before, &after);
+        let verdicts: Vec<(String, usize, usize)> = diff
+            .verdicts
+            .iter()
+            .map(|v| (v.principal.name.clone(), v.gained, v.lost))
+            .collect();
+        // bob's new delete is both a direct and an effective gain: once.
+        assert_eq!(
+            verdicts,
+            [("bob".to_string(), 1, 0), ("alice".to_string(), 0, 1)]
+        );
+        assert_eq!((diff.total_gained(), diff.total_lost()), (1, 1));
+        let [gain] = &diff.effective_gained[..] else {
+            panic!("one effective gain")
+        };
+        assert_eq!(gain.diff.verb, "delete");
+        assert!(gain.via.is_empty(), "held directly, not via escalation");
     }
 }

@@ -26,6 +26,8 @@ use crate::query::{
     self, body_relations, count_top_level_args, extract_vars, single_atom, split_atom,
     split_projection, suggest,
 };
+use crate::rbac::diff::{AccessDiff, access_diff};
+use crate::rbac::{PermissionTables, RbacAccessModel, Violation};
 use crate::selector::parse_selector;
 use crate::snapshot::{Diff, FrozenState};
 use crate::source::source_program;
@@ -173,6 +175,55 @@ pub trait Core {
         namespace: &str,
         selector: &str,
     ) -> Result<Rows, MatchError>;
+
+    /// Principals other than `expected` granted `verb` on `resource` in
+    /// `namespace` directly (`""` for cluster-wide grants), each with the
+    /// bindings that grant it.
+    fn rbac_access(
+        &self,
+        at: &At,
+        namespace: &str,
+        resource: &str,
+        verb: &str,
+        expected: &[&str],
+    ) -> Result<Vec<Violation>, ReadError>;
+
+    /// Principals other than those expected that can reach a permission,
+    /// directly or by escalating, each with the paths that get there.
+    fn rbac_reaches(&self, at: &At, query: &ReachesQuery) -> Result<Reaches, ReadError>;
+
+    /// Principals other than `allowed` with any access in `namespace`.
+    fn rbac_isolation(
+        &self,
+        at: &At,
+        namespace: &str,
+        allowed: &[&str],
+    ) -> Result<Vec<Violation>, ReadError>;
+
+    /// What changed in RBAC access going from `before` to `after`.
+    fn rbac_diff(&self, before: &At, after: &At) -> Result<AccessDiff, ReadError>;
+}
+
+/// A permission to check with [`Core::rbac_reaches`].
+#[derive(Debug, Clone, Default)]
+pub struct ReachesQuery {
+    pub namespace: String,
+    pub apigroup: String,
+    pub resource: String,
+    pub verb: String,
+    /// Principals allowed to reach it, left out of the answer.
+    pub expected: Vec<String>,
+    /// Also report escalation for principals that hold it directly.
+    pub include_direct: bool,
+    /// Also report built-in Kubernetes principals (`system:...`).
+    pub include_builtins: bool,
+}
+
+/// Who can reach a permission: those granted it directly, and those who get
+/// it by escalating (impersonation, RBAC writes, and the like).
+pub struct Reaches {
+    pub direct: Vec<Violation>,
+    pub escalation: Vec<Violation>,
 }
 
 /// Why a selector match failed. Each displays as the line the REPL prints
@@ -1026,6 +1077,73 @@ impl Core for LocalCore {
             relation: None,
         })
     }
+
+    fn rbac_access(
+        &self,
+        at: &At,
+        namespace: &str,
+        resource: &str,
+        verb: &str,
+        expected: &[&str],
+    ) -> Result<Vec<Violation>, ReadError> {
+        let model = self.rbac_model(at)?;
+        Ok(model.check_access_invariant(namespace, resource, verb, expected))
+    }
+
+    fn rbac_reaches(&self, at: &At, query: &ReachesQuery) -> Result<Reaches, ReadError> {
+        let mut model = self.rbac_model(at)?;
+        model.include_builtins = query.include_builtins;
+        let expected: Vec<&str> = query.expected.iter().map(String::as_str).collect();
+        let (namespace, apigroup, resource, verb) = (
+            query.namespace.as_str(),
+            query.apigroup.as_str(),
+            query.resource.as_str(),
+            query.verb.as_str(),
+        );
+        Ok(Reaches {
+            direct: model.direct_violations(namespace, apigroup, resource, verb),
+            escalation: model.check_reaches(
+                namespace,
+                apigroup,
+                resource,
+                verb,
+                &expected,
+                query.include_direct,
+            ),
+        })
+    }
+
+    fn rbac_isolation(
+        &self,
+        at: &At,
+        namespace: &str,
+        allowed: &[&str],
+    ) -> Result<Vec<Violation>, ReadError> {
+        let model = self.rbac_model(at)?;
+        Ok(model.check_namespace_isolation(namespace, allowed))
+    }
+
+    fn rbac_diff(&self, before: &At, after: &At) -> Result<AccessDiff, ReadError> {
+        let engine = self.engine();
+        let snapshots = self.snapshots();
+        let tables = |state: State<'_>| {
+            let store = state.store();
+            PermissionTables::from_scan(&|relation| store.scan(relation).to_vec())
+        };
+        let before = tables(self.read_state(&engine, &snapshots, before)?);
+        let after = tables(self.read_state(&engine, &snapshots, after)?);
+        Ok(access_diff(&before, &after))
+    }
+}
+
+impl LocalCore {
+    /// The RBAC access model over the state at `at`.
+    fn rbac_model(&self, at: &At) -> Result<RbacAccessModel, ReadError> {
+        let engine = self.engine();
+        let snapshots = self.snapshots();
+        let state = self.read_state(&engine, &snapshots, at)?;
+        Ok(RbacAccessModel::from_store(state.store()))
+    }
 }
 
 /// Turn objects into the facts each emits, keyed by object.
@@ -1732,6 +1850,41 @@ mod tests {
             assert!(none.rows.is_empty());
             assert_eq!(none.columns, ["apiVersion", "kind", "namespace", "name"]);
             assert_eq!(core.version(), version);
+        }
+    }
+
+    /// The RBAC checks read the state at `At`; a state with no RBAC facts
+    /// has nothing to report, and an unknown snapshot is an error.
+    #[test]
+    fn rbac_checks_read_the_state_asked_for() {
+        for core in cores() {
+            assert!(
+                core.rbac_access(&At::Live, "default", "pods", "get", &[])
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                core.rbac_isolation(&At::Live, "default", &[])
+                    .unwrap()
+                    .is_empty()
+            );
+            let reaches = core
+                .rbac_reaches(&At::Live, &ReachesQuery::default())
+                .unwrap();
+            assert!(reaches.direct.is_empty() && reaches.escalation.is_empty());
+            assert_eq!(
+                core.rbac_diff(&At::Live, &At::Live).unwrap().total_gained(),
+                0
+            );
+
+            let missing = At::Snapshot("nope".to_string());
+            assert_eq!(
+                core.rbac_diff(&missing, &At::Live)
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "No snapshot named 'nope'."
+            );
         }
     }
 }

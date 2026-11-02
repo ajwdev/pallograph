@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 
 use anyhow::{Context as _, Result};
@@ -14,13 +14,15 @@ use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
 use crate::api::{
-    At, Core, Derivation, Fact, KubeObject, LocalCore, ProvenanceTree, RelationInfo, Rows,
+    At, Core, Derivation, Fact, KubeObject, LocalCore, ProvenanceTree, ReachesQuery, RelationInfo,
+    Rows,
 };
 use crate::edb::{FactSource, K8sManifestsSource, ShellSource};
 use crate::engine::{ApplySummary, EvalStore, RelationDoc};
 use crate::load;
 use crate::query::{extract_vars, split_projection};
 use crate::rbac;
+use crate::rbac::diff::AccessDiff;
 use crate::smt;
 use crate::snapshot::FrozenState;
 use crate::source::{parse_ground_tuple, split_two_atoms};
@@ -1235,6 +1237,53 @@ fn session(
                     continue;
                 }
 
+                if line == "::rbac::diff" {
+                    command_error!("Usage: rbac::diff <snap>  or  rbac::diff <snap1> <snap2>");
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("::rbac::diff ") {
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    // One snapshot diffs against whatever is in use, and the
+                    // header names it instead of "current".
+                    let (before, after, before_label, after_label) = match parts.as_slice() {
+                        [name] => (
+                            At::Snapshot(name.to_string()),
+                            current_at(&in_use),
+                            *name,
+                            in_use.as_deref().unwrap_or("current"),
+                        ),
+                        [name1, name2] => (
+                            At::Snapshot(name1.to_string()),
+                            At::Snapshot(name2.to_string()),
+                            *name1,
+                            *name2,
+                        ),
+                        _ => {
+                            command_error!(
+                                "Usage: rbac::diff <snap>  or  rbac::diff <snap1> <snap2>"
+                            );
+                            continue;
+                        }
+                    };
+                    match core.rbac_diff(&before, &after) {
+                        Ok(diff) => {
+                            if !print_access_diff(&diff, before_label, after_label) {
+                                had_failure = true;
+                            }
+                        }
+                        Err(e) => command_error!("{e}"),
+                    }
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("::rbac::") {
+                    match rbac_command(rest.trim(), core, &current_at(&in_use), format) {
+                        CheckResult::Pass => {}
+                        CheckResult::Fail => had_failure = true,
+                        CheckResult::Error => command_failed = true,
+                    }
+                    continue;
+                }
+
                 // Commands not yet on `Core` hold the engine and the snapshots
                 // for the whole command, so nothing else changes them partway
                 // through.
@@ -1422,56 +1471,6 @@ fn session(
                     continue;
                 }
 
-                if line == "::rbac::diff" {
-                    command_error!("Usage: rbac::diff <snap>  or  rbac::diff <snap1> <snap2>");
-                    continue;
-                }
-                if let Some(rest) = line.strip_prefix("::rbac::diff ") {
-                    let parts: Vec<&str> = rest.trim().splitn(2, ' ').collect();
-                    let lookup = |n: &str| -> Option<&FrozenState> { snapshots.get(n) };
-                    let tables_of = |store: &EvalStore| {
-                        rbac::PermissionTables::from_scan(&|rel| store.scan(rel).to_vec())
-                    };
-
-                    match parts.as_slice() {
-                        [name] => {
-                            let Some(before_snap) = lookup(name) else {
-                                command_error!("No snapshot named '{}'.", name);
-                                continue;
-                            };
-                            // The implicit "current" side is whatever is in
-                            // use; the header names it instead of "current".
-                            let after = active_store(&current_store, &snapshots, &in_use);
-                            let after_label = in_use.as_deref().unwrap_or("current");
-                            let before_tables = tables_of(&before_snap.store);
-                            let after_tables = tables_of(after);
-                            if !print_access_diff(&before_tables, &after_tables, name, after_label)
-                            {
-                                had_failure = true;
-                            }
-                        }
-                        [name1, name2] => {
-                            let Some(s1) = lookup(name1) else {
-                                command_error!("No snapshot named '{}'.", name1);
-                                continue;
-                            };
-                            let Some(s2) = lookup(name2) else {
-                                command_error!("No snapshot named '{}'.", name2);
-                                continue;
-                            };
-                            let t1 = tables_of(&s1.store);
-                            let t2 = tables_of(&s2.store);
-                            if !print_access_diff(&t1, &t2, name1, name2) {
-                                had_failure = true;
-                            }
-                        }
-                        _ => command_error!(
-                            "Usage: rbac::diff <snap>  or  rbac::diff <snap1> <snap2>"
-                        ),
-                    }
-                    continue;
-                }
-
                 // Subsystem container-commands. A bare namespace lists its
                 // subcommands; `ns::sub` runs one. The k8s object commands have
                 // their own blocks above, so a leftover `::k8s::` here is an
@@ -1486,15 +1485,6 @@ fn session(
                 }
                 if line == "::k8s" {
                     print_subsystem_help("k8s");
-                    continue;
-                }
-                if let Some(rest) = line.strip_prefix("::rbac::") {
-                    let active = active_store(&current_store, &snapshots, &in_use);
-                    match rbac_command(rest.trim(), active, format) {
-                        CheckResult::Pass => {}
-                        CheckResult::Fail => had_failure = true,
-                        CheckResult::Error => command_failed = true,
-                    }
                     continue;
                 }
                 if let Some(rest) = line.strip_prefix("::sched::") {
@@ -1704,21 +1694,9 @@ fn print_reaches_grouped(violations: &[rbac::Violation]) {
 
 /// Print what RBAC permissions changed from `before` to `after`. Returns
 /// `false` when any permission was gained (the `FAIL` verdict).
-fn print_access_diff(
-    before: &rbac::PermissionTables,
-    after: &rbac::PermissionTables,
-    before_label: &str,
-    after_label: &str,
-) -> bool {
-    let can_gained = rbac::diff::check_permission_expansion(before, after);
-    let can_lost = rbac::diff::check_permission_contraction(before, after);
-    let eff_gained = rbac::diff::check_effective_can_expansion(before, after);
-    let eff_lost = rbac::diff::check_effective_can_contraction(before, after);
-
-    let verdicts = per_principal_verdicts(&can_gained, &can_lost, &eff_gained, &eff_lost);
-    let total_gained: usize = verdicts.iter().map(|(_, gained, _)| gained).sum();
-    let total_lost: usize = verdicts.iter().map(|(_, _, lost)| lost).sum();
-
+fn print_access_diff(diff: &AccessDiff, before_label: &str, after_label: &str) -> bool {
+    let total_gained = diff.total_gained();
+    let total_lost = diff.total_lost();
     if total_gained > 0 {
         println!("FAIL  {} new permission(s) granted", total_gained);
     } else if total_lost > 0 {
@@ -1732,161 +1710,74 @@ fn print_access_diff(
         "=== Access diff: '{}' → '{}' ===",
         before_label, after_label
     );
-    if !verdicts.is_empty() {
+    if !diff.verdicts.is_empty() {
         println!();
         println!("  Per-principal:");
-        let col_w = verdicts
+        let col_w = diff
+            .verdicts
             .iter()
-            .map(|(p, _, _)| p.to_string().len())
+            .map(|verdict| verdict.principal.to_string().len())
             .max()
             .unwrap_or(8)
             .min(32);
-        for (principal, gained, lost) in &verdicts {
-            let label = if *gained > 0 { "FAIL" } else { "PASS" };
-            let principal = principal.to_string();
-            println!("    {label}  {principal:<col_w$}  +{gained} gained / -{lost} lost");
+        for verdict in &diff.verdicts {
+            let label = if verdict.gained > 0 { "FAIL" } else { "PASS" };
+            let principal = verdict.principal.to_string();
+            println!(
+                "    {label}  {principal:<col_w$}  +{} gained / -{} lost",
+                verdict.gained, verdict.lost
+            );
         }
         println!();
     }
 
-    if !can_gained.is_empty() {
-        println!("  CAN GAINED ({}):", can_gained.len());
-        let mut sorted = can_gained;
+    for (heading, changes) in [
+        ("CAN GAINED", &diff.can_gained),
+        ("CAN LOST", &diff.can_lost),
+    ] {
+        if changes.is_empty() {
+            continue;
+        }
+        println!("  {heading} ({}):", changes.len());
+        let mut sorted: Vec<&rbac::diff::CanDiff> = changes.iter().collect();
         sorted.sort_by(|a, b| a.principal.cmp(&b.principal));
-        for d in &sorted {
+        for d in sorted {
             println!(
                 "    {}  ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
                 d.principal, d.namespace, d.apigroup, d.resource, d.verb
             );
         }
     }
-    if !can_lost.is_empty() {
-        println!("  CAN LOST ({}):", can_lost.len());
-        let mut sorted = can_lost;
-        sorted.sort_by(|a, b| a.principal.cmp(&b.principal));
-        for d in &sorted {
-            println!(
-                "    {}  ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
-                d.principal, d.namespace, d.apigroup, d.resource, d.verb
-            );
-        }
-    }
-    if !eff_gained.is_empty() {
+    if !diff.effective_gained.is_empty() {
         println!(
             "  EFFECTIVE GAINED ({}) [escalation-aware]:",
-            eff_gained.len()
+            diff.effective_gained.len()
         );
-        print_eff_diffs_grouped(&eff_gained, after);
+        print_eff_diffs_grouped(&diff.effective_gained);
     }
-    if !eff_lost.is_empty() {
-        println!("  EFFECTIVE LOST ({}) [escalation-aware]:", eff_lost.len());
-        print_eff_diffs_grouped(&eff_lost, before);
+    if !diff.effective_lost.is_empty() {
+        println!(
+            "  EFFECTIVE LOST ({}) [escalation-aware]:",
+            diff.effective_lost.len()
+        );
+        print_eff_diffs_grouped(&diff.effective_lost);
     }
     total_gained == 0
 }
 
-fn per_principal_verdicts(
-    can_gained: &[rbac::diff::CanDiff],
-    can_lost: &[rbac::diff::CanDiff],
-    eff_gained: &[rbac::diff::EffDiff],
-    eff_lost: &[rbac::diff::EffDiff],
-) -> Vec<(rbac::Subject, usize, usize)> {
-    // A permission can be both a direct and an effective change; count it once.
-    let key = |p: &rbac::Subject, ns: &str, g: &str, r: &str, v: &str| {
-        (
-            p.clone(),
-            ns.to_string(),
-            g.to_string(),
-            r.to_string(),
-            v.to_string(),
-        )
-    };
-    let gained: BTreeSet<_> = can_gained
-        .iter()
-        .map(|d| {
-            key(
-                &d.principal,
-                &d.namespace,
-                &d.apigroup,
-                &d.resource,
-                &d.verb,
-            )
-        })
-        .chain(eff_gained.iter().map(|d| {
-            key(
-                &d.principal,
-                &d.namespace,
-                &d.apigroup,
-                &d.resource,
-                &d.verb,
-            )
-        }))
-        .collect();
-    let lost: BTreeSet<_> = can_lost
-        .iter()
-        .map(|d| {
-            key(
-                &d.principal,
-                &d.namespace,
-                &d.apigroup,
-                &d.resource,
-                &d.verb,
-            )
-        })
-        .chain(eff_lost.iter().map(|d| {
-            key(
-                &d.principal,
-                &d.namespace,
-                &d.apigroup,
-                &d.resource,
-                &d.verb,
-            )
-        }))
-        .collect();
-    let mut map: BTreeMap<rbac::Subject, (usize, usize)> = BTreeMap::new();
-    for (principal, ..) in gained {
-        map.entry(principal).or_default().0 += 1;
-    }
-    for (principal, ..) in lost {
-        map.entry(principal).or_default().1 += 1;
-    }
-
-    let mut result: Vec<(rbac::Subject, usize, usize)> = map
-        .into_iter()
-        .map(|(p, (gained, lost))| (p, gained, lost))
-        .collect();
-    result.sort_by(|a, b| {
-        let a_fails = a.1 > 0;
-        let b_fails = b.1 > 0;
-        b_fails.cmp(&a_fails).then(a.0.cmp(&b.0))
-    });
-    result
-}
-
-/// Group effective-can diffs by (principal, escalation-target) and print.
-/// `tables` says which identities and groups each permission was reached
-/// through; permissions reached through none were gained directly.
-fn print_eff_diffs_grouped(diffs: &[rbac::diff::EffDiff], tables: &rbac::PermissionTables) {
-    // (principal, target) → indices into diffs. No target = direct grant.
+/// Group effective-can changes by (principal, escalation target) and print.
+/// A change reached through no identity or group was gained directly.
+fn print_eff_diffs_grouped(changes: &[rbac::diff::EffectiveChange]) {
+    // (principal, target) → indices into changes. No target = direct grant.
     let mut groups: BTreeMap<(rbac::Subject, Option<rbac::Subject>), Vec<usize>> = BTreeMap::new();
-
-    for (i, d) in diffs.iter().enumerate() {
-        let permission = (
-            d.namespace.clone(),
-            d.apigroup.clone(),
-            d.resource.clone(),
-            d.verb.clone(),
-        );
-        let targets = tables.escalation_via(&d.principal, &permission);
-        if targets.is_empty() {
-            groups
-                .entry((d.principal.clone(), None))
-                .or_default()
-                .push(i);
+    for (i, change) in changes.iter().enumerate() {
+        let principal = &change.diff.principal;
+        if change.via.is_empty() {
+            groups.entry((principal.clone(), None)).or_default().push(i);
         } else {
-            for target in targets {
+            for target in &change.via {
                 groups
-                    .entry((d.principal.clone(), Some(target.clone())))
+                    .entry((principal.clone(), Some(target.clone())))
                     .or_default()
                     .push(i);
             }
@@ -1899,7 +1790,7 @@ fn print_eff_diffs_grouped(diffs: &[rbac::diff::EffDiff], tables: &rbac::Permiss
             Some(target) => println!("    {principal}  via {target}:"),
         }
         for &i in indices {
-            let d = &diffs[i];
+            let d = &changes[i].diff;
             println!(
                 "      ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
                 d.namespace, d.apigroup, d.resource, d.verb
@@ -1907,7 +1798,6 @@ fn print_eff_diffs_grouped(diffs: &[rbac::diff::EffDiff], tables: &rbac::Permiss
         }
     }
 }
-
 /// JSON form of a violation's explaining binding paths (ndjson output).
 fn paths_json(paths: &[rbac::AccessPath]) -> Vec<serde_json::Value> {
     paths
@@ -1942,7 +1832,7 @@ enum CheckResult {
 
 /// Run an `rbac::` RBAC access check. The caller turns a `Fail` into exit
 /// status 1 and an `Error` into exit status 2 under `--script`.
-fn rbac_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckResult {
+fn rbac_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) -> CheckResult {
     let ndjson = format == OutputFormat::Ndjson;
     let mut tokens = input.splitn(2, ' ');
     let subcommand = tokens.next().unwrap_or("").trim();
@@ -1970,9 +1860,13 @@ fn rbac_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRe
                 .collect();
             let expected: Vec<&str> = expected_owned.iter().map(String::as_str).collect();
 
-            let model = rbac::RbacAccessModel::from_store(store);
-
-            let violations = model.check_access_invariant(namespace, resource, verb, &expected);
+            let violations = match core.rbac_access(at, namespace, resource, verb, &expected) {
+                Ok(violations) => violations,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return CheckResult::Error;
+                }
+            };
             if violations.is_empty() {
                 if ndjson {
                     println!(
@@ -2062,20 +1956,22 @@ fn rbac_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRe
                     expected_owned,
                 )
             };
-            let expected: Vec<&str> = expected.iter().map(String::as_str).collect();
-
-            let mut model = rbac::RbacAccessModel::from_store(store);
-
-            model.include_builtins = include_builtins;
-            let direct = model.direct_violations(namespace, apigroup, resource, verb);
-            let via = model.check_reaches(
-                namespace,
-                apigroup,
-                resource,
-                verb,
-                &expected,
+            let query = ReachesQuery {
+                namespace: namespace.to_string(),
+                apigroup: apigroup.to_string(),
+                resource: resource.to_string(),
+                verb: verb.to_string(),
+                expected,
                 include_direct,
-            );
+                include_builtins,
+            };
+            let (direct, via) = match core.rbac_reaches(at, &query) {
+                Ok(reaches) => (reaches.direct, reaches.escalation),
+                Err(e) => {
+                    eprintln!("{e}");
+                    return CheckResult::Error;
+                }
+            };
 
             if direct.is_empty() && via.is_empty() {
                 if ndjson {
@@ -2146,9 +2042,13 @@ fn rbac_command(input: &str, store: &EvalStore, format: OutputFormat) -> CheckRe
                 .collect();
             let allowed: Vec<&str> = allowed_owned.iter().map(String::as_str).collect();
 
-            let model = rbac::RbacAccessModel::from_store(store);
-
-            let violations = model.check_namespace_isolation(namespace, &allowed);
+            let violations = match core.rbac_isolation(at, namespace, &allowed) {
+                Ok(violations) => violations,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return CheckResult::Error;
+                }
+            };
             if violations.is_empty() {
                 if ndjson {
                     println!(
