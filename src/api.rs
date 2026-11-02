@@ -21,12 +21,13 @@ use crate::dd::build::Annotation;
 use crate::dd::session::LazyProvenance;
 use crate::dd::value::{Row, SENTINEL_EDB};
 use crate::delta::diff_object_sides;
-use crate::edb::{ObjectFacts, single_object_facts};
+use crate::edb::{ObjectFacts, expression_facts, single_object_facts};
 use crate::engine::{ApplySummary, Change, Engine, EvalStore, RelationDoc};
 use crate::query::{
     self, body_relations, count_top_level_args, extract_vars, single_atom, split_atom,
     split_projection, suggest,
 };
+use crate::selector::parse_selector;
 use crate::snapshot::{Diff, FrozenState};
 use crate::source::source_program;
 
@@ -161,6 +162,30 @@ pub trait Core {
         base: Vec<KubeObject>,
         head: Vec<KubeObject>,
     ) -> Result<DeltaSummary, WriteError>;
+
+    /// The objects a kubectl-style label `selector` matches in `namespace`
+    /// (`""` for cluster-scoped objects), of `kind` or of any kind. A read:
+    /// the selector is evaluated against the state without being added to it.
+    /// Rows are `apiVersion, kind, namespace, name`, sorted.
+    fn match_selector(
+        &self,
+        at: &At,
+        kind: Option<&str>,
+        namespace: &str,
+        selector: &str,
+    ) -> Result<Rows, MatchError>;
+}
+
+/// Why a selector match failed. Each displays as the line the REPL prints
+/// for it.
+#[derive(Debug, thiserror::Error)]
+pub enum MatchError {
+    #[error("Selector parse error: {0:#}")]
+    Selector(anyhow::Error),
+    #[error("No snapshot named '{0}'.")]
+    UnknownSnapshot(String),
+    #[error("Error: {0:#}")]
+    Evaluation(anyhow::Error),
 }
 
 /// A Kubernetes object as read from a cluster or manifest, with its
@@ -498,16 +523,6 @@ impl LocalCore {
     /// For tab completion, where an older list of relations is fine.
     pub fn last_live(&self) -> Arc<EvalStore> {
         Arc::clone(&lock(&self.live).store)
-    }
-
-    /// The engine moved from version `from` to `to` without changing its
-    /// facts or rules (`k8s::match` asserts selector facts and retracts them
-    /// again), so a live state evaluated at `from` still holds at `to`.
-    pub fn carry_live(&self, from: u64, to: u64) {
-        let mut live = lock(&self.live);
-        if live.version == from {
-            live.version = to;
-        }
     }
 
     /// Resolve `at` to the state a read sees. `engine` and `snapshots` are
@@ -942,6 +957,69 @@ impl Core for LocalCore {
             removed_absent: applied.removed_absent,
         })
     }
+
+    fn match_selector(
+        &self,
+        at: &At,
+        kind: Option<&str>,
+        namespace: &str,
+        selector: &str,
+    ) -> Result<Rows, MatchError> {
+        let expressions = parse_selector(selector).map_err(MatchError::Selector)?;
+        // The selector's facts, owned by a query object no real object can
+        // collide with; `labels.mg` matches them like any selector.
+        let owner = vec![
+            Value::String("pallograph.dev/query".to_string()),
+            Value::String("Match".to_string()),
+            Value::String(namespace.to_string()),
+            Value::String("query".to_string()),
+        ];
+        let facts: Vec<(String, Vec<Value>)> = expressions
+            .iter()
+            .flat_map(|expression| expression_facts(&owner, expression))
+            .map(|(relation, args)| (relation.to_string(), args))
+            .collect();
+
+        let engine = self.engine();
+        let snapshots = self.snapshots();
+        let inputs = match at {
+            At::Live => None,
+            At::Snapshot(name) => Some(
+                &snapshots
+                    .get(name)
+                    .ok_or_else(|| MatchError::UnknownSnapshot(name.clone()))?
+                    .inputs,
+            ),
+        };
+        let store = engine
+            .evaluate_with(inputs, &facts)
+            .map_err(MatchError::Evaluation)?;
+
+        // selector_matches columns: 0 SelApiVersion, 1 SelKind, 2
+        // SelNamespace, 3 SelName, 4 ObjApiVersion, 5 ObjKind, 6
+        // ObjNamespace, 7 ObjName. Only objects in `namespace` count, like
+        // `kubectl -n`: labels.mg also pairs a namespaced selector with
+        // cluster-scoped objects, which negative selectors (matching by
+        // absence) would otherwise surface.
+        let namespace = Value::String(namespace.to_string());
+        let kind = kind.map(|kind| Value::String(kind.to_string()));
+        let mut rows: Vec<Vec<Value>> = store
+            .scan("selector_matches")
+            .iter()
+            .filter(|row| row.len() == 8 && row[0..4] == owner[..])
+            .filter(|row| row[6] == namespace)
+            .filter(|row| kind.as_ref().is_none_or(|kind| row[5] == *kind))
+            .map(|row| row[4..8].to_vec())
+            .collect();
+        rows.sort();
+        Ok(Rows {
+            columns: ["apiVersion", "kind", "namespace", "name"]
+                .map(str::to_string)
+                .to_vec(),
+            rows,
+            relation: None,
+        })
+    }
 }
 
 /// Turn objects into the facts each emits, keyed by object.
@@ -1266,20 +1344,6 @@ mod tests {
                     .unwrap(),
             );
             assert_eq!(before.rows, [vec![s("b")], vec![s("c")]]);
-        }
-    }
-
-    /// `carry_live` keeps a live state across a version change that left
-    /// the facts alone, and only from the version it was evaluated at.
-    #[test]
-    fn carry_live_keeps_the_live_state_only_from_its_version() {
-        for core in cores() {
-            let evaluated = core.last_live();
-            let from = core.version();
-            core.carry_live(from + 7, from + 8);
-            core.carry_live(from, from + 1);
-            assert_eq!(lock(&core.live).version, from + 1);
-            assert!(Arc::ptr_eq(&core.last_live(), &evaluated));
         }
     }
 
@@ -1657,6 +1721,30 @@ mod tests {
                     .unwrap(),
             );
             assert_eq!(names.rows, [vec![s("db")], vec![s("new")], vec![s("web")]]);
+        }
+    }
+
+    /// A selector match reads: the live state is unchanged after it.
+    #[test]
+    fn match_selector_reads_without_writing() {
+        for core in cores() {
+            let version = core.version();
+            let error = |at: &At, selector: &str| {
+                core.match_selector(at, None, "default", selector)
+                    .unwrap_err()
+                    .to_string()
+            };
+            assert!(error(&At::Live, "app in (").starts_with("Selector parse error:"));
+            assert_eq!(
+                error(&At::Snapshot("nope".to_string()), "app=web"),
+                "No snapshot named 'nope'."
+            );
+            let none = core
+                .match_selector(&At::Live, Some("Pod"), "default", "app=web")
+                .unwrap();
+            assert!(none.rows.is_empty());
+            assert_eq!(none.columns, ["apiVersion", "kind", "namespace", "name"]);
+            assert_eq!(core.version(), version);
         }
     }
 }

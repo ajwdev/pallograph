@@ -17,7 +17,7 @@ use crate::api::{
     At, Core, Derivation, Fact, KubeObject, LocalCore, ProvenanceTree, RelationInfo, Rows,
 };
 use crate::edb::{FactSource, K8sManifestsSource, ShellSource};
-use crate::engine::{ApplySummary, Engine, EvalStore, RelationDoc};
+use crate::engine::{ApplySummary, EvalStore, RelationDoc};
 use crate::load;
 use crate::query::{extract_vars, split_projection};
 use crate::rbac;
@@ -517,111 +517,6 @@ fn print_subsystem_help(ns: &str) {
     }
 }
 
-/// Run a real kubectl-style label selector through the `labels.mg` engine and
-/// print the objects it matches. The selector is parsed into kube `Expression`s,
-/// asserted as synthetic `selector_*` facts under a query owner, evaluated, then
-/// retracted so the engine's EDB is left untouched (the same assert→query→retract
-/// path the `+`/`?-`/`-` commands expose). `kind = Some(k)` scopes to one Kind
-/// (`k8s::match`); `None` matches any Kind (`k8s::match-all`). `namespace` scopes the
-/// owner; "" targets cluster-scoped objects. Returns `false` if the selector
-/// did not parse or evaluation failed.
-fn run_match(
-    engine: &mut Engine,
-    kind: Option<&str>,
-    namespace: &str,
-    selector_str: &str,
-    format: OutputFormat,
-) -> bool {
-    let exprs = match crate::selector::parse_selector(selector_str) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("Selector parse error: {e:#}");
-            return false;
-        }
-    };
-
-    // Allow the cluster-scoped namespace to be typed as "" (and "demo" as a
-    // convenience); the REPL does not otherwise strip argument quotes.
-    let namespace = namespace.trim_matches('"');
-
-    let owner = vec![
-        Value::String("pallograph.dev/query".to_string()),
-        Value::String("Match".to_string()),
-        Value::String(namespace.to_string()),
-        Value::String("query".to_string()),
-    ];
-
-    // Build the synthetic selector facts and assert them on the engine.
-    let mut facts: Vec<(String, Vec<Value>)> = Vec::new();
-    for expr in &exprs {
-        for (rel, args) in crate::edb::expression_facts(&owner, expr) {
-            facts.push((rel.to_string(), args));
-        }
-    }
-    engine.add_facts(facts.iter().cloned());
-
-    // Evaluate, then immediately retract the synthetic facts so the EDB is left
-    // exactly as it was (we never touch `current_store`).
-    let result = engine.evaluate();
-    for (rel, args) in &facts {
-        engine.retract_fact(rel, args);
-    }
-    let store = match result {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error: {e:#}");
-            return false;
-        }
-    };
-
-    // selector_matches columns: 0 SelApiVersion, 1 SelKind, 2 SelNamespace,
-    // 3 SelName, 4 ObjApiVersion, 5 ObjKind, 6 ObjNamespace, 7 ObjName.
-    //
-    // Scope results to the requested namespace (ObjNamespace == namespace) so the
-    // command behaves like `kubectl -n <ns>`. Without this, labels.mg's Case 2
-    // (cluster-scoped pairing) would surface unrelated cluster-scoped objects for
-    // a namespaced query — visible with negative selectors, which match by
-    // absence. A namespace of "" therefore targets cluster-scoped objects only.
-    let ns_val = Value::String(namespace.to_string());
-    let mut matched: Vec<&Vec<Value>> = store
-        .scan("selector_matches")
-        .iter()
-        .filter(|row| row.len() == 8 && row[0..4] == owner[..])
-        .filter(|row| row[6] == ns_val)
-        .filter(|row| kind.is_none_or(|k| row[5] == Value::String(k.to_string())))
-        .collect();
-    matched.sort();
-
-    if matched.is_empty() {
-        eprintln!("No matches.");
-        return true;
-    }
-    for row in &matched {
-        let obj = &row[4..8]; // ApiVersion, Kind, Namespace, Name
-        if format == OutputFormat::Ndjson {
-            let cols = ["apiVersion", "kind", "namespace", "name"];
-            println!(
-                "{}",
-                ndjson_row(obj, |i| cols.get(i).map(|s| s.to_string()))
-            );
-        } else {
-            let parts: Vec<String> = obj
-                .iter()
-                .map(|v| {
-                    if format == OutputFormat::Pretty {
-                        format_pretty(v)
-                    } else {
-                        v.to_string()
-                    }
-                })
-                .collect();
-            println!("  {}", parts.join("/"));
-        }
-    }
-    eprintln!("Found {} match(es).", matched.len());
-    true
-}
-
 /// The line printed before a command when the cluster watcher changed the
 /// live state since the last one, e.g. `live: 2 updated, 1 removed`. None
 /// when nothing changed.
@@ -636,6 +531,33 @@ fn live_changes_line(summary: ApplySummary) -> Option<String> {
     .map(|(count, what)| format!("{count} {what}"))
     .collect();
     (!parts.is_empty()).then(|| format!("live: {}", parts.join(", ")))
+}
+
+/// Print the objects a selector matched, one `apiVersion/kind/namespace/name`
+/// per line, or one NDJSON object each.
+fn print_matches(format: OutputFormat, rows: &Rows) {
+    if rows.rows.is_empty() {
+        eprintln!("No matches.");
+        return;
+    }
+    for object in &rows.rows {
+        if format == OutputFormat::Ndjson {
+            println!("{}", ndjson_row(object, |i| rows.columns.get(i).cloned()));
+        } else {
+            let parts: Vec<String> = object
+                .iter()
+                .map(|value| {
+                    if format == OutputFormat::Pretty {
+                        format_pretty(value)
+                    } else {
+                        value.to_string()
+                    }
+                })
+                .collect();
+            println!("  {}", parts.join("/"));
+        }
+    }
+    eprintln!("Found {} match(es).", rows.rows.len());
 }
 
 /// The interactive prompt, red like the rest of the REPL's chrome. `use`
@@ -677,10 +599,7 @@ fn current_at(in_use: &Option<String>) -> At {
 /// Return `true` and refuse a state-changing command (`+`, `-`, `~`,
 /// `define`, `load`, `k8s::load`, `apply-delta`, `source`,
 /// `snapshot`, `rollback`) while a snapshot is in use: a frozen state never changes, so there is
-/// nothing for the command to act on. `k8s::match` and `k8s::match-all` are refused
-/// for the same reason even though they leave the EDB untouched: they
-/// re-evaluate the live engine, which a frozen snapshot has none of. A
-/// refusal marks the line as failed.
+/// nothing for the command to act on. A refusal marks the line as failed.
 fn refuse_if_in_use(in_use: &Option<String>, command_failed: &mut bool) -> bool {
     if let Some(name) = in_use {
         eprintln!("Snapshot '{name}' is in use; use to return to the live state.");
@@ -1279,6 +1198,43 @@ fn session(
                     continue;
                 }
 
+                // k8s::match <Kind> <namespace> <selector> scopes to one Kind;
+                // k8s::match-all <namespace> <selector> matches any Kind.
+                let match_args = line
+                    .strip_prefix("::k8s::match ")
+                    .map(|rest| (rest, true))
+                    .or_else(|| {
+                        line.strip_prefix("::k8s::match-all ")
+                            .map(|rest| (rest, false))
+                    });
+                if let Some((rest, one_kind)) = match_args {
+                    let fields = if one_kind { 3 } else { 2 };
+                    let parts: Vec<&str> =
+                        rest.trim().splitn(fields, char::is_whitespace).collect();
+                    let (kind, namespace, selector) = match (one_kind, parts.as_slice()) {
+                        (true, [kind, namespace, selector]) => (Some(*kind), *namespace, *selector),
+                        (false, [namespace, selector]) => (None, *namespace, *selector),
+                        (true, _) => {
+                            command_error!(
+                                "Usage: k8s::match <Kind> <namespace> <selector>  (namespace \"\" for cluster-scoped)"
+                            );
+                            continue;
+                        }
+                        (false, _) => {
+                            command_error!("Usage: k8s::match-all <namespace> <selector>");
+                            continue;
+                        }
+                    };
+                    // The cluster-scoped namespace is typed as ""; the REPL
+                    // doesn't otherwise strip quotes from arguments.
+                    let namespace = namespace.trim_matches('"');
+                    match core.match_selector(&current_at(&in_use), kind, namespace, selector) {
+                        Ok(rows) => print_matches(format, &rows),
+                        Err(e) => command_error!("{e}"),
+                    }
+                    continue;
+                }
+
                 // Commands not yet on `Core` hold the engine and the snapshots
                 // for the whole command, so nothing else changes them partway
                 // through.
@@ -1512,50 +1468,6 @@ fn session(
                         _ => command_error!(
                             "Usage: rbac::diff <snap>  or  rbac::diff <snap1> <snap2>"
                         ),
-                    }
-                    continue;
-                }
-
-                // k8s::match <Kind> <namespace> <selector>  - scoped to one Kind
-                if let Some(rest) = line.strip_prefix("::k8s::match ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let parts: Vec<&str> = rest.trim().splitn(3, char::is_whitespace).collect();
-                    match parts.as_slice() {
-                        [kind, namespace, selector] => {
-                            // run_match retracts the facts it asserts, so a live state
-                            // evaluated before it still holds after.
-                            let before = engine.version();
-                            if !run_match(engine, Some(kind), namespace, selector, format) {
-                                command_failed = true;
-                            }
-                            core.carry_live(before, engine.version());
-                        }
-                        _ => command_error!(
-                            "Usage: k8s::match <Kind> <namespace> <selector>  (namespace \"\" for cluster-scoped)"
-                        ),
-                    }
-                    continue;
-                }
-
-                // k8s::match-all <namespace> <selector>  - any Kind
-                if let Some(rest) = line.strip_prefix("::k8s::match-all ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let parts: Vec<&str> = rest.trim().splitn(2, char::is_whitespace).collect();
-                    match parts.as_slice() {
-                        [namespace, selector] => {
-                            // run_match retracts the facts it asserts, so a live state
-                            // evaluated before it still holds after.
-                            let before = engine.version();
-                            if !run_match(engine, None, namespace, selector, format) {
-                                command_failed = true;
-                            }
-                            core.carry_live(before, engine.version());
-                        }
-                        _ => command_error!("Usage: k8s::match-all <namespace> <selector>"),
                     }
                     continue;
                 }
