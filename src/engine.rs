@@ -11,8 +11,10 @@ use mangle_driver::compile_units;
 use mangle_interpreter::{Interpreter, MemStore, ProvenanceEntry};
 use mangle_ir::physical::{Condition, Constant, DataSource, Op, Operand};
 use mangle_ir::{Inst, InstId, Ir, NameId};
+use tracing::debug;
 
 use crate::edb::{Fact, ObjectFacts, ObjectKey};
+use crate::telemetry;
 
 pub(crate) const EDB_DECLS: &str = include_str!("../rules/00_edb_prelude.mg");
 
@@ -24,6 +26,25 @@ include!(concat!(env!("OUT_DIR"), "/embedded_rules.rs"));
 pub struct EvalStore {
     facts: HashMap<String, Vec<Vec<Value>>>,
     pub provenance: Vec<ProvenanceEntry>,
+}
+
+/// Log the largest derived relations at debug level, so a join blowup that
+/// dominates fixpoint time is easy to spot (ex: an `rbac_allowed` or
+/// `direct_perm` cross-product). Guarded so the sort only runs when the
+/// events would be recorded.
+fn log_relation_sizes(facts: &HashMap<String, Vec<Vec<Value>>>) {
+    const TOP_N: usize = 10;
+    if !tracing::enabled!(target: telemetry::FIXPOINT, tracing::Level::DEBUG) {
+        return;
+    }
+    let mut sizes: Vec<(&str, usize)> = facts
+        .iter()
+        .map(|(name, rows)| (name.as_str(), rows.len()))
+        .collect();
+    sizes.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    for (name, rows) in sizes.iter().take(TOP_N) {
+        debug!(target: telemetry::FIXPOINT, relation = name, rows, "relation size");
+    }
 }
 
 /// True for relations a frozen state (`snapshot`) or a `Diff` should not
@@ -1111,7 +1132,23 @@ impl Engine {
         // Backends with a persistent session (DD) start it here, so fact
         // mutations feed deltas to the worker rather than forcing a full
         // recompute. Rule changes still trigger a full worker rebuild.
+        // Spawning a DD session runs the initial fixpoint and blocks until
+        // the worker settles, so this is where startup time goes on the DD
+        // backend; time it so `RUST_LOG=pallograph=debug` shows it.
+        debug!(
+            target: telemetry::FIXPOINT,
+            facts = edb.len(),
+            rules = rule_sources.len(),
+            "spawning backend session (initial fixpoint)"
+        );
+        let started = std::time::Instant::now();
         let session = backend.spawn_session(&edb, &rule_sources)?;
+        debug!(
+            target: telemetry::FIXPOINT,
+            elapsed_s = started.elapsed().as_secs_f64(),
+            has_session = session.is_some(),
+            "backend session ready"
+        );
         let edb_index = edb.iter().cloned().collect();
         Ok(Self {
             edb,
@@ -1481,15 +1518,37 @@ impl Engine {
     }
 
     pub fn evaluate(&self) -> Result<EvalStore> {
+        let started = std::time::Instant::now();
         // A live session is kept in sync by every mutator, so snapshot it
         // rather than spawning (and settling) a second dataflow.
         if let Some(s) = &self.session {
+            let facts = s.snapshot_all()?;
+            debug!(
+                target: telemetry::FIXPOINT,
+                elapsed_s = started.elapsed().as_secs_f64(),
+                "snapshotted incremental session"
+            );
+            log_relation_sizes(&facts);
             return Ok(EvalStore {
-                facts: s.snapshot_all()?,
+                facts,
                 provenance: vec![],
             });
         }
-        self.backend.evaluate(&self.edb, &self.rule_sources)
+        // No live session (interpreter backend), so this runs the fixpoint.
+        debug!(
+            target: telemetry::FIXPOINT,
+            facts = self.edb.len(),
+            rules = self.rule_sources.len(),
+            "evaluating program (computing fixpoint)"
+        );
+        let store = self.backend.evaluate(&self.edb, &self.rule_sources)?;
+        debug!(
+            target: telemetry::FIXPOINT,
+            elapsed_s = started.elapsed().as_secs_f64(),
+            "fixpoint computed"
+        );
+        log_relation_sizes(&store.facts);
+        Ok(store)
     }
 
     /// Evaluate the whole program over `inputs` (a snapshot's saved facts and
