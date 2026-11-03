@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
+use futures::stream::{self, StreamExt, TryStreamExt};
 use kube::api::{ApiResource, DynamicObject, ListParams};
 use kube::core::ObjectMeta;
 use kube::core::labels::Expression;
@@ -152,18 +153,35 @@ pub struct ShellSource {
 }
 
 impl ClusterSource {
+    /// List every resource in [`CLUSTER_RESOURCES`] concurrently. Each list
+    /// is an independent round-trip to the API server, so running them in
+    /// parallel makes startup cost the slowest list rather than the sum of
+    /// all of them. `MAX_CONCURRENT` caps in-flight requests so a cluster
+    /// with many resource types doesn't open an unbounded number of
+    /// connections at once.
     pub async fn fetch(client: Client) -> Result<Self> {
-        let mut objects = Vec::new();
-        for ar in cluster_resources() {
-            let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
-            let list = match api.list(&ListParams::default()).await {
-                Ok(list) => list,
-                Err(e) if is_not_served(&e) => {
-                    eprintln!("    {}: {} not served, skipping", ar.kind, ar.api_version);
-                    continue;
+        const MAX_CONCURRENT: usize = 8;
+        let lists = stream::iter(cluster_resources())
+            .map(|ar| {
+                let client = client.clone();
+                async move {
+                    let api: Api<DynamicObject> = Api::all_with(client, &ar);
+                    match api.list(&ListParams::default()).await {
+                        Ok(list) => Ok(Some((ar, list))),
+                        Err(e) if is_not_served(&e) => {
+                            eprintln!("    {}: {} not served, skipping", ar.kind, ar.api_version);
+                            Ok(None)
+                        }
+                        Err(e) => Err(e).with_context(|| format!("listing {}", ar.kind)),
+                    }
                 }
-                Err(e) => return Err(e).with_context(|| format!("listing {}", ar.kind)),
-            };
+            })
+            .buffer_unordered(MAX_CONCURRENT)
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        let mut objects = Vec::new();
+        for (ar, list) in lists.into_iter().flatten() {
             for obj in list {
                 objects.push((obj, Some((ar.api_version.clone(), ar.kind.clone()))));
             }
