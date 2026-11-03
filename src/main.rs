@@ -8,11 +8,12 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use clap::Parser;
 use mangle_interpreter::MemStore;
+use tracing::{debug, info};
 
 use pallograph::api::LocalCore;
 use pallograph::engine::{self, Backend, DdBackend, Engine, InterpreterBackend};
 use pallograph::repl::OutputFormat;
-use pallograph::{config, edb, load, repl, watch};
+use pallograph::{config, edb, load, repl, telemetry, watch};
 
 #[derive(clap::ValueEnum, Clone, PartialEq)]
 enum BackendKind {
@@ -120,6 +121,7 @@ async fn load_datasource(
     if ds.watch && ds.source != SourceKind::K8s {
         anyhow::bail!("datasource '{name}': watch = true needs source = \"k8s\"");
     }
+    let started = std::time::Instant::now();
     match ds.source {
         SourceKind::K8s => {
             let client = cluster_client().await?;
@@ -131,10 +133,10 @@ async fn load_datasource(
                         "datasource '{name}': only one watched k8s datasource per profile for now"
                     );
                 }
-                eprintln!("  {name}: cluster (watched)");
+                info!(target: telemetry::DATASOURCE, "{name}: cluster (watched)");
                 *watch_client = Some(client);
             } else {
-                eprintln!("  {name}: cluster (live)");
+                info!(target: telemetry::DATASOURCE, "{name}: cluster (live)");
                 let mut source = edb::ClusterSource::fetch(client).await?;
                 objects.extend(edb::object_facts(&mut source)?);
             }
@@ -149,7 +151,7 @@ async fn load_datasource(
             })?;
             match content {
                 ContentKind::K8sManifests => {
-                    eprintln!("  {name}: file ({}) → k8s-manifests", paths.join(", "));
+                    info!(target: telemetry::DATASOURCE, "{name}: file ({}) → k8s-manifests", paths.join(", "));
                     let mut source = edb::K8sManifestsSource {
                         paths: paths.clone(),
                     };
@@ -160,7 +162,7 @@ async fn load_datasource(
                         format!("datasource '{name}': content=\"json-tuples\" requires a relation")
                     })?;
                     for path in paths {
-                        eprintln!("  {name}: file ({path}) → json-tuples:{relation}");
+                        info!(target: telemetry::DATASOURCE, "{name}: file ({path}) → json-tuples:{relation}");
                         load::load_tuples_into_store(edb, relation, path)?;
                     }
                 }
@@ -175,7 +177,7 @@ async fn load_datasource(
             })?;
             match content {
                 ContentKind::K8sManifests => {
-                    eprintln!("  {name}: shell → k8s-manifests");
+                    info!(target: telemetry::DATASOURCE, "{name}: shell → k8s-manifests");
                     let mut source = edb::ShellSource {
                         command: command.to_string(),
                     };
@@ -185,12 +187,18 @@ async fn load_datasource(
                     let relation = ds.relation.as_deref().with_context(|| {
                         format!("datasource '{name}': content=\"json-tuples\" requires a relation")
                     })?;
-                    eprintln!("  {name}: shell → json-tuples:{relation}");
+                    info!(target: telemetry::DATASOURCE, "{name}: shell → json-tuples:{relation}");
                     load::load_tuples_into_store(edb, relation, &format!("! {command}"))?;
                 }
             }
         }
     }
+    debug!(
+        target: telemetry::DATASOURCE,
+        name,
+        elapsed_s = started.elapsed().as_secs_f64(),
+        "datasource loaded"
+    );
     Ok(())
 }
 
@@ -198,6 +206,7 @@ async fn load_datasource(
 /// never mistaken for a finding (exit 1).
 #[tokio::main]
 async fn main() -> ExitCode {
+    init_tracing();
     match run(Cli::parse()).await {
         Ok(code) => code,
         Err(e) => {
@@ -205,6 +214,25 @@ async fn main() -> ExitCode {
             ExitCode::from(repl::SessionStatus::Error.exit_code())
         }
     }
+}
+
+/// Send `tracing` events to stderr. Telemetry is scoped to the pallograph
+/// crate: our events default to info (debug for timing), while everything
+/// upstream (mangle, kube, tokio, timely/dd) is capped at warn so only
+/// genuine errors leak through. Each event carries a per-subsystem target
+/// (see [`telemetry`]), shown in the output and tunable through `RUST_LOG`
+/// (ex: `RUST_LOG=pallograph=warn,pallograph::fixpoint=debug`).
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn,pallograph=info"));
+    fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .without_time()
+        .with_target(true)
+        .compact()
+        .init();
 }
 
 async fn run(cli: Cli) -> Result<ExitCode> {
@@ -224,7 +252,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 .profiles
                 .get(profile_name)
                 .with_context(|| format!("profile '{profile_name}' not found in config"))?;
-            eprintln!("datasource: profile \"{profile_name}\"");
+            info!(target: telemetry::DATASOURCE, "profile {profile_name:?}");
             for name in &profile.sources {
                 let ds = cfg
                     .datasources
@@ -242,7 +270,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         None => {
-            eprintln!("datasource: current kubeconfig context [default]");
+            info!(target: telemetry::DATASOURCE, "current kubeconfig context [default]");
             let cluster = config::Datasource {
                 source: config::SourceKind::K8s,
                 paths: None,
@@ -291,7 +319,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     let engine = Arc::new(Mutex::new(engine));
     let watch = match watch_client {
         Some(client) => {
-            eprintln!("watching cluster: waiting for the initial list...");
+            info!(target: telemetry::WATCH, "waiting for the initial list...");
             Some(watch::start(client, Arc::clone(&engine)).await?)
         }
         None if cli.watch => anyhow::bail!("--watch needs a k8s datasource"),

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt, TryStreamExt};
@@ -14,7 +15,9 @@ use mangle_interpreter::MemStore;
 use serde_json::Value as Json;
 
 use serde::Deserialize;
+use tracing::{debug, info};
 
+use crate::telemetry;
 use crate::value::{data_to_json, json_to_value};
 
 // TODO: consider switching to concrete k8s-openapi types (Pod, ServiceAccount, etc.)
@@ -159,17 +162,42 @@ impl ClusterSource {
     /// all of them. `MAX_CONCURRENT` caps in-flight requests so a cluster
     /// with many resource types doesn't open an unbounded number of
     /// connections at once.
+    ///
+    /// At `debug` log level (ex: `RUST_LOG=pallograph=debug`), each list's
+    /// object count and wall time is traced as it finishes, plus a total
+    /// once they all have, so a slow resource is easy to spot. The per-list
+    /// timer starts inside the future, so it measures that list's own
+    /// latency even though the lists overlap.
     pub async fn fetch(client: Client) -> Result<Self> {
         const MAX_CONCURRENT: usize = 8;
+        let overall = Instant::now();
         let lists = stream::iter(cluster_resources())
             .map(|ar| {
                 let client = client.clone();
                 async move {
                     let api: Api<DynamicObject> = Api::all_with(client, &ar);
-                    match api.list(&ListParams::default()).await {
-                        Ok(list) => Ok(Some((ar, list))),
+                    let started = Instant::now();
+                    let result = api.list(&ListParams::default()).await;
+                    let elapsed = started.elapsed();
+                    match result {
+                        Ok(list) => {
+                            debug!(
+                                target: telemetry::CLUSTER,
+                                api_version = %ar.api_version,
+                                kind = %ar.kind,
+                                objects = list.items.len(),
+                                elapsed_s = elapsed.as_secs_f64(),
+                                "listed resource",
+                            );
+                            Ok(Some((ar, list)))
+                        }
                         Err(e) if is_not_served(&e) => {
-                            eprintln!("    {}: {} not served, skipping", ar.kind, ar.api_version);
+                            info!(
+                                target: telemetry::CLUSTER,
+                                api_version = %ar.api_version,
+                                kind = %ar.kind,
+                                "resource not served, skipping",
+                            );
                             Ok(None)
                         }
                         Err(e) => Err(e).with_context(|| format!("listing {}", ar.kind)),
@@ -179,6 +207,12 @@ impl ClusterSource {
             .buffer_unordered(MAX_CONCURRENT)
             .try_collect::<Vec<_>>()
             .await?;
+
+        debug!(
+            target: telemetry::CLUSTER,
+            elapsed_s = overall.elapsed().as_secs_f64(),
+            "all cluster lists finished",
+        );
 
         let mut objects = Vec::new();
         for (ar, list) in lists.into_iter().flatten() {
@@ -367,14 +401,23 @@ pub struct ObjectFacts {
 /// Like [`populate`], but keeps each object's facts apart (in source order)
 /// so the engine can replace them when the same object is loaded again.
 pub fn object_facts(source: &mut dyn FactSource) -> Result<Vec<ObjectFacts>> {
-    Ok(source
-        .k8s_objects()?
+    let objects = source.k8s_objects()?;
+    let started = Instant::now();
+    let facts: Vec<ObjectFacts> = objects
         .iter()
         .map(|(obj, type_hint)| {
             let type_hint = type_hint.as_ref().map(|(av, k)| (av.as_str(), k.as_str()));
             single_object_facts(obj, type_hint)
         })
-        .collect())
+        .collect();
+    debug!(
+        target: telemetry::DATASOURCE,
+        objects = objects.len(),
+        facts = facts.iter().map(|o| o.facts.len()).sum::<usize>(),
+        elapsed_s = started.elapsed().as_secs_f64(),
+        "projected objects to facts"
+    );
+    Ok(facts)
 }
 
 /// One object run through the projection pipeline. `type_hint` is its

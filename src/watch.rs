@@ -21,9 +21,11 @@ use kube::api::{DynamicObject, ListParams};
 use kube::runtime::WatchStreamExt;
 use kube::runtime::watcher::{self, Event, watcher};
 use kube::{Api, Client};
+use tracing::{info, warn};
 
 use crate::edb::{ObjectKey, cluster_resources, is_not_served, object_key, single_object_facts};
 use crate::engine::{ApplySummary, Change, Engine};
+use crate::telemetry;
 
 /// How long the batcher keeps gathering changes after the first one of a
 /// batch arrives.
@@ -139,9 +141,11 @@ pub async fn start(client: Client, engine: Arc<Mutex<Engine>>) -> Result<Arc<Wat
         match api.list(&ListParams::default().limit(1)).await {
             Ok(_) => {}
             Err(e) if is_not_served(&e) => {
-                eprintln!(
-                    "    {}: {} not served, skipping",
-                    resource.kind, resource.api_version
+                info!(
+                    target: telemetry::WATCH,
+                    kind = %resource.kind,
+                    api_version = %resource.api_version,
+                    "resource not served, skipping",
                 );
                 continue;
             }
@@ -185,7 +189,9 @@ async fn watch_resource(api: Api<DynamicObject>, mut sync: ResourceSync, sender:
                     return;
                 }
             }
-            Err(e) => eprintln!("watch {}: {e}", sync.kind),
+            Err(e) => {
+                warn!(target: telemetry::WATCH, kind = %sync.kind, error = %e, "watch error")
+            }
         }
     }
 }

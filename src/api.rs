@@ -16,6 +16,7 @@ use anyhow::Result;
 use kube::api::DynamicObject;
 use mangle_common::Value;
 use mangle_interpreter::ProvenanceEntry;
+use tracing::debug;
 
 use crate::dd::session::{LazyProvenance, NegatedFact, ProofNode, ProofTree};
 use crate::dd::value::Row;
@@ -33,6 +34,7 @@ use crate::smt::SmtEncoder;
 use crate::smt::scheduling::{self, CoverageGap, PlacementResult, UnschedulablePod};
 use crate::snapshot::{Diff, FrozenState};
 use crate::source::source_program;
+use crate::telemetry;
 
 /// Which state a read sees.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -748,12 +750,20 @@ impl Core for LocalCore {
         // nothing: the engine's rules and facts are left alone.
         let result_name = "__query";
         let rule = format!("{result_name}({}) :- {completed}.", vars.join(", "));
+        let started = std::time::Instant::now();
         let result = engine
             .evaluate_query_on(store, &body_relations(body), rule)
             .map_err(QueryError::Evaluation)?;
+        let rows = result.scan(result_name).to_vec();
+        debug!(
+            target: telemetry::QUERY,
+            rows = rows.len(),
+            elapsed_s = started.elapsed().as_secs_f64(),
+            "query evaluated"
+        );
         Ok(Rows {
             columns: vars,
-            rows: result.scan(result_name).to_vec(),
+            rows,
             relation: None,
         })
     }
