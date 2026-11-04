@@ -652,10 +652,7 @@ fn access_diff_under_use_names_state() {
             before_bob_setup()
         );
         let (stdout, _) = run_session_with(&["--backend", backend], &commands);
-        assert!(
-            stdout.contains("=== Access diff: 'before' → 'after' ==="),
-            "{backend}: {stdout}"
-        );
+        assert!(stdout.contains("(before → after)"), "{backend}: {stdout}");
         let verdicts: Vec<&str> = stdout
             .lines()
             .filter(|line| line.starts_with("    FAIL  ") || line.starts_with("    PASS  "))
@@ -818,19 +815,14 @@ fn load_k8s_over_startup_object_contracts_access() {
             stdout.contains("PASS  1 permission(s) removed, none added"),
             "{backend}: {stdout}"
         );
-        let lost = stdout
-            .lines()
-            .skip_while(|line| !line.starts_with("  CAN LOST"))
-            .take_while(|line| !line.starts_with("  EFFECTIVE"))
-            .collect::<Vec<_>>()
-            .join("\n");
         assert!(
-            lost.contains(
-                r#"demo@example.com  ns=""  apigroup=""  resource="secrets"  verb="get""#
-            ),
+            stdout.contains(r#"- (namespace "", apiGroup "", resource "secrets", verb "get")"#),
             "{backend}: {stdout}"
         );
-        assert!(!stdout.contains("CAN GAINED"), "{backend}: {stdout}");
+        assert!(
+            !stdout.contains("new permission(s) granted"),
+            "{backend}: {stdout}"
+        );
         assert_eq!(
             demo_rules(&stdout),
             [r#"  R = {/apiGroups: [""], /resources: ["configmaps"], /verbs: ["get"]}"#],

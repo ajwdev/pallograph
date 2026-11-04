@@ -474,9 +474,12 @@ fn print_command_help(topic: &str) {
         "rbac::cluster-admin" | "cluster-admin" | "rbac::reaches" | "reaches" => {
             print!("{REACHES_MANPAGE}");
         }
+        "rbac::diff" | "diff" => {
+            print!("{DIFF_MANPAGE}");
+        }
         other => {
             eprintln!(
-                "No detailed help for '{other}'. Run `help` for the command list (detailed help exists for rbac::reaches / rbac::cluster-admin)."
+                "No detailed help for '{other}'. Run `help` for the command list (detailed help exists for rbac::reaches / rbac::cluster-admin / rbac::diff)."
             );
         }
     }
@@ -538,6 +541,49 @@ SYMBOLS
 
   Machine-readable output (`--format ndjson`) emits one object per concrete
   path with the full detail; display-only subsumption does not apply there.
+"#;
+
+/// The output-format reference for `rbac::diff`, shown by `help rbac::diff`.
+const DIFF_MANPAGE: &str = r#"rbac::diff <before> [<after>]
+
+Compare RBAC access between two states and report what changed, per principal,
+both directly and through escalation. With one name, <before> is a snapshot
+and <after> is the live state; with two names, both are snapshots. Under
+`use <state>`, `rbac::diff <before>` compares <before> against <state>.
+
+OUTPUT
+  A FAIL/PASS verdict with the change counts and the (before → after) states -
+  FAIL when any principal gained a permission, otherwise PASS.
+
+  A `Per-principal:` summary gives the at-a-glance view: FAIL (gained
+  something) or PASS, each principal with its +gained / -lost counts.
+
+  Then one block per principal, each split into the sections that are the
+  point of this tool:
+    » direct           permissions granted straight to the principal
+    » via escalation   permissions it reaches only by escalating, each with
+                       the identity it escalates through (via <target>)
+
+  Changes show inline within a section:
+    + (namespace "", apiGroup "*", resource "*", verb "*")             gained
+    - (namespace "demo", apiGroup "", resource "pods", verb "delete")  lost
+    + (namespace "", apiGroup "*", resource "*", verb "*")  via <sa>   gained via escalation
+
+SYMBOLS
+  +        a permission the principal gained (green)
+  -        a permission the principal lost (red)
+  »        a section header: direct, or via escalation
+  ( ... )  the permission: namespace, apiGroup, resource, verb (resourceName
+           is not compared)
+  via      the identity an escalation route passes through
+
+  The direct-vs-escalation split matters because a principal can gain or lose
+  access with no change to its own bindings, purely because an identity it can
+  assume changed. Rows sort by apiGroup, resource, verb, namespace, so a
+  permission's + and - appear together, deterministic across backends.
+
+  Colour (interactive terminal only; dropped when piped or NO_COLOR is set) is
+  additive: principals by kind, additions green, removals red, verdict bold.
 "#;
 
 /// Print the subcommands of a subsystem container-command (`rbac`, `sched`,
@@ -1776,6 +1822,24 @@ fn paint_caution(text: &str) -> String {
     }
 }
 
+/// Green, for an added permission in a diff (and a PASS verdict).
+fn paint_add(text: &str) -> String {
+    if colored_output() {
+        format!("\x1b[32m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Red, for a removed permission in a diff.
+fn paint_del(text: &str) -> String {
+    if colored_output() {
+        format!("\x1b[31m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
 /// The display join key (verb-noun) for an internal mechanism token. The
 /// " after RBAC write" qualifier is dropped for now; it is a timing nuance, not
 /// a distinct primitive. Unknown tokens pass through.
@@ -2318,111 +2382,181 @@ fn print_findings(
     }
 }
 
-/// Print what RBAC permissions changed from `before` to `after`. Returns
+/// A row in the diff detail: the permission's sort fields (the diff drops
+/// resourceName, so it is not among them), whether it was added, and the
+/// rendered text.
+struct DiffRow {
+    apigroup: String,
+    resource: String,
+    verb: String,
+    namespace: String,
+    added: bool,
+    text: String,
+}
+
+/// Order diff rows by apiGroup, then resource, verb, and namespace, so a
+/// permission's `+` and `-` sit together regardless of which side changed.
+fn diff_row_order(a: &DiffRow, b: &DiffRow) -> std::cmp::Ordering {
+    (&a.apigroup, &a.resource, &a.verb, &a.namespace).cmp(&(
+        &b.apigroup,
+        &b.resource,
+        &b.verb,
+        &b.namespace,
+    ))
+}
+
+/// Print what RBAC permissions changed from `before` to `after`, grouped by
+/// principal. A leading verdict and a `Per-principal:` summary give the
+/// at-a-glance view; each principal then gets `» direct` and `» via escalation`
+/// sections with added (`+`) and removed (`-`) permissions inline. Returns
 /// `false` when any permission was gained (the `FAIL` verdict).
 fn print_access_diff(diff: &AccessDiff, before_label: &str, after_label: &str) -> bool {
     let total_gained = diff.total_gained();
     let total_lost = diff.total_lost();
+    let scope = paint_dim(&format!("({before_label} → {after_label})"));
     if total_gained > 0 {
-        println!("FAIL  {} new permission(s) granted", total_gained);
+        let removed = if total_lost > 0 {
+            format!(", {total_lost} removed")
+        } else {
+            String::new()
+        };
+        println!(
+            "{}  {total_gained} new permission(s) granted{removed}  {scope}",
+            paint_act("FAIL")
+        );
     } else if total_lost > 0 {
-        println!("PASS  {} permission(s) removed, none added", total_lost);
+        println!(
+            "{}  {total_lost} permission(s) removed, none added  {scope}",
+            paint_add("PASS")
+        );
     } else {
-        println!("PASS  no permission changes");
+        println!("{}  no permission changes", paint_add("PASS"));
         return true;
     }
 
-    println!(
-        "=== Access diff: '{}' → '{}' ===",
-        before_label, after_label
-    );
+    // At-a-glance summary: FAIL (gained anything) or PASS, per principal.
     if !diff.verdicts.is_empty() {
         println!();
         println!("  Per-principal:");
         let col_w = diff
             .verdicts
             .iter()
-            .map(|verdict| verdict.principal.to_string().len())
+            .map(|v| v.principal.with_kind().to_string().chars().count())
             .max()
             .unwrap_or(8)
-            .min(32);
-        for verdict in &diff.verdicts {
-            let label = if verdict.gained > 0 { "FAIL" } else { "PASS" };
-            let principal = verdict.principal.to_string();
+            .min(40);
+        for v in &diff.verdicts {
+            let label = if v.gained > 0 {
+                paint_act("FAIL")
+            } else {
+                paint_add("PASS")
+            };
+            let vis = v.principal.with_kind().to_string();
+            let pad = " ".repeat(col_w.saturating_sub(vis.chars().count()));
             println!(
-                "    {label}  {principal:<col_w$}  +{} gained / -{} lost",
-                verdict.gained, verdict.lost
-            );
-        }
-        println!();
-    }
-
-    for (heading, changes) in [
-        ("CAN GAINED", &diff.can_gained),
-        ("CAN LOST", &diff.can_lost),
-    ] {
-        if changes.is_empty() {
-            continue;
-        }
-        println!("  {heading} ({}):", changes.len());
-        let mut sorted: Vec<&rbac::diff::CanDiff> = changes.iter().collect();
-        sorted.sort_by(|a, b| a.principal.cmp(&b.principal));
-        for d in sorted {
-            println!(
-                "    {}  ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
-                d.principal, d.namespace, d.apigroup, d.resource, d.verb
+                "    {label}  {}{pad}  +{} gained / -{} lost",
+                paint_principal(&v.principal),
+                v.gained,
+                v.lost
             );
         }
     }
-    if !diff.effective_gained.is_empty() {
-        println!(
-            "  EFFECTIVE GAINED ({}) [escalation-aware]:",
-            diff.effective_gained.len()
-        );
-        print_eff_diffs_grouped(&diff.effective_gained);
-    }
-    if !diff.effective_lost.is_empty() {
-        println!(
-            "  EFFECTIVE LOST ({}) [escalation-aware]:",
-            diff.effective_lost.len()
-        );
-        print_eff_diffs_grouped(&diff.effective_lost);
-    }
-    total_gained == 0
-}
 
-/// Group effective-can changes by (principal, escalation target) and print.
-/// A change reached through no identity or group was gained directly.
-fn print_eff_diffs_grouped(changes: &[rbac::diff::EffectiveChange]) {
-    // (principal, target) → indices into changes. No target = direct grant.
-    let mut groups: BTreeMap<(rbac::Subject, Option<rbac::Subject>), Vec<usize>> = BTreeMap::new();
-    for (i, change) in changes.iter().enumerate() {
-        let principal = &change.diff.principal;
-        if change.via.is_empty() {
-            groups.entry((principal.clone(), None)).or_default().push(i);
-        } else {
-            for target in &change.via {
-                groups
-                    .entry((principal.clone(), Some(target.clone())))
-                    .or_default()
-                    .push(i);
+    let tuple = |ns: &str, ag: &str, res: &str, verb: &str| {
+        format!("(namespace {ns:?}, apiGroup {ag:?}, resource {res:?}, verb {verb:?})")
+    };
+    let direct_row = |added: bool, d: &rbac::diff::CanDiff| DiffRow {
+        apigroup: d.apigroup.clone(),
+        resource: d.resource.clone(),
+        verb: d.verb.clone(),
+        namespace: d.namespace.clone(),
+        added,
+        text: tuple(&d.namespace, &d.apigroup, &d.resource, &d.verb),
+    };
+    let via_row = |added: bool, c: &rbac::diff::EffectiveChange| {
+        let targets = c
+            .via
+            .iter()
+            .map(paint_identity)
+            .collect::<Vec<_>>()
+            .join(", ");
+        DiffRow {
+            apigroup: c.diff.apigroup.clone(),
+            resource: c.diff.resource.clone(),
+            verb: c.diff.verb.clone(),
+            namespace: c.diff.namespace.clone(),
+            added,
+            text: format!(
+                "{}   via {targets}",
+                tuple(
+                    &c.diff.namespace,
+                    &c.diff.apigroup,
+                    &c.diff.resource,
+                    &c.diff.verb
+                )
+            ),
+        }
+    };
+    let emit = |rows: &[DiffRow]| {
+        for row in rows {
+            let line = if row.added {
+                paint_add(&format!("+ {}", row.text))
+            } else {
+                paint_del(&format!("- {}", row.text))
+            };
+            println!("        {line}");
+        }
+    };
+
+    // Detail grouped by principal, in the summary's order. Within a principal,
+    // rows sort by the permission (apiGroup, resource, verb, namespace), so a
+    // permission's `+` and `-` sit together.
+    for v in &diff.verdicts {
+        let p = &v.principal;
+        let mut direct: Vec<DiffRow> = Vec::new();
+        for d in &diff.can_gained {
+            if &d.principal == p {
+                direct.push(direct_row(true, d));
             }
         }
-    }
-
-    for ((principal, target), indices) in &groups {
-        match target {
-            None => println!("    {principal}  [direct]:"),
-            Some(target) => println!("    {principal}  via {target}:"),
+        for d in &diff.can_lost {
+            if &d.principal == p {
+                direct.push(direct_row(false, d));
+            }
         }
-        for &i in indices {
-            let d = &changes[i].diff;
-            println!(
-                "      ns={:?}  apigroup={:?}  resource={:?}  verb={:?}",
-                d.namespace, d.apigroup, d.resource, d.verb
-            );
+        // Effective changes reached only through escalation (non-empty `via`);
+        // those reached directly are already shown under `direct`.
+        let mut via: Vec<DiffRow> = Vec::new();
+        for c in &diff.effective_gained {
+            if c.diff.principal == *p && !c.via.is_empty() {
+                via.push(via_row(true, c));
+            }
+        }
+        for c in &diff.effective_lost {
+            if c.diff.principal == *p && !c.via.is_empty() {
+                via.push(via_row(false, c));
+            }
+        }
+        if direct.is_empty() && via.is_empty() {
+            continue;
+        }
+        direct.sort_by(diff_row_order);
+        via.sort_by(diff_row_order);
+        println!();
+        println!("  {}", paint_principal(p));
+        if !direct.is_empty() {
+            println!("      {}", paint_bold("» direct"));
+            emit(&direct);
+        }
+        if !direct.is_empty() && !via.is_empty() {
+            println!();
+        }
+        if !via.is_empty() {
+            println!("      {}", paint_bold("» via escalation"));
+            emit(&via);
         }
     }
+    total_gained == 0
 }
 /// JSON form of a violation's explaining binding paths (ndjson output).
 fn paths_json(paths: &[rbac::AccessPath]) -> Vec<serde_json::Value> {
