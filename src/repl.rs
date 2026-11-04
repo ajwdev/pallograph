@@ -419,7 +419,7 @@ fn print_help() {
         "  rbac::isolation <ns> [p...]            - check that only the listed principals have any access in <ns>"
     );
     println!(
-        "                                           reaches/cluster-admin flags: --direct (also list principals with a direct grant), --all (include built-in k8s/EKS principals, hidden by default), --verbose (list every role in a collapsed RBAC self-grant path), --terse (one line per step, mechanisms as a trailing set)"
+        "                                           reaches/cluster-admin flags: --direct, --all, --verbose, --terse (see `help rbac::cluster-admin` for the output format)"
     );
     println!(
         "  rbac::diff <name> [name2]              - diff RBAC permissions, direct and through escalation, vs a snapshot (or between two snapshots)"
@@ -455,7 +455,9 @@ fn print_help() {
     println!(
         "  # <text>                               - comment, ignored (handy in --script files)"
     );
-    println!("  help                                   - show this help");
+    println!(
+        "  help [command]                         - show this help, or a command's output format (e.g. `help rbac::cluster-admin`)"
+    );
     println!("  quit                                   - exit");
     println!();
     println!(
@@ -464,6 +466,79 @@ fn print_help() {
     println!("run first; put `alias` and `format` lines there. --rcfile <f> / --no-rc override.");
     println!();
 }
+
+/// Print a manpage-style explanation for one command. Covers the commands with
+/// a non-obvious output format; falls back to a pointer at `help` otherwise.
+fn print_command_help(topic: &str) {
+    match topic.trim_start_matches(':') {
+        "rbac::cluster-admin" | "cluster-admin" | "rbac::reaches" | "reaches" => {
+            print!("{REACHES_MANPAGE}");
+        }
+        other => {
+            eprintln!(
+                "No detailed help for '{other}'. Run `help` for the command list (detailed help exists for rbac::reaches / rbac::cluster-admin)."
+            );
+        }
+    }
+}
+
+/// The output-format reference for `rbac::reaches` and `rbac::cluster-admin`,
+/// shown by `help rbac::cluster-admin`.
+const REACHES_MANPAGE: &str = r#"rbac::reaches <namespace> <apiGroup> <resource> <verb> [expected...]
+rbac::cluster-admin [expected...]   (shorthand for reaches "" "*" "*" "*")
+
+List every principal that can reach a permission, whether by a direct grant or
+by escalating to it, and show how. `cluster-admin` is the full-access case.
+Any principal named in [expected...] is treated as allowed and omitted.
+
+FLAGS
+  --direct    also show principals that already hold the permission directly
+  --all       include built-in Kubernetes/EKS principals (hidden by default)
+  --verbose   list every role/binding instead of collapsing to a count
+  --terse     one line per step; mechanisms collapse to a trailing [set]
+
+OUTPUT
+  A FAIL line with the count and the queried (namespace, apiGroup, resource,
+  verb), then up to two sections:
+    held directly               - principals that already hold the permission
+    reachable by privilege escalation - principals that get there by escalating
+  Each section lists the principals, then the paths that explain them.
+
+  A path is a flat sequence of steps. Every step begins with the step marker
+  and, beneath it, the mechanisms that accomplish it:
+
+    ▸ pivot to <identity>            a step: become another identity
+        [create-pod] create a pod as it        a mechanism for that step
+        [impersonate] impersonate it
+    ▸ <identity> self-grants cluster-admin:    the identity grants itself access
+        [bind]     ClusterRole "x" via new ClusterRoleBinding
+        [escalate] create ClusterRole + bind  ⇒ full access
+    ▸ <identity> holds cluster-admin via ClusterRoleBinding "x" → ClusterRole "y"
+
+SYMBOLS
+  ▸        a step (or outcome) in the attack path; steps happen in order
+  [tag]    the mechanism/type used, and the key a future --type filter matches:
+             pivot      create-pod, exec-pod, create-token, impersonate
+             self-grant bind (attach an existing role), escalate (write
+                        arbitrary rules into a role; always ⇒ full access)
+  ( ... )  metadata: a principal's kind, a count hint, or a (dangling: …) flag
+  " ... "  a named Kubernetes object
+  →        "grants": links a binding to the role it references
+  ⇒        the resulting access
+  it       refers to the identity named on the step line directly above
+
+  When a principal has more than one distinct path, each is numbered `Route N:`.
+  A ServiceAccount subject with no ServiceAccount object is flagged
+  `(dangling: no ServiceAccount)`: its identity cannot actually be assumed,
+  though the binding still grants it if the object is ever (re)created.
+
+  On an interactive terminal, colour highlights identities (by kind), the
+  target, the [tags], and cautions; it is additive only and is dropped when
+  output is piped or NO_COLOR is set. The text alone carries the meaning.
+
+  Machine-readable output (`--format ndjson`) emits one object per concrete
+  path with the full detail; display-only subsumption does not apply there.
+"#;
 
 /// Print the subcommands of a subsystem container-command (`rbac`, `sched`,
 /// `k8s`), shown when a bare namespace is entered with no subcommand.
@@ -1366,8 +1441,13 @@ fn session(
                 if line == "::quit" || line == "::exit" || line == "::q" {
                     break;
                 }
-                if line == "::help" {
-                    print_help();
+                if line == "::help" || line.starts_with("::help ") {
+                    let topic = line.strip_prefix("::help").unwrap_or("").trim();
+                    if topic.is_empty() {
+                        print_help();
+                    } else {
+                        print_command_help(topic);
+                    }
                     continue;
                 }
                 // `alias` (no args) lists; `alias <name> <command...>` defines a
