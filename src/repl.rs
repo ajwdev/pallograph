@@ -112,6 +112,12 @@ fn completion_pair(s: String) -> Pair {
     }
 }
 
+/// The commands `help <command>` documents in detail (those `print_command_help`
+/// has a manpage for), offered as completions for its argument.
+fn help_topics() -> &'static [&'static str] {
+    &["rbac::reaches", "rbac::cluster-admin", "rbac::diff"]
+}
+
 /// What to complete for the text before the cursor. The file cases need
 /// rustyline's `Context`, so they are returned as `Files` for [`Completer`] to
 /// run; the rest are resolved here (and unit-tested) as concrete candidates.
@@ -174,6 +180,15 @@ fn plan_completion(before: &str, aliases: &[String], relations: &[String]) -> Co
         "source" | "k8s::load" => CompletionPlan::Files,
         // `load <rel> <src>`: file-complete the second argument on.
         "load" if before[..word_start].split_whitespace().count() >= 2 => CompletionPlan::Files,
+        // `help <command>`: offer the commands that have a detailed manpage.
+        "help" => {
+            let cands = help_topics()
+                .iter()
+                .filter(|t| t.starts_with(word))
+                .map(|t| t.to_string())
+                .collect();
+            CompletionPlan::Words(word_start, cands)
+        }
         "show" | "why" | "query" | "explain" | "smtlib" | "?-" => {
             let cands = relations
                 .iter()
@@ -3408,6 +3423,18 @@ mod completion_tests {
             ["direct_perm", "direct_url_perm"]
         );
         assert_eq!(words("show po", &[], &rels), ["pod"]);
+    }
+
+    #[test]
+    fn help_arg_completes_documented_commands() {
+        assert_eq!(
+            words("help rbac::", &[], &[]),
+            ["rbac::reaches", "rbac::cluster-admin", "rbac::diff"]
+        );
+        // The `::`-qualified command form routes the same way.
+        assert_eq!(words("::help rbac::d", &[], &[]), ["rbac::diff"]);
+        // No argument typed yet: offer them all.
+        assert_eq!(words("help ", &[], &[]).len(), 3);
     }
 
     #[test]
