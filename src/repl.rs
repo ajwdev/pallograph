@@ -513,21 +513,28 @@ OUTPUT
     ▸ pivot to <identity>            a step: become another identity
         [create-pod] create a pod as it        a mechanism for that step
         [impersonate] impersonate it
-    ▸ <identity> self-grants cluster-admin:    the identity grants itself access
+    ▸ as <identity> self-grants cluster-admin:  now acting as it, grant access
         [bind]     ClusterRole "x" via new ClusterRoleBinding
-        [escalate] create ClusterRole + bind  ⇒ full access
-    ▸ <identity> holds cluster-admin via ClusterRoleBinding "x" → ClusterRole "y"
+        [escalate] create ClusterRole + bind
+    ⇒ cluster-admin                  the access reached at the end of the route
+
+  A route ending in an already-held binding looks like:
+    ▸ pivot to <identity>
+        [impersonate] impersonate it
+    ▸ as <identity> holds cluster-admin via ClusterRoleBinding "x" → ClusterRole "y"
+    ⇒ cluster-admin
 
 SYMBOLS
-  ▸        a step (or outcome) in the attack path; steps happen in order
+  ▸        a step in the attack path; steps happen in order, top to bottom
+  as       the final step acts as the identity reached by the pivots above
+  ⇒        the access reached at the end of the route (its destination)
   [tag]    the mechanism/type used, and the key a future --type filter matches:
              pivot      create-pod, exec-pod, create-token, impersonate
              self-grant bind (attach an existing role), escalate (write
-                        arbitrary rules into a role; always ⇒ full access)
+                        arbitrary rules into a role)
   ( ... )  metadata: a principal's kind, a count hint, or a (dangling: …) flag
   " ... "  a named Kubernetes object
   →        "grants": links a binding to the role it references
-  ⇒        the resulting access
   it       refers to the identity named on the step line directly above
 
   When a principal has more than one distinct path, each is numbered `Route N:`.
@@ -2008,17 +2015,18 @@ fn path_tree_lines(
         if bindings.len() == 1 {
             route.step(
                 terse,
-                format!("{final_identity} holds {target} via {}", bindings[0]),
+                format!("as {final_identity} holds {target} via {}", bindings[0]),
                 &[],
             );
         } else {
-            route
-                .lines
-                .push(format!("▸ {final_identity} holds {target} via any one of:"));
+            route.lines.push(format!(
+                "▸ as {final_identity} holds {target} via any one of:"
+            ));
             route
                 .lines
                 .extend(bindings.iter().map(|b| format!("    • {b}")));
         }
+        route.lines.push(format!("⇒ {target}"));
         routes.push(route);
     }
 
@@ -2078,9 +2086,10 @@ fn path_tree_lines(
             );
             route.step(
                 terse,
-                format!("{} self-grants {target}:", paint_identity(writer)),
+                format!("as {} self-grants {target}:", paint_identity(writer)),
                 &entries,
             );
+            route.lines.push(format!("⇒ {target}"));
             routes.push(route);
         }
     }
@@ -2156,7 +2165,6 @@ fn writer_technique_lines(paths: &[&rbac::AccessPath], verbose: bool) -> SelfGra
         }
     };
     let count = |n: usize| paint_dim(&n.to_string());
-    let full_access = paint_act("⇒ full access");
     let more = paint_dim("(--verbose)");
     // Paths matching a (mechanism, creates_binding, creates_role) shape.
     let pick =
@@ -2185,7 +2193,7 @@ fn writer_technique_lines(paths: &[&rbac::AccessPath], verbose: bool) -> SelfGra
         }
         seen.push(shape.clone());
         escalate.push(format!(
-            "create {} + bind{} {full_access}",
+            "create {} + bind{}",
             p.role_kind,
             scope(&p.binding_namespace),
         ));
@@ -3675,7 +3683,7 @@ mod write_summary_tests {
         assert_eq!(
             lines.escalate,
             [
-                "create ClusterRole + bind ⇒ full access",
+                "create ClusterRole + bind",
                 "rewrite any of 2 ClusterRoles + bind (--verbose)",
             ]
         );
