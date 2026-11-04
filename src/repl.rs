@@ -419,7 +419,7 @@ fn print_help() {
         "  rbac::isolation <ns> [p...]            - check that only the listed principals have any access in <ns>"
     );
     println!(
-        "                                           reaches/cluster-admin flags: --direct (also list principals with a direct grant), --all (include built-in k8s/EKS principals, hidden by default)"
+        "                                           reaches/cluster-admin flags: --direct (also list principals with a direct grant), --all (include built-in k8s/EKS principals, hidden by default), --verbose (list every role in a collapsed RBAC self-grant path), --terse (one line per step, mechanisms as a trailing set)"
     );
     println!(
         "  rbac::diff <name> [name2]              - diff RBAC permissions, direct and through escalation, vs a snapshot (or between two snapshots)"
@@ -1564,64 +1564,639 @@ fn fmt_binding(p: &rbac::AccessPath) -> String {
         format!("{}/", p.binding_namespace)
     };
     format!(
-        "{} {}{} → {} {}",
+        "{} \"{}{}\" → {} \"{}\"",
         p.binding_kind, ns, p.binding_name, p.role_kind, p.role_name
     )
 }
 
-fn mech_str(mech: &str) -> String {
-    if mech.is_empty() {
-        String::new()
-    } else {
-        format!(" [{mech}]")
-    }
+/// A stable key for a hop chain, so paths with the same chain group together.
+fn hops_sig(hops: &[(rbac::Subject, String)]) -> String {
+    hops.iter()
+        .map(|(hop, mechanism)| format!("{}#{mechanism}", hop.smt_key()))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Serialize an access path to a stable string key for grouping.
 fn path_sig(p: &rbac::AccessPath) -> String {
-    let hops: String = p
-        .hops
-        .iter()
-        .map(|(hop, mechanism)| format!("{}#{mechanism}", hop.smt_key()))
-        .collect::<Vec<_>>()
-        .join(",");
     format!(
         "{}|{}|{}|{}",
-        hops, p.binding_kind, p.binding_namespace, p.binding_name
+        hops_sig(&p.hops),
+        p.binding_kind,
+        p.binding_namespace,
+        p.binding_name
     )
 }
 
-fn print_violation_paths(paths: &[rbac::AccessPath]) {
-    // Group paths by identical hop chain: print "via X [mech]" once, then list
-    // all bindings of the target underneath it rather than repeating the header.
-    let mut by_hops: BTreeMap<&Vec<(rbac::Subject, String)>, Vec<&rbac::AccessPath>> =
-        BTreeMap::new();
-    for p in paths {
-        by_hops.entry(&p.hops).or_default().push(p);
+/// A section rule, e.g. "── reachable by privilege escalation ───…", bold.
+fn print_section(title: &str) {
+    const WIDTH: usize = 66;
+    let dashes = WIDTH.saturating_sub(title.chars().count() + 4);
+    println!(
+        "{}",
+        paint_bold(&format!("── {title} {}", "─".repeat(dashes.max(3))))
+    );
+}
+
+/// Colour report output only on an interactive terminal, and never when
+/// `NO_COLOR` is set (https://no-color.org). Computed once per process.
+fn colored_output() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none())
+}
+
+/// The ANSI colour a principal's kind is painted in, so pivot chains are easy
+/// to scan: ServiceAccount cyan, Group magenta, User yellow.
+fn kind_color(kind: rbac::SubjectKind) -> &'static str {
+    match kind {
+        rbac::SubjectKind::ServiceAccount => "36",
+        rbac::SubjectKind::Group => "35",
+        rbac::SubjectKind::User => "33",
     }
-    for (hops, group) in &by_hops {
-        if hops.is_empty() {
-            for p in group {
-                println!("          {}", fmt_binding(p));
-            }
+}
+
+/// `text` wrapped in the colour for `kind`, or unchanged when colour is off.
+fn paint(text: &str, kind: rbac::SubjectKind) -> String {
+    if colored_output() {
+        format!("\x1b[{}m{text}\x1b[0m", kind_color(kind))
+    } else {
+        text.to_string()
+    }
+}
+
+/// A principal: its name painted by kind, with a dimmed "(kind)" annotation
+/// for users and groups (a ServiceAccount username already says what it is).
+fn paint_principal(subject: &rbac::Subject) -> String {
+    let annotation = match subject.kind {
+        rbac::SubjectKind::Group => " (group)",
+        rbac::SubjectKind::User => " (user)",
+        rbac::SubjectKind::ServiceAccount => "",
+    };
+    // Paint the bare name (not the Display form, which already annotates groups,
+    // or the kind would print twice).
+    let name = paint(&subject.name, subject.kind);
+    if annotation.is_empty() {
+        name
+    } else {
+        format!("{name}{}", paint_dim(annotation))
+    }
+}
+
+/// A bare identity (no annotation) painted by its kind, for pivot chains.
+fn paint_identity(subject: &rbac::Subject) -> String {
+    paint(&subject.name, subject.kind)
+}
+
+/// Blue, for a type tag or mechanism token: the filterable category dimension
+/// (`[bind]`, `[escalate]`, `{pod-exec}`), scannable apart from identities.
+fn paint_tag(text: &str) -> String {
+    if colored_output() {
+        format!("\x1b[34m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Bold red, for an attack verb or capability the attacker exercises.
+fn paint_act(text: &str) -> String {
+    if colored_output() {
+        format!("\x1b[1;31m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Dim, for scaffolding (counts, hints, arrows) that should recede.
+fn paint_dim(text: &str) -> String {
+    if colored_output() {
+        format!("\x1b[2m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Bold, for section rules and the leading verdict.
+fn paint_bold(text: &str) -> String {
+    if colored_output() {
+        format!("\x1b[1m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Bold yellow, for a caution marker like a dangling reference. The marker's
+/// text carries the meaning on its own; the colour is only additive.
+fn paint_caution(text: &str) -> String {
+    if colored_output() {
+        format!("\x1b[1;33m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+/// The display join key (verb-noun) for an internal mechanism token. The
+/// " after RBAC write" qualifier is dropped for now; it is a timing nuance, not
+/// a distinct primitive. Unknown tokens pass through.
+fn mechanism_tag(token: &str) -> &str {
+    let base = token.trim();
+    let base = base.strip_suffix(" after RBAC write").unwrap_or(base);
+    match base {
+        "pod-exec" => "exec-pod",
+        "pod-create" => "create-pod",
+        "token" => "create-token",
+        "impersonate" => "impersonate",
+        other => other,
+    }
+}
+
+/// Plain-English description for a pivot mechanism tag; "it" is the identity
+/// named on the `▸ pivot to …` line directly above.
+fn pivot_mechanism(tag: &str) -> &str {
+    match tag {
+        "exec-pod" => "exec into a pod running as it",
+        "create-pod" => "create a pod as it",
+        "create-token" => "mint a token for it",
+        "impersonate" => "impersonate it",
+        other => other,
+    }
+}
+
+/// A hop's comma-joined mechanism label as sorted, deduplicated (tag, phrase)
+/// pairs. Dedup collapses the dropped " after RBAC write" qualifier.
+fn pivot_mechanisms(label: &str) -> Vec<(String, String)> {
+    let mut tags: Vec<&str> = Vec::new();
+    for token in label.split(',') {
+        let tag = mechanism_tag(token);
+        if !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+    tags.sort_unstable();
+    tags.into_iter()
+        .map(|t| (t.to_string(), pivot_mechanism(t).to_string()))
+        .collect()
+}
+
+/// Render the mechanism lines under a step: each `[tag] text`, the painted tag
+/// padded into a column, indented four under its step.
+fn mechanism_lines(entries: &[(String, String)]) -> Vec<String> {
+    let width = entries
+        .iter()
+        .map(|(tag, _)| tag.chars().count() + 2) // the "[tag]" brackets
+        .max()
+        .unwrap_or(0);
+    entries
+        .iter()
+        .map(|(tag, text)| {
+            let bracket = format!("[{tag}]");
+            let pad = " ".repeat(width + 1 - bracket.chars().count());
+            format!("    {}{pad}{text}", paint_tag(&bracket))
+        })
+        .collect()
+}
+
+/// A route explaining one finding: the identity chain it passes through (for
+/// subsumption) and its rendered lines (steps and mechanisms, from column 0;
+/// callers add the left margin).
+struct Route {
+    identities: Vec<rbac::Subject>,
+    lines: Vec<String>,
+}
+
+impl Route {
+    /// Append a `▸` step. In the default view its mechanisms follow as indented
+    /// `[tag]` lines; in terse mode they collapse to a trailing `[tag, …]` set
+    /// and the step is a single line. A trailing `:` on the step text (the
+    /// self-grant "…:") is dropped before the terse set.
+    fn step(&mut self, terse: bool, text: String, mechanisms: &[(String, String)]) {
+        if mechanisms.is_empty() {
+            self.lines.push(format!("▸ {text}"));
+        } else if terse {
+            let mut tags: Vec<&str> = mechanisms.iter().map(|(t, _)| t.as_str()).collect();
+            tags.sort_unstable();
+            tags.dedup();
+            let set: Vec<String> = tags.iter().map(|t| paint_tag(t)).collect();
+            let base = text.strip_suffix(':').unwrap_or(text.as_str());
+            self.lines.push(format!("▸ {base} [{}]", set.join(", ")));
         } else {
-            let (hop, mechanism) = &hops[0];
-            println!("          via {hop}{}", mech_str(mechanism));
-            for (hop, mechanism) in hops[1..].iter() {
-                println!("            → via {hop}{}", mech_str(mechanism));
-            }
-            for p in group {
-                println!("            → {}", fmt_binding(p));
-            }
+            self.lines.push(format!("▸ {text}"));
+            self.lines.extend(mechanism_lines(mechanisms));
         }
     }
 }
 
-/// Print reaches/cluster-admin violations path-first: show each distinct
-/// escalation path once and list the principals that can use it underneath.
-/// This avoids repeating the same path for every one of N principals.
-/// Users and groups are annotated with their kind, e.g. "(group)".
-fn print_reaches_grouped(violations: &[rbac::Violation]) {
+/// Build the lines explaining one finding's paths, from column 0 (callers add
+/// the left margin). Each route is a flat `▸` spine of steps, with the
+/// mechanisms of each step listed beneath it as `[tag]` lines. Multiple routes
+/// are alternatives, numbered `Route N:`. A route is suppressed when one of its
+/// intermediate steps passes through an identity that itself reaches the target
+/// (a shorter route already shows it); the core keeps every path, so this
+/// subsumption is display-only and ndjson stays complete.
+fn path_tree_lines(
+    paths: &[rbac::AccessPath],
+    target_label: &str,
+    verbose: bool,
+    terse: bool,
+) -> Vec<String> {
+    use rbac::PathKind;
+    let target = paint_act(target_label);
+
+    let mut direct = Vec::new();
+    let mut escalation = Vec::new();
+    let mut write = Vec::new();
+    for p in paths {
+        match p.kind() {
+            PathKind::Direct => direct.push(p),
+            PathKind::Escalation => escalation.push(p),
+            PathKind::RbacWrite => write.push(p),
+        }
+    }
+
+    let mut routes: Vec<Route> = Vec::new();
+
+    // Held directly: one route, no pivots. The principals above are the holders.
+    if !direct.is_empty() {
+        let bindings: Vec<String> = direct.iter().copied().map(fmt_binding).collect();
+        let mut route = Route {
+            identities: Vec::new(),
+            lines: Vec::new(),
+        };
+        if bindings.len() == 1 {
+            route.step(terse, format!("holds {target} via {}", bindings[0]), &[]);
+        } else {
+            route
+                .lines
+                .push(format!("▸ holds {target} via any one of:"));
+            route
+                .lines
+                .extend(bindings.iter().map(|b| format!("    • {b}")));
+        }
+        routes.push(route);
+    }
+
+    // Escalation reach-to-binding, grouped by the hop chain they share.
+    let mut order: Vec<&[(rbac::Subject, String)]> = Vec::new();
+    let mut by_hops: BTreeMap<&[(rbac::Subject, String)], Vec<&rbac::AccessPath>> = BTreeMap::new();
+    for p in &escalation {
+        let hops = p.hops.as_slice();
+        if !by_hops.contains_key(hops) {
+            order.push(hops);
+        }
+        by_hops.entry(hops).or_default().push(p);
+    }
+    for hops in order {
+        let group = &by_hops[hops];
+        let mut route = Route {
+            identities: hops.iter().map(|(id, _)| id.clone()).collect(),
+            lines: Vec::new(),
+        };
+        for (identity, mechanism) in hops {
+            route.step(
+                terse,
+                format!("pivot to {}", paint_identity(identity)),
+                &pivot_mechanisms(mechanism),
+            );
+        }
+        let final_identity = paint_identity(&hops.last().expect("escalation path has a hop").0);
+        let bindings: Vec<String> = group.iter().copied().map(fmt_binding).collect();
+        if bindings.len() == 1 {
+            route.step(
+                terse,
+                format!("{final_identity} holds {target} via {}", bindings[0]),
+                &[],
+            );
+        } else {
+            route
+                .lines
+                .push(format!("▸ {final_identity} holds {target} via any one of:"));
+            route
+                .lines
+                .extend(bindings.iter().map(|b| format!("    • {b}")));
+        }
+        routes.push(route);
+    }
+
+    // RBAC self-grant, grouped by the chain reaching the writer; one route per
+    // distinct writer under that chain.
+    let mut worder: Vec<String> = Vec::new();
+    let mut by_reach: BTreeMap<String, Vec<&rbac::AccessPath>> = BTreeMap::new();
+    for p in &write {
+        let key = hops_sig(p.reach_prefix());
+        if !by_reach.contains_key(&key) {
+            worder.push(key.clone());
+        }
+        by_reach.entry(key).or_default().push(p);
+    }
+    for key in &worder {
+        let group = &by_reach[key];
+        let prefix = group[0].reach_prefix();
+        let mut seen: Vec<String> = Vec::new();
+        for p in group.iter() {
+            let Some((writer, _)) = p.write_action() else {
+                continue;
+            };
+            if seen.contains(&writer.smt_key()) {
+                continue;
+            }
+            seen.push(writer.smt_key());
+            let writer_paths: Vec<&rbac::AccessPath> = group
+                .iter()
+                .copied()
+                .filter(|q| q.write_action().map(|(w, _)| w.smt_key()) == Some(writer.smt_key()))
+                .collect();
+            let techniques = writer_technique_lines(&writer_paths, verbose);
+
+            let mut route = Route {
+                identities: prefix.iter().map(|(id, _)| id.clone()).collect(),
+                lines: Vec::new(),
+            };
+            for (identity, mechanism) in prefix {
+                route.step(
+                    terse,
+                    format!("pivot to {}", paint_identity(identity)),
+                    &pivot_mechanisms(mechanism),
+                );
+            }
+            let mut entries: Vec<(String, String)> = Vec::new();
+            entries.extend(
+                techniques
+                    .bind
+                    .iter()
+                    .map(|a| ("bind".to_string(), a.clone())),
+            );
+            entries.extend(
+                techniques
+                    .escalate
+                    .iter()
+                    .map(|a| ("escalate".to_string(), a.clone())),
+            );
+            route.step(
+                terse,
+                format!("{} self-grants {target}:", paint_identity(writer)),
+                &entries,
+            );
+            routes.push(route);
+        }
+    }
+
+    // Subsumption: drop a route whose intermediate hops pass through an identity
+    // that is itself the terminal of some route (a shorter route shows it).
+    let terminals: std::collections::HashSet<rbac::Subject> = routes
+        .iter()
+        .filter_map(|r| r.identities.last().cloned())
+        .collect();
+    routes.retain(|r| {
+        let n = r.identities.len();
+        !r.identities[..n.saturating_sub(1)]
+            .iter()
+            .any(|id| terminals.contains(id))
+    });
+
+    // Render; number the routes when more than one remains.
+    let mut out: Vec<String> = Vec::new();
+    if routes.len() > 1 {
+        for (i, route) in routes.iter().enumerate() {
+            if i > 0 {
+                out.push(String::new());
+            }
+            out.push(format!("Route {}:", i + 1));
+            out.extend(route.lines.iter().map(|l| format!("  {l}")));
+        }
+    } else {
+        for route in &routes {
+            out.extend(route.lines.iter().cloned());
+        }
+    }
+    out
+}
+
+/// Print a finding's path tree at a left margin. Blank lines stay blank.
+fn print_paths_labeled(
+    paths: &[rbac::AccessPath],
+    target_label: &str,
+    verbose: bool,
+    terse: bool,
+    margin: usize,
+) {
+    let pad = " ".repeat(margin);
+    for line in path_tree_lines(paths, target_label, verbose, terse) {
+        if line.is_empty() {
+            println!();
+        } else {
+            println!("{pad}{line}");
+        }
+    }
+}
+
+/// The distinct ways a writer could grant itself the queried access by writing
+/// RBAC objects, as action strings without their type tag (the caller prefixes
+/// `[bind]` or `[escalate]`). `bind` gathers binding an existing role or adding
+/// itself to an existing binding; `escalate` gathers writing arbitrary rules
+/// into a role (new or existing) and binding it, which yields full access.
+/// Default is collapsed; `verbose` lists every role and binding. A
+/// create-a-new-role technique subsumes binding the existing roles. Counts,
+/// qualifiers and hints are dimmed; the full-access outcome is painted.
+struct SelfGrantTechniques {
+    bind: Vec<String>,
+    escalate: Vec<String>,
+}
+
+fn writer_technique_lines(paths: &[&rbac::AccessPath], verbose: bool) -> SelfGrantTechniques {
+    let scope = |ns: &str| {
+        if ns.is_empty() {
+            String::new()
+        } else {
+            format!(" in {ns}")
+        }
+    };
+    let count = |n: usize| paint_dim(&n.to_string());
+    let full_access = paint_act("⇒ full access");
+    let more = paint_dim("(--verbose)");
+    // Paths matching a (mechanism, creates_binding, creates_role) shape.
+    let pick =
+        |mechanism: &str, creates_binding: bool, creates_role: bool| -> Vec<&rbac::AccessPath> {
+            paths
+                .iter()
+                .copied()
+                .filter(|p| {
+                    p.write_action().map(|(_, m)| m) == Some(mechanism)
+                        && p.creates_binding() == creates_binding
+                        && p.creates_role() == creates_role
+                })
+                .collect()
+        };
+    let mut bind = Vec::new();
+    let mut escalate = Vec::new();
+
+    // A. Create a new role with any rules and bind it (escalate): full access.
+    let create_role = pick("escalate", true, true);
+    let has_create_role = !create_role.is_empty();
+    let mut seen: Vec<(&str, String, &str)> = Vec::new();
+    for p in &create_role {
+        let shape = (p.binding_kind, p.binding_namespace.clone(), p.role_kind);
+        if seen.contains(&shape) {
+            continue;
+        }
+        seen.push(shape.clone());
+        escalate.push(format!(
+            "create {} + bind{} {full_access}",
+            p.role_kind,
+            scope(&p.binding_namespace),
+        ));
+    }
+
+    // B. Bind an existing role that already grants it, via a new binding.
+    let mut bind_new: BTreeMap<(&str, String, &str), Vec<&str>> = BTreeMap::new();
+    for p in pick("bind", true, false) {
+        bind_new
+            .entry((p.binding_kind, p.binding_namespace.clone(), p.role_kind))
+            .or_default()
+            .push(p.role_name.as_str());
+    }
+    for ((binding_kind, ns, role_kind), mut roles) in bind_new {
+        roles.sort_unstable();
+        roles.dedup();
+        let scope = scope(&ns);
+        if roles.len() == 1 || verbose {
+            for role in roles {
+                bind.push(format!(
+                    "{role_kind} \"{role}\" via new {binding_kind}{scope}"
+                ));
+            }
+        } else {
+            bind.push(format!(
+                "any of {} {role_kind}s via new {binding_kind}{scope} {more}",
+                count(roles.len())
+            ));
+        }
+    }
+
+    // C. Add itself as a subject to an existing binding that already grants it.
+    let mut add_existing: BTreeMap<(&str, String), BTreeMap<String, Vec<&str>>> = BTreeMap::new();
+    for p in pick("bind", false, false) {
+        add_existing
+            .entry((p.binding_kind, p.binding_namespace.clone()))
+            .or_default()
+            .entry(p.role_name.clone())
+            .or_default()
+            .push(p.binding_name.as_str());
+    }
+    for ((binding_kind, ns), roles) in add_existing {
+        let scope = scope(&ns);
+        for (role, mut bindings) in roles {
+            bindings.sort_unstable();
+            bindings.dedup();
+            if bindings.len() == 1 || verbose {
+                for binding in bindings {
+                    bind.push(format!(
+                        "add self to {binding_kind} \"{binding}\" (grants {role}){scope}"
+                    ));
+                }
+            } else {
+                bind.push(format!(
+                    "add self to {} {binding_kind}s that grant {role}{scope} {more}",
+                    count(bindings.len())
+                ));
+            }
+        }
+    }
+
+    // D. Bind an existing role via a new binding using escalate (can also
+    //    rewrite it). Subsumed by A when A is present.
+    let mut escalate_new: BTreeMap<(&str, String, &str), Vec<&str>> = BTreeMap::new();
+    for p in pick("escalate", true, false) {
+        escalate_new
+            .entry((p.binding_kind, p.binding_namespace.clone(), p.role_kind))
+            .or_default()
+            .push(p.role_name.as_str());
+    }
+    for ((_binding_kind, ns, role_kind), mut roles) in escalate_new {
+        roles.sort_unstable();
+        roles.dedup();
+        let scope = scope(&ns);
+        if verbose {
+            for role in roles {
+                escalate.push(format!("rewrite {role_kind} \"{role}\" + bind{scope}"));
+            }
+        } else if has_create_role || roles.len() > 1 {
+            escalate.push(format!(
+                "rewrite any of {} {role_kind}s + bind{scope} {more}",
+                count(roles.len())
+            ));
+        } else {
+            escalate.push(format!(
+                "rewrite {role_kind} \"{}\" + bind{scope}",
+                roles[0]
+            ));
+        }
+    }
+
+    // E. Rewrite an existing role it is already bound to (escalate in place).
+    let mut rewrite: BTreeMap<(String, &str), Vec<&str>> = BTreeMap::new();
+    for p in pick("escalate", false, false) {
+        rewrite
+            .entry((p.binding_namespace.clone(), p.role_kind))
+            .or_default()
+            .push(p.role_name.as_str());
+    }
+    for ((ns, role_kind), mut roles) in rewrite {
+        roles.sort_unstable();
+        roles.dedup();
+        let scope = scope(&ns);
+        if roles.len() == 1 || verbose {
+            for role in roles {
+                escalate.push(format!(
+                    "rewrite {role_kind} \"{role}\" it is already bound to{scope}"
+                ));
+            }
+        } else {
+            escalate.push(format!(
+                "rewrite any of {} {role_kind}s it is already bound to{scope} {more}",
+                count(roles.len())
+            ));
+        }
+    }
+
+    SelfGrantTechniques { bind, escalate }
+}
+
+/// Print reaches/cluster-admin findings subject-first: each distinct set of
+/// paths heads a stanza that names the principals sharing it, then the paths
+/// as an indented tree. Users and groups are annotated with their kind, e.g.
+/// "(group)".
+/// The ServiceAccount principals that exist as loaded objects, as usernames
+/// `system:serviceaccount:<ns>:<name>`. A binding can name a ServiceAccount
+/// that no longer exists; comparing against this set flags such dangling
+/// subjects. An empty set (e.g. the query failed) marks nothing.
+fn known_serviceaccounts(core: &dyn Core, at: &At) -> std::collections::HashSet<String> {
+    let Ok(rows) = core.query(at, "serviceaccount(Namespace, Name, Data)") else {
+        return std::collections::HashSet::new();
+    };
+    let field = |row: &[Value], i: usize| match row.get(i) {
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    rows.rows
+        .iter()
+        .filter_map(|row| {
+            Some(format!(
+                "system:serviceaccount:{}:{}",
+                field(row, 0)?,
+                field(row, 1)?
+            ))
+        })
+        .collect()
+}
+
+fn print_findings(
+    violations: &[rbac::Violation],
+    target_label: &str,
+    verbose: bool,
+    terse: bool,
+    known_sas: &std::collections::HashSet<String>,
+) {
     // Preserve first-seen order for paths; use a Vec<key> + BTreeMap for lookup.
     let mut order: Vec<String> = Vec::new();
     let mut groups: BTreeMap<String, (Vec<rbac::AccessPath>, Vec<rbac::Subject>)> = BTreeMap::new();
@@ -1639,13 +2214,27 @@ fn print_reaches_grouped(violations: &[rbac::Violation]) {
             .or_insert_with(|| (v.paths.clone(), Vec::new()));
         entry.1.push(v.principal.clone());
     }
-    for sig in &order {
-        let (paths, principals) = &groups[sig];
-        print_violation_paths(paths);
-        println!("          {} principal(s):", principals.len());
-        for principal in principals {
-            println!("            {}", principal.with_kind());
+    for (i, sig) in order.iter().enumerate() {
+        if i > 0 {
+            println!();
         }
+        let (paths, principals) = &groups[sig];
+        for principal in principals {
+            // A ServiceAccount named by a binding may not exist as an object; its
+            // identity can't actually be assumed, so flag the dangling subject.
+            let dangling = principal.kind == rbac::SubjectKind::ServiceAccount
+                && !known_sas.contains(&principal.name);
+            if dangling {
+                println!(
+                    "  {} {}",
+                    paint_principal(principal),
+                    paint_caution("(dangling: no ServiceAccount)")
+                );
+            } else {
+                println!("  {}", paint_principal(principal));
+            }
+        }
+        print_paths_labeled(paths, target_label, verbose, terse, 6);
     }
 }
 
@@ -1761,6 +2350,15 @@ fn paths_json(paths: &[rbac::AccessPath]) -> Vec<serde_json::Value> {
         .iter()
         .map(|p| {
             serde_json::json!({
+                // How the principal reaches the permission: "direct",
+                // "escalation" (assume another identity), or "rbac_write"
+                // (grant it to itself by writing RBAC objects).
+                "path_type": p.kind_str(),
+                // For rbac_write paths, whether the binding and/or role are
+                // minted rather than reused. binding_name/role_name are then
+                // the placeholder "(new)".
+                "creates_binding": p.creates_binding(),
+                "creates_role": p.creates_role(),
                 "binding_kind": p.binding_kind,
                 "binding_namespace": p.binding_namespace,
                 "binding_name": p.binding_name,
@@ -1864,20 +2462,22 @@ fn rbac_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) ->
                             v.resource,
                             v.verb
                         );
-                        print_violation_paths(&v.paths);
+                        print_paths_labeled(&v.paths, "this access", false, false, 8);
                     }
                 }
                 CheckResult::Fail
             }
         }
         "reaches" | "cluster-admin" => {
-            // Parse --direct flag out of the token stream before positional args.
+            // Parse flags out of the token stream before positional args.
             let tokens: Vec<&str> = rest.split_whitespace().collect();
             let include_direct = tokens.contains(&"--direct");
             let include_builtins = tokens.contains(&"--all");
+            let verbose = tokens.contains(&"--verbose");
+            let terse = tokens.contains(&"--terse");
             let mut token_iter = tokens
                 .iter()
-                .filter(|t| !matches!(**t, "--direct" | "--all"))
+                .filter(|t| !matches!(**t, "--direct" | "--all" | "--verbose" | "--terse"))
                 .copied();
 
             let (namespace, apigroup, resource, verb, expected) = if subcommand == "cluster-admin" {
@@ -1894,10 +2494,10 @@ fn rbac_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) ->
                     token_iter.next(),
                 ) else {
                     eprintln!(
-                        "Usage: rbac::reaches <namespace> <apigroup> <resource> <verb> [--direct] [--all] [expected ...]"
+                        "Usage: rbac::reaches <namespace> <apigroup> <resource> <verb> [--direct] [--all] [--verbose] [expected ...]"
                     );
                     eprintln!(
-                        "       Use rbac::cluster-admin [--direct] [--all] to check for cluster-admin level access."
+                        "       Use rbac::cluster-admin [--direct] [--all] [--verbose] to check for cluster-admin level access."
                     );
                     return CheckResult::Error;
                 };
@@ -1967,17 +2567,32 @@ fn rbac_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) ->
                     emit_violations(&via, "escalation");
                 } else {
                     let total = direct.len() + via.len();
+                    let target_label = if subcommand == "cluster-admin" {
+                        "cluster-admin".to_string()
+                    } else {
+                        "the requested access".to_string()
+                    };
+                    let plural = if total == 1 { "" } else { "s" };
                     println!(
-                        "FAIL  {total} principal(s) can reach ({namespace:?}, {apigroup:?}, {resource:?}, {verb:?}):"
+                        "{}  {total} principal{plural} can reach {} {}",
+                        paint_bold("FAIL"),
+                        paint_act(&target_label),
+                        paint_dim(&format!(
+                            "(namespace {namespace:?}, apiGroup {apigroup:?}, resource {resource:?}, verb {verb:?})"
+                        ))
                     );
+                    let known_sas = known_serviceaccounts(core, at);
                     if !direct.is_empty() {
-                        println!("  direct ({}):", direct.len());
-                        print_reaches_grouped(&direct);
+                        println!();
+                        print_section("held directly");
+                        println!();
+                        print_findings(&direct, &target_label, verbose, terse, &known_sas);
                     }
                     if !via.is_empty() {
                         println!();
-                        println!("  via escalation ({}):", via.len());
-                        print_reaches_grouped(&via);
+                        print_section("reachable by privilege escalation");
+                        println!();
+                        print_findings(&via, &target_label, verbose, terse, &known_sas);
                     }
                 }
                 CheckResult::Fail
@@ -2720,13 +3335,150 @@ mod binding_format_tests {
     #[test]
     fn cluster_scoped_binding_has_no_leading_slash() {
         let p = path("ClusterRoleBinding", "", "ClusterRole");
-        assert_eq!(fmt_binding(&p), "ClusterRoleBinding b → ClusterRole r");
+        assert_eq!(
+            fmt_binding(&p),
+            "ClusterRoleBinding \"b\" → ClusterRole \"r\""
+        );
     }
 
     #[test]
     fn namespaced_binding_is_prefixed_with_its_namespace() {
         let p = path("RoleBinding", "kube-system", "Role");
-        assert_eq!(fmt_binding(&p), "RoleBinding kube-system/b → Role r");
+        assert_eq!(
+            fmt_binding(&p),
+            "RoleBinding \"kube-system/b\" → Role \"r\""
+        );
+    }
+}
+
+#[cfg(test)]
+mod write_summary_tests {
+    use super::writer_technique_lines;
+    use crate::rbac::{AccessPath, PathKind, Subject};
+
+    /// Build a cluster-scoped write path. `binding`/`role` of "(new)" mark a
+    /// minted object, as `collect_rbac_write_paths` emits them.
+    fn write(binding: &str, role: &str, mechanism: &str) -> AccessPath {
+        AccessPath {
+            binding_kind: "ClusterRoleBinding",
+            binding_namespace: String::new(),
+            binding_name: binding.into(),
+            role_kind: "ClusterRole",
+            role_name: role.into(),
+            hops: vec![(Subject::username("w"), mechanism.into())],
+        }
+    }
+
+    #[test]
+    fn kind_follows_the_terminal_hop() {
+        let direct = AccessPath {
+            binding_kind: "ClusterRoleBinding",
+            binding_namespace: String::new(),
+            binding_name: "b".into(),
+            role_kind: "ClusterRole",
+            role_name: "cluster-admin".into(),
+            hops: vec![],
+        };
+        assert_eq!(direct.kind(), PathKind::Direct);
+
+        let reach = AccessPath {
+            hops: vec![(Subject::username("t"), "impersonate".into())],
+            ..direct.clone()
+        };
+        assert_eq!(reach.kind(), PathKind::Escalation);
+
+        assert_eq!(write("(new)", "admin", "bind").kind(), PathKind::RbacWrite);
+        assert_eq!(
+            write("(new)", "(new)", "escalate").kind(),
+            PathKind::RbacWrite
+        );
+    }
+
+    #[test]
+    fn binding_many_existing_roles_collapses_to_a_count() {
+        let paths: Vec<AccessPath> = ["admin", "view", "edit"]
+            .iter()
+            .map(|r| write("(new)", r, "bind"))
+            .collect();
+        let refs: Vec<&AccessPath> = paths.iter().collect();
+
+        let lines = writer_technique_lines(&refs, false);
+        assert_eq!(
+            lines.bind,
+            ["any of 3 ClusterRoles via new ClusterRoleBinding (--verbose)"]
+        );
+        assert!(lines.escalate.is_empty());
+
+        // Verbose lists every role, sorted.
+        let verbose = writer_technique_lines(&refs, true);
+        assert_eq!(
+            verbose.bind,
+            [
+                "ClusterRole \"admin\" via new ClusterRoleBinding",
+                "ClusterRole \"edit\" via new ClusterRoleBinding",
+                "ClusterRole \"view\" via new ClusterRoleBinding",
+            ]
+        );
+        assert!(verbose.escalate.is_empty());
+    }
+
+    #[test]
+    fn a_single_bindable_role_is_named() {
+        let paths = [write("(new)", "cluster-admin", "bind")];
+        let refs: Vec<&AccessPath> = paths.iter().collect();
+        assert_eq!(
+            writer_technique_lines(&refs, false).bind,
+            ["ClusterRole \"cluster-admin\" via new ClusterRoleBinding"]
+        );
+    }
+
+    #[test]
+    fn adding_to_an_existing_binding_is_not_called_a_rewrite() {
+        // An existing binding (creates_binding == false) under the bind
+        // mechanism means "add yourself as a subject", not "rewrite the role".
+        let paths = [write("netflix-cluster-admins", "cluster-admin", "bind")];
+        let refs: Vec<&AccessPath> = paths.iter().collect();
+        assert_eq!(
+            writer_technique_lines(&refs, false).bind,
+            ["add self to ClusterRoleBinding \"netflix-cluster-admins\" (grants cluster-admin)"]
+        );
+    }
+
+    #[test]
+    fn creating_a_role_subsumes_the_bind_list() {
+        // A writer that can mint a role with any rules already has full access,
+        // so the existing roles it could instead bind-and-rewrite are noted,
+        // not enumerated, even though both paths are present.
+        let mut paths = vec![write("(new)", "(new)", "escalate")];
+        paths.extend(
+            ["admin", "view"]
+                .iter()
+                .map(|r| write("(new)", r, "escalate")),
+        );
+        let refs: Vec<&AccessPath> = paths.iter().collect();
+
+        let lines = writer_technique_lines(&refs, false);
+        assert_eq!(
+            lines.escalate,
+            [
+                "create ClusterRole + bind ⇒ full access",
+                "rewrite any of 2 ClusterRoles + bind (--verbose)",
+            ]
+        );
+        assert!(lines.bind.is_empty());
+    }
+
+    #[test]
+    fn rewriting_bound_roles_collapses_to_a_count() {
+        let paths: Vec<AccessPath> = [("crb-a", "role-a"), ("crb-b", "role-b")]
+            .iter()
+            .map(|(b, r)| write(b, r, "escalate"))
+            .collect();
+        let refs: Vec<&AccessPath> = paths.iter().collect();
+        assert_eq!(
+            writer_technique_lines(&refs, false).escalate,
+            ["rewrite any of 2 ClusterRoles it is already bound to (--verbose)"]
+        );
     }
 }
 
