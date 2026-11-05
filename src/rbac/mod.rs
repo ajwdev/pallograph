@@ -40,6 +40,84 @@ pub struct AccessPath {
     pub hops: Vec<(Subject, String)>,
 }
 
+/// How a principal reaches a permission. Used to group violation output so
+/// paths that are already held, reached by assuming another identity, and
+/// reached by writing RBAC objects are shown apart rather than interleaved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PathKind {
+    /// A binding the principal already holds grants it; no escalation.
+    Direct,
+    /// Reached by assuming another identity or group (impersonate, pod-exec,
+    /// pod-create, token), ending at a binding that identity holds.
+    Escalation,
+    /// Reached by writing RBAC objects: with `bind` or `escalate` the
+    /// principal can grant itself the permission. The binding, and sometimes
+    /// the role, do not exist yet (shown as "(new)").
+    RbacWrite,
+}
+
+impl AccessPath {
+    /// The last hop is a terminal RBAC-write step, pushed by
+    /// `collect_rbac_write_paths` with mechanism `bind` or `escalate`. Reach
+    /// mechanisms never equal those, so the last hop classifies the path.
+    fn ends_in_write(&self) -> bool {
+        matches!(self.hops.last(), Some((_, mechanism)) if mechanism == "bind" || mechanism == "escalate")
+    }
+
+    /// Which tier this path belongs to.
+    pub fn kind(&self) -> PathKind {
+        if self.ends_in_write() {
+            PathKind::RbacWrite
+        } else if self.hops.is_empty() {
+            PathKind::Direct
+        } else {
+            PathKind::Escalation
+        }
+    }
+
+    /// Stable lowercase tag for machine output.
+    pub fn kind_str(&self) -> &'static str {
+        match self.kind() {
+            PathKind::Direct => "direct",
+            PathKind::Escalation => "escalation",
+            PathKind::RbacWrite => "rbac_write",
+        }
+    }
+
+    /// True when the path mints a new binding rather than reusing an existing
+    /// one.
+    pub fn creates_binding(&self) -> bool {
+        self.binding_name == NEW_OBJECT
+    }
+
+    /// True when the path writes a new role with arbitrary rules rather than
+    /// binding an existing one. A new role is equivalent to full access in its
+    /// scope, so it subsumes any list of existing roles the writer could bind.
+    pub fn creates_role(&self) -> bool {
+        self.role_name == NEW_OBJECT
+    }
+
+    /// For a write path, the hops before the terminal `bind`/`escalate` hop:
+    /// the chain reaching the writer, plus any prerequisite write step. For a
+    /// non-write path, all hops.
+    pub fn reach_prefix(&self) -> &[(Subject, String)] {
+        if self.ends_in_write() {
+            &self.hops[..self.hops.len() - 1]
+        } else {
+            &self.hops
+        }
+    }
+
+    /// For a write path, the writer and the terminal mechanism (`bind` or
+    /// `escalate`) it uses.
+    pub fn write_action(&self) -> Option<(&Subject, &str)> {
+        self.ends_in_write()
+            .then(|| self.hops.last())
+            .flatten()
+            .map(|(subject, mechanism)| (subject, mechanism.as_str()))
+    }
+}
+
 pub struct Violation {
     pub principal: Subject,
     pub namespace: String,
@@ -513,7 +591,9 @@ impl RbacAccessModel {
 
         // Suppress redundant longer paths: if a chain's intermediate hops include
         // another final-hop target, the longer chain adds no new information
-        // (e.g. A→default→admin@ when A→default is already shown).
+        // (e.g. A→default→admin@ when A→default is already shown). This also tames
+        // the path explosion among mutually-reachable cluster-admins; clients add
+        // further display-only subsumption on top.
         for (_, target_subjects, hops) in &target_chains {
             let intermediates_are_endpoints = hops[..hops.len().saturating_sub(1)]
                 .iter()
