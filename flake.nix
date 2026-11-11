@@ -102,6 +102,8 @@
         ast-grep
         # Used by hack/fetch-fixtures.sh and hack/publish-fixtures.sh.
         zstd
+        # Generates tags for rules/ (see .ctags.d/mangle.ctags).
+        universal-ctags
       ]);
     });
   });
