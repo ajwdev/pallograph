@@ -26,6 +26,23 @@ fn run_session_with(args: &[&str], commands: &str) -> (String, String) {
 /// Like [`run_session_with`], with `extra_paths` loaded at startup as k8s
 /// manifests after the small fixture.
 fn run_session_loading(extra_paths: &[&Path], args: &[&str], commands: &str) -> (String, String) {
+    session_output(extra_paths, args, commands, false)
+}
+
+/// Like [`run_session_loading`], with stderr merged into stdout in the order
+/// the lines were written. Status lines (`Saved snapshot`, `Rolled back`)
+/// go to stderr, so a test that splits results on them reads this stream.
+/// The second string is always empty.
+fn run_session_merged(extra_paths: &[&Path], args: &[&str], commands: &str) -> (String, String) {
+    session_output(extra_paths, args, commands, true)
+}
+
+fn session_output(
+    extra_paths: &[&Path],
+    args: &[&str],
+    commands: &str,
+    merge_stderr: bool,
+) -> (String, String) {
     // Unique per call: tests run in parallel threads of one process.
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir =
@@ -51,23 +68,41 @@ fn run_session_loading(extra_paths: &[&Path], args: &[&str], commands: &str) -> 
     )
     .expect("write config");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pallograph"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pallograph"));
+    command
         .arg("-C")
         .arg(&config)
         .args(["--profile", "dev", "--no-rc"])
         .args(args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn pallograph");
+        .stdin(Stdio::piped());
+    // One pipe for both streams keeps their lines in write order.
+    let merged = if merge_stderr {
+        let (reader, writer) = std::io::pipe().expect("pipe");
+        command
+            .stdout(writer.try_clone().expect("clone pipe"))
+            .stderr(writer);
+        Some(reader)
+    } else {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        None
+    };
+    let mut child = command.spawn().expect("spawn pallograph");
+    // Drop the parent copy of the write end so the read below sees EOF.
+    drop(command);
     child
         .stdin
         .take()
         .expect("stdin")
         .write_all(commands.as_bytes())
         .expect("write stdin");
+    if let Some(mut reader) = merged {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut reader, &mut text).expect("read merged output");
+        child.wait().expect("wait");
+        let _ = std::fs::remove_dir_all(&dir);
+        return (text, String::new());
+    }
     let out = child.wait_with_output().expect("wait");
     let _ = std::fs::remove_dir_all(&dir);
     (
@@ -298,8 +333,11 @@ fn snapshot_refuses_name_with_space() {
 #[test]
 fn snapshots_do_not_copy_earlier_snapshots() {
     for backend in ["interpreter", "dd"] {
-        let (stdout, _) =
-            run_session_with(&["--backend", backend], "snapshot a\nsnapshot b\n::quit\n");
+        let (stdout, _) = run_session_merged(
+            &[],
+            &["--backend", backend],
+            "snapshot a\nsnapshot b\n::quit\n",
+        );
         let counts: Vec<&str> = stdout
             .lines()
             .filter_map(|l| l.strip_prefix("Saved snapshot "))
@@ -372,7 +410,7 @@ fn rollback_undoes_fact_changes() {
              ?- object_label(\"v1\", \"Pod\", \"kube-system\", \"etcd-kind-control-plane\", K, V)\n\
              ::quit\n"
         );
-        let (stdout, stderr) = run_session_with(args, &commands);
+        let (stdout, stderr) = run_session_merged(&[], args, &commands);
         let (before, after) = stdout
             .split_once("Rolled back to snapshot 'base'.")
             .unwrap_or_else(|| panic!("{args:?}: {stdout}\n{stderr}"));
@@ -418,7 +456,8 @@ fn rollback_drops_defined_rule() {
 #[test]
 fn rollback_to_older_then_newer_snapshot() {
     for args in ROLLBACK_BACKENDS {
-        let (stdout, _) = run_session_with(
+        let (stdout, _) = run_session_merged(
+            &[],
             args,
             "snapshot a\n\
              +binding_subject(\"kube-system\", \"rb-bob\", /user, \"bob@example.com\").\n\
@@ -686,7 +725,7 @@ fn why_on_snapshot_survives_retraction() {
         &["--backend", "interpreter"][..],
         &["--backend", "dd", "--provenance"][..],
     ] {
-        let (stdout, stderr) = run_session_with(args, &commands);
+        let (stdout, stderr) = run_session_merged(&[], args, &commands);
         let (live, frozen) = stdout
             .split_once("Saved snapshot 'before'")
             .unwrap_or_else(|| panic!("{args:?}: no snapshot saved: {stdout}\n{stderr}"));
@@ -861,10 +900,10 @@ fn rollback_restores_startup_object_after_load_k8s() {
         changed.display()
     );
     for args in ROLLBACK_BACKENDS {
-        let (stdout, stderr) = run_session_loading(&[&startup], args, &commands);
+        let (stdout, stderr) = run_session_merged(&[&startup], args, &commands);
         assert!(
-            stderr.contains("Loaded 1 object(s) (1 replaced) and evaluated."),
-            "{args:?}: {stderr}"
+            stdout.contains("Loaded 1 object(s) (1 replaced) and evaluated."),
+            "{args:?}: {stdout}"
         );
         let (before, after) = stdout
             .split_once("Rolled back to snapshot 'base'.")

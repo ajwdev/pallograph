@@ -101,7 +101,9 @@ Built-in Kubernetes and EKS principals are hidden from SMT output by default
 (`--all` shows them). The list lives in `src/builtins.txt`.
 
 **Script it.** `--format ndjson` emits one JSON object per row, which pipes
-nicely into `jq` or DuckDB. `--script <file>` (`-` for stdin) runs one
+nicely into `jq` or DuckDB. Results go to stdout; status lines (`Saved
+snapshot`, `Rolled back`, counts) and errors go to stderr, so a pipeline
+needs no `2>&1` or filtering. `--script <file>` (`-` for stdin) runs one
 command per line without the REPL and stops at the first line that is not a
 command or whose command fails, so a typo'd path or command can't pass
 silently. It exits 0 when clean, 1 on findings (a failed `rbac::`/`sched::`
