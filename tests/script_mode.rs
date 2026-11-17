@@ -793,12 +793,16 @@ fn mixed_diff_script(ws: &Workspace, preamble: &str, diff_args: &str) -> String 
     )
 }
 
-/// The JSON rows on stdout, skipping status lines like `Saved snapshot`.
+/// The `rbac::diff` rows on stdout, skipping status lines like `Saved
+/// snapshot` and rows from other commands (`k8s::apply-delta`).
 fn diff_json_rows(out: &Output) -> Vec<serde_json::Value> {
     stdout(out)
         .lines()
         .filter(|l| l.starts_with('{'))
-        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}")))
+        .map(|l| -> serde_json::Value {
+            serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}"))
+        })
+        .filter(|row| row["check"] == "diff")
         .collect()
 }
 
