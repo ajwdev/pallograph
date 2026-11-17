@@ -439,6 +439,9 @@ fn print_help() {
     println!(
         "  rbac::diff <name> [name2]              - diff RBAC permissions, direct and through escalation, vs a snapshot (or between two snapshots)"
     );
+    println!(
+        "                                           diff flags: --hide-escalation-lost (see `help rbac::diff`)"
+    );
     println!();
     println!("Scheduling  (sched::)");
     println!(
@@ -569,12 +572,20 @@ SYMBOLS
 "#;
 
 /// The output-format reference for `rbac::diff`, shown by `help rbac::diff`.
-const DIFF_MANPAGE: &str = r#"rbac::diff <before> [<after>]
+const DIFF_MANPAGE: &str = r#"rbac::diff <before> [<after>] [--hide-escalation-lost]
 
 Compare RBAC access between two states and report what changed, per principal,
 both directly and through escalation. With one name, <before> is a snapshot
 and <after> is the live state; with two names, both are snapshots. Under
 `use <state>`, `rbac::diff <before>` compares <before> against <state>.
+
+FLAGS
+  --hide-escalation-lost  leave the lost (-) rows out of `» via escalation`,
+                          and any section or principal left with no rows.
+                          These are mostly built-in controllers losing a
+                          route, noise in a review. The verdict and
+                          Per-principal lines still count them. Text output
+                          only; ndjson always emits every row.
 
 OUTPUT
   A FAIL/PASS verdict with the change counts and the (before → after) states -
@@ -609,6 +620,21 @@ SYMBOLS
 
   Colour (interactive terminal only; dropped when piped or NO_COLOR is set) is
   additive: principals by kind, additions green, removals red, verdict bold.
+
+NDJSON
+  Under `format ndjson` (or `--format ndjson`) the text is replaced by one
+  verdict row, then one row per change in the text's order. Every row has
+  "check":"diff" and the "before"/"after" state names.
+
+  The verdict row carries "result" ("fail" when anything was gained, else
+  "pass"), the "gained"/"lost" totals, and "principals": the Per-principal
+  lines as {principal, principal_kind, result, gained, lost}.
+
+  A change row has no "result"; it carries principal, principal_kind,
+  "section" ("direct" or "escalation"), "change" ("gained" or "lost"),
+  namespace, apigroup, resource, verb, and "via": the identities an
+  escalation row passes through, as {identity, identity_kind} (empty for
+  direct rows).
 "#;
 
 /// Print the subcommands of a subsystem container-command (`rbac`, `sched`,
@@ -1388,11 +1414,17 @@ fn session(
                 }
 
                 if line == "::rbac::diff" {
-                    command_error!("Usage: rbac::diff <snap>  or  rbac::diff <snap1> <snap2>");
+                    command_error!("Usage: rbac::diff <snap> [snap2] [--hide-escalation-lost]");
                     continue;
                 }
                 if let Some(rest) = line.strip_prefix("::rbac::diff ") {
-                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    let tokens: Vec<&str> = rest.split_whitespace().collect();
+                    let hide_escalation_lost = tokens.contains(&"--hide-escalation-lost");
+                    let parts: Vec<&str> = tokens
+                        .iter()
+                        .filter(|t| **t != "--hide-escalation-lost")
+                        .copied()
+                        .collect();
                     // One snapshot diffs against whatever is in use, and the
                     // header names it instead of "current".
                     let (before, after, before_label, after_label) = match parts.as_slice() {
@@ -1410,14 +1442,24 @@ fn session(
                         ),
                         _ => {
                             command_error!(
-                                "Usage: rbac::diff <snap>  or  rbac::diff <snap1> <snap2>"
+                                "Usage: rbac::diff <snap> [snap2] [--hide-escalation-lost]"
                             );
                             continue;
                         }
                     };
                     match core.rbac_diff(&before, &after) {
                         Ok(diff) => {
-                            if !print_access_diff(&diff, before_label, after_label) {
+                            let clean = if format == OutputFormat::Ndjson {
+                                print_access_diff_ndjson(&diff, before_label, after_label)
+                            } else {
+                                print_access_diff(
+                                    &diff,
+                                    before_label,
+                                    after_label,
+                                    hide_escalation_lost,
+                                )
+                            };
+                            if !clean {
                                 had_failure = true;
                             }
                         }
@@ -2413,35 +2455,100 @@ fn print_findings(
     }
 }
 
-/// A row in the diff detail: the permission's sort fields (the diff drops
-/// resourceName, so it is not among them), whether it was added, and the
-/// rendered text.
-struct DiffRow {
-    apigroup: String,
-    resource: String,
-    verb: String,
-    namespace: String,
+/// A row in the diff detail: the permission (the diff drops resourceName, so
+/// it is not among the fields), whether it was added, and for an escalation
+/// row the identities the principal reaches it through.
+struct DiffRow<'a> {
+    apigroup: &'a str,
+    resource: &'a str,
+    verb: &'a str,
+    namespace: &'a str,
     added: bool,
-    text: String,
+    via: Vec<&'a rbac::Subject>,
+}
+
+impl<'a> DiffRow<'a> {
+    fn direct(added: bool, d: &'a rbac::diff::CanDiff) -> Self {
+        DiffRow {
+            apigroup: &d.apigroup,
+            resource: &d.resource,
+            verb: &d.verb,
+            namespace: &d.namespace,
+            added,
+            via: Vec::new(),
+        }
+    }
+
+    fn escalation(added: bool, c: &'a rbac::diff::EffectiveChange) -> Self {
+        DiffRow {
+            apigroup: &c.diff.apigroup,
+            resource: &c.diff.resource,
+            verb: &c.diff.verb,
+            namespace: &c.diff.namespace,
+            added,
+            via: c.via.iter().collect(),
+        }
+    }
 }
 
 /// Order diff rows by apiGroup, then resource, verb, and namespace, so a
 /// permission's `+` and `-` sit together regardless of which side changed.
 fn diff_row_order(a: &DiffRow, b: &DiffRow) -> std::cmp::Ordering {
-    (&a.apigroup, &a.resource, &a.verb, &a.namespace).cmp(&(
-        &b.apigroup,
-        &b.resource,
-        &b.verb,
-        &b.namespace,
+    (a.apigroup, a.resource, a.verb, a.namespace).cmp(&(
+        b.apigroup,
+        b.resource,
+        b.verb,
+        b.namespace,
     ))
+}
+
+/// One principal's changes in `diff`: the `direct` rows and the rows it
+/// reaches only through escalation (non-empty `via`; those reached directly
+/// are already among the direct rows). Each list is sorted by permission.
+fn principal_diff_rows<'a>(
+    diff: &'a AccessDiff,
+    principal: &rbac::Subject,
+) -> (Vec<DiffRow<'a>>, Vec<DiffRow<'a>>) {
+    let mut direct: Vec<DiffRow> = Vec::new();
+    for d in &diff.can_gained {
+        if &d.principal == principal {
+            direct.push(DiffRow::direct(true, d));
+        }
+    }
+    for d in &diff.can_lost {
+        if &d.principal == principal {
+            direct.push(DiffRow::direct(false, d));
+        }
+    }
+    let mut via: Vec<DiffRow> = Vec::new();
+    for c in &diff.effective_gained {
+        if c.diff.principal == *principal && !c.via.is_empty() {
+            via.push(DiffRow::escalation(true, c));
+        }
+    }
+    for c in &diff.effective_lost {
+        if c.diff.principal == *principal && !c.via.is_empty() {
+            via.push(DiffRow::escalation(false, c));
+        }
+    }
+    direct.sort_by(diff_row_order);
+    via.sort_by(diff_row_order);
+    (direct, via)
 }
 
 /// Print what RBAC permissions changed from `before` to `after`, grouped by
 /// principal. A leading verdict and a `Per-principal:` summary give the
 /// at-a-glance view; each principal then gets `» direct` and `» via escalation`
-/// sections with added (`+`) and removed (`-`) permissions inline. Returns
-/// `false` when any permission was gained (the `FAIL` verdict).
-fn print_access_diff(diff: &AccessDiff, before_label: &str, after_label: &str) -> bool {
+/// sections with added (`+`) and removed (`-`) permissions inline.
+/// `hide_escalation_lost` drops the `-` rows from `» via escalation`, and any
+/// section or principal block left empty; the verdict lines still count them.
+/// Returns `false` when any permission was gained (the `FAIL` verdict).
+fn print_access_diff(
+    diff: &AccessDiff,
+    before_label: &str,
+    after_label: &str,
+    hide_escalation_lost: bool,
+) -> bool {
     let total_gained = diff.total_gained();
     let total_lost = diff.total_lost();
     let scope = paint_dim(&format!("({before_label} → {after_label})"));
@@ -2493,86 +2600,40 @@ fn print_access_diff(diff: &AccessDiff, before_label: &str, after_label: &str) -
         }
     }
 
-    let tuple = |ns: &str, ag: &str, res: &str, verb: &str| {
-        format!("(namespace {ns:?}, apiGroup {ag:?}, resource {res:?}, verb {verb:?})")
-    };
-    let direct_row = |added: bool, d: &rbac::diff::CanDiff| DiffRow {
-        apigroup: d.apigroup.clone(),
-        resource: d.resource.clone(),
-        verb: d.verb.clone(),
-        namespace: d.namespace.clone(),
-        added,
-        text: tuple(&d.namespace, &d.apigroup, &d.resource, &d.verb),
-    };
-    let via_row = |added: bool, c: &rbac::diff::EffectiveChange| {
-        let targets = c
-            .via
-            .iter()
-            .map(paint_identity)
-            .collect::<Vec<_>>()
-            .join(", ");
-        DiffRow {
-            apigroup: c.diff.apigroup.clone(),
-            resource: c.diff.resource.clone(),
-            verb: c.diff.verb.clone(),
-            namespace: c.diff.namespace.clone(),
-            added,
-            text: format!(
-                "{}   via {targets}",
-                tuple(
-                    &c.diff.namespace,
-                    &c.diff.apigroup,
-                    &c.diff.resource,
-                    &c.diff.verb
-                )
-            ),
-        }
-    };
     let emit = |rows: &[DiffRow]| {
         for row in rows {
+            let mut text = format!(
+                "(namespace {:?}, apiGroup {:?}, resource {:?}, verb {:?})",
+                row.namespace, row.apigroup, row.resource, row.verb
+            );
+            if !row.via.is_empty() {
+                let targets = row
+                    .via
+                    .iter()
+                    .map(|s| paint_identity(s))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                text.push_str(&format!("   via {targets}"));
+            }
             let line = if row.added {
-                paint_add(&format!("+ {}", row.text))
+                paint_add(&format!("+ {text}"))
             } else {
-                paint_del(&format!("- {}", row.text))
+                paint_del(&format!("- {text}"))
             };
             println!("        {line}");
         }
     };
 
-    // Detail grouped by principal, in the summary's order. Within a principal,
-    // rows sort by the permission (apiGroup, resource, verb, namespace), so a
-    // permission's `+` and `-` sit together.
+    // Detail grouped by principal, in the summary's order.
     for v in &diff.verdicts {
         let p = &v.principal;
-        let mut direct: Vec<DiffRow> = Vec::new();
-        for d in &diff.can_gained {
-            if &d.principal == p {
-                direct.push(direct_row(true, d));
-            }
-        }
-        for d in &diff.can_lost {
-            if &d.principal == p {
-                direct.push(direct_row(false, d));
-            }
-        }
-        // Effective changes reached only through escalation (non-empty `via`);
-        // those reached directly are already shown under `direct`.
-        let mut via: Vec<DiffRow> = Vec::new();
-        for c in &diff.effective_gained {
-            if c.diff.principal == *p && !c.via.is_empty() {
-                via.push(via_row(true, c));
-            }
-        }
-        for c in &diff.effective_lost {
-            if c.diff.principal == *p && !c.via.is_empty() {
-                via.push(via_row(false, c));
-            }
+        let (direct, mut via) = principal_diff_rows(diff, p);
+        if hide_escalation_lost {
+            via.retain(|row| row.added);
         }
         if direct.is_empty() && via.is_empty() {
             continue;
         }
-        direct.sort_by(diff_row_order);
-        via.sort_by(diff_row_order);
         println!();
         println!("  {}", paint_principal(p));
         if !direct.is_empty() {
@@ -2589,6 +2650,7 @@ fn print_access_diff(diff: &AccessDiff, before_label: &str, after_label: &str) -
     }
     total_gained == 0
 }
+
 /// The ndjson row `k8s::apply-delta` prints: the counts from the text
 /// sentence, plus every base-render object the live state did not hold.
 fn delta_json(delta: &DeltaSummary) -> serde_json::Value {
@@ -2611,6 +2673,72 @@ fn delta_json(delta: &DeltaSummary) -> serde_json::Value {
             }))
             .collect::<Vec<_>>(),
     })
+}
+
+/// The ndjson form of [`print_access_diff`]: one verdict row, then one row
+/// per change in the same order as the text. Every change row is emitted;
+/// `--hide-escalation-lost` only trims the text. Returns `false` when any
+/// permission was gained.
+fn print_access_diff_ndjson(diff: &AccessDiff, before_label: &str, after_label: &str) -> bool {
+    let total_gained = diff.total_gained();
+    let principals: Vec<serde_json::Value> = diff
+        .verdicts
+        .iter()
+        .map(|v| {
+            serde_json::json!({
+                "principal": v.principal.name,
+                "principal_kind": v.principal.kind.as_str(),
+                "result": if v.gained > 0 { "fail" } else { "pass" },
+                "gained": v.gained,
+                "lost": v.lost,
+            })
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::json!({
+            "check": "diff",
+            "before": before_label,
+            "after": after_label,
+            "result": if total_gained > 0 { "fail" } else { "pass" },
+            "gained": total_gained,
+            "lost": diff.total_lost(),
+            "principals": principals,
+        })
+    );
+    for v in &diff.verdicts {
+        let p = &v.principal;
+        let (direct, via) = principal_diff_rows(diff, p);
+        let sections = direct
+            .iter()
+            .map(|row| ("direct", row))
+            .chain(via.iter().map(|row| ("escalation", row)));
+        for (section, row) in sections {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "check": "diff",
+                    "before": before_label,
+                    "after": after_label,
+                    "principal": p.name,
+                    "principal_kind": p.kind.as_str(),
+                    "section": section,
+                    "change": if row.added { "gained" } else { "lost" },
+                    "namespace": row.namespace,
+                    "apigroup": row.apigroup,
+                    "resource": row.resource,
+                    "verb": row.verb,
+                    "via": row.via.iter()
+                        .map(|s| serde_json::json!({
+                            "identity": s.name,
+                            "identity_kind": s.kind.as_str(),
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            );
+        }
+    }
+    total_gained == 0
 }
 
 /// JSON form of a violation's explaining binding paths (ndjson output).

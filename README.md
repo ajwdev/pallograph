@@ -120,6 +120,13 @@ EOF
 pallograph --profile prod --script check.pg
 ```
 
+Under `--format ndjson`, `rbac::diff` emits a verdict row (`"result"`,
+totals, and per-principal counts) and one row per gained or lost
+permission, so CI can read the result without scraping the text; `help
+rbac::diff` documents the fields. For a PR comment,
+`rbac::diff base --hide-escalation-lost` leaves out permissions lost only
+through escalation, which are mostly built-in controllers.
+
 ## Worked examples
 
 Each directory under [`examples/`](examples/) tells the story of a plausible

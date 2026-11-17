@@ -718,3 +718,278 @@ fn text_answers_stay_on_stdout() {
     assert!(stdout(&out).contains("k8s/5"), "{}", stdout(&out));
     assert!(!stdout(&out).contains("Saved snapshot"), "{}", stdout(&out));
 }
+
+/// mid's `pods/exec` in kube-system, which reaches cluster-admin through the
+/// control-plane pods' ServiceAccount, and alice's right to impersonate mid,
+/// which reaches the same only through mid. Dropping mid's grant leaves alice
+/// with nothing changed but an escalation loss.
+const MID_EXEC_GRANT: &str = r#"apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mid-debug
+  namespace: kube-system
+rules:
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mid-debug
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mid-debug
+subjects:
+- kind: User
+  apiGroup: rbac.authorization.k8s.io
+  name: mid@example.com
+"#;
+
+const ALICE_IMPERSONATES_MID: &str = r#"apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: alice-impersonate
+rules:
+- apiGroups: [""]
+  resources: ["users"]
+  verbs: ["impersonate"]
+  resourceNames: ["mid@example.com"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alice-impersonate
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: alice-impersonate
+subjects:
+- kind: User
+  apiGroup: rbac.authorization.k8s.io
+  name: alice@example.com
+"#;
+
+/// A script whose `rbac::diff base head` (with `diff_args` appended) sees
+/// mallory gain `pods/exec` directly and cluster-admin by escalation, mid
+/// lose both, and alice lose cluster-admin by escalation only.
+fn mixed_diff_script(ws: &Workspace, preamble: &str, diff_args: &str) -> String {
+    let base = ws.manifests(
+        "base",
+        &format!("{MID_EXEC_GRANT}---\n{ALICE_IMPERSONATES_MID}"),
+    );
+    let head = ws.manifests(
+        "head",
+        &format!("{EXEC_GRANT}---\n{ALICE_IMPERSONATES_MID}"),
+    );
+    format!(
+        "{preamble}k8s::apply-delta - {base}\n\
+         ::snapshot base\n\
+         k8s::apply-delta {base} {head}\n\
+         ::snapshot head\n\
+         rbac::diff base head{diff_args}\n"
+    )
+}
+
+/// The JSON rows on stdout, skipping status lines like `Saved snapshot`.
+fn diff_json_rows(out: &Output) -> Vec<serde_json::Value> {
+    stdout(out)
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}")))
+        .collect()
+}
+
+/// The change rows as (principal, section, change, namespace, resource),
+/// sorted.
+fn diff_change_keys(rows: &[serde_json::Value]) -> Vec<(String, String, String, String, String)> {
+    let mut keys: Vec<_> = rows
+        .iter()
+        .filter(|r| r.get("change").is_some())
+        .map(|r| {
+            let field = |k: &str| r[k].as_str().unwrap_or_default().to_string();
+            (
+                field("principal"),
+                field("section"),
+                field("change"),
+                field("namespace"),
+                field("resource"),
+            )
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+#[test]
+fn access_diff_ndjson_emits_verdict_and_change_rows() {
+    let ws = Workspace::new();
+    let out = ws.run_script(&mixed_diff_script(&ws, "format ndjson\n", ""));
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    let rows = diff_json_rows(&out);
+    assert!(rows.iter().all(|r| r["check"] == "diff"), "{rows:?}");
+    assert!(
+        rows.iter()
+            .all(|r| r["before"] == "base" && r["after"] == "head"),
+        "{rows:?}"
+    );
+
+    let verdict = &rows[0];
+    assert_eq!(verdict["result"], "fail", "{verdict}");
+    assert_eq!(verdict["gained"], 2, "{verdict}");
+    assert_eq!(verdict["lost"], 3, "{verdict}");
+    let principals = verdict["principals"].as_array().expect("principals");
+    let mallory = principals
+        .iter()
+        .find(|p| p["principal"] == "mallory@example.com")
+        .expect("mallory verdict");
+    assert_eq!(mallory["principal_kind"], "user");
+    assert_eq!(mallory["result"], "fail");
+    assert_eq!(
+        (mallory["gained"].as_u64(), mallory["lost"].as_u64()),
+        (Some(2), Some(0))
+    );
+    let alice = principals
+        .iter()
+        .find(|p| p["principal"] == "alice@example.com")
+        .expect("alice verdict");
+    assert_eq!(alice["result"], "pass");
+    assert_eq!(
+        (alice["gained"].as_u64(), alice["lost"].as_u64()),
+        (Some(0), Some(1))
+    );
+    assert_eq!(
+        rows.iter().filter(|r| r.get("result").is_some()).count(),
+        1,
+        "one verdict row: {rows:?}"
+    );
+
+    let key = |p: &str, s: &str, c: &str, ns: &str, r: &str| {
+        (p.into(), s.into(), c.into(), ns.into(), r.into())
+    };
+    assert_eq!(
+        diff_change_keys(&rows),
+        vec![
+            key("alice@example.com", "escalation", "lost", "", "*"),
+            key(
+                "mallory@example.com",
+                "direct",
+                "gained",
+                "kube-system",
+                "pods/exec"
+            ),
+            key("mallory@example.com", "escalation", "gained", "", "*"),
+            key(
+                "mid@example.com",
+                "direct",
+                "lost",
+                "kube-system",
+                "pods/exec"
+            ),
+            key("mid@example.com", "escalation", "lost", "", "*"),
+        ]
+    );
+
+    // Escalation rows name the identities they pass through; direct rows
+    // have none.
+    let row = |p: &str, s: &str| {
+        rows.iter()
+            .find(|r| r["principal"] == p && r["section"] == s)
+            .unwrap_or_else(|| panic!("no {p} {s} row: {rows:?}"))
+    };
+    let escalation = row("mallory@example.com", "escalation");
+    assert_eq!(escalation["principal_kind"], "user");
+    assert_eq!(
+        (&escalation["apigroup"], &escalation["verb"]),
+        (&serde_json::json!("*"), &serde_json::json!("*"))
+    );
+    let via = escalation["via"].as_array().expect("via");
+    assert!(
+        via.iter().any(
+            |v| v["identity"] == "system:serviceaccount:kube-system:default"
+                && v["identity_kind"] == "serviceaccount"
+        ),
+        "{escalation}"
+    );
+    let direct = row("mallory@example.com", "direct");
+    assert_eq!(direct["verb"], "create");
+    assert_eq!(direct["via"], serde_json::json!([]));
+}
+
+#[test]
+fn access_diff_ndjson_no_changes_passes() {
+    let ws = Workspace::new();
+    let out = ws.run_script("format ndjson\nsnapshot base\nrbac::diff base\n");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(!stdout(&out).contains("PASS"), "{}", stdout(&out));
+    let rows = diff_json_rows(&out);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0],
+        serde_json::json!({
+            "check": "diff",
+            "before": "base",
+            "after": "current",
+            "result": "pass",
+            "gained": 0,
+            "lost": 0,
+            "principals": [],
+        })
+    );
+}
+
+#[test]
+fn access_diff_hide_escalation_lost_trims_text_only() {
+    let ws = Workspace::new();
+    let out = ws.run_script(&mixed_diff_script(&ws, "", " --hide-escalation-lost"));
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    let stdout = stdout(&out);
+    // The verdicts still count every change.
+    assert!(
+        stdout.contains("FAIL  2 new permission(s) granted, 3 removed"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("PASS  alice@example.com (user)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("PASS  mid@example.com (user)"), "{stdout}");
+    // Gains via escalation and direct losses stay.
+    assert!(
+        stdout.contains("+ (namespace \"\", apiGroup \"*\", resource \"*\", verb \"*\")   via "),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("- (namespace \"kube-system\", apiGroup \"\", resource \"pods/exec\""),
+        "{stdout}"
+    );
+    // Escalation losses go, and with them alice's whole block and mid's
+    // escalation header.
+    assert!(
+        !stdout.contains("- (namespace \"\", apiGroup \"*\""),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("\n  alice@example.com"), "{stdout}");
+    assert!(stdout.contains("\n  mid@example.com (user)\n"), "{stdout}");
+    assert_eq!(stdout.matches("» via escalation").count(), 1, "{stdout}");
+
+    // Without the flag, the same diff shows them.
+    let full = ws.run_script(&mixed_diff_script(&ws, "", ""));
+    let full = String::from_utf8_lossy(&full.stdout);
+    assert!(full.contains("\n  alice@example.com (user)\n"), "{full}");
+    assert_eq!(full.matches("» via escalation").count(), 3, "{full}");
+
+    // ndjson ignores the flag and keeps every row.
+    let flagged = ws.run_script(&mixed_diff_script(
+        &ws,
+        "format ndjson\n",
+        " --hide-escalation-lost",
+    ));
+    let plain = ws.run_script(&mixed_diff_script(&ws, "format ndjson\n", ""));
+    assert_eq!(
+        diff_change_keys(&diff_json_rows(&flagged)),
+        diff_change_keys(&diff_json_rows(&plain))
+    );
+}
