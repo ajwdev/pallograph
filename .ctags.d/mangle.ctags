@@ -1,0 +1,8 @@
+# Mangle tags for editor jump-to-definition; `ctags -R rules/` picks this
+# up. Rule heads and Decls start at column 0, so a regex is enough.
+--langdef=Mangle
+--map-Mangle=+.mg
+--kinddef-Mangle=d,decl,declarations
+--kinddef-Mangle=r,rule,rules and facts
+--regex-Mangle=/^Decl[[:space:]]+([a-z_][A-Za-z0-9_]*)\(/\1/d/
+--regex-Mangle=/^([a-z_][A-Za-z0-9_]*)\(/\1/r/
