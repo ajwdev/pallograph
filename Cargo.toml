@@ -45,6 +45,7 @@ differential-dataflow = "0.23.0"
 timely = "0.29.0"
 crossbeam-channel = "0.5"
 z3 = "0.12"
+libc = "0.2"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
