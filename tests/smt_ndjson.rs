@@ -139,7 +139,7 @@ fn check_rows_name_the_state_they_ran_against() {
         .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}")))
         .collect();
     let at_base = rows.iter().filter(|r| r["at"] == "base").count();
-    let at_live = rows.iter().filter(|r| r["at"] == "live").count();
+    let at_live = rows.iter().filter(|r| r["at"] == "").count();
     assert!(at_base > 0, "no rows at base: {rows:?}");
     assert_eq!(at_base, at_live, "base and live differ: {rows:?}");
     assert_eq!(at_base + at_live, rows.len(), "row without at: {rows:?}");

@@ -564,7 +564,8 @@ SYMBOLS
   Machine-readable output (`--format ndjson`) emits one object per concrete
   path with the full detail; display-only subsumption does not apply there.
   Each object's `at` names the state it was checked against: the snapshot
-  under `use <snapshot>`, or `live`.
+  under `use <snapshot>`, or `""` for the live state (snapshot names
+  cannot be empty, so the two never collide).
 "#;
 
 /// The output-format reference for `rbac::diff`, shown by `help rbac::diff`.
@@ -2617,11 +2618,12 @@ fn paths_json(paths: &[rbac::AccessPath]) -> Vec<serde_json::Value> {
 
 /// Print one ndjson row of an `rbac::`/`sched::` check, tagged with the
 /// state it was evaluated against: `"at"` is the snapshot name under `use`,
-/// or `"live"`. Rows lead with `result` and `check`, so `at` goes third.
+/// or `""` for the live state; snapshot names are never empty, so the two
+/// cannot collide. Rows lead with `result` and `check`, so `at` goes third.
 fn print_check_row(at: &At, mut row: serde_json::Value) {
     if let Some(fields) = row.as_object_mut() {
         let at = match at {
-            At::Live => "live",
+            At::Live => "",
             At::Snapshot(name) => name.as_str(),
         };
         fields.shift_insert(2.min(fields.len()), "at".to_string(), at.into());
