@@ -460,7 +460,7 @@ fn print_help() {
     println!("Session");
     println!("  pretty                                 - toggle default/pretty tuple display");
     println!(
-        "  format default|compact|pretty|table|ndjson - set output format (compact = bare tuples, table = aligned columns, ndjson = one JSON object per row)"
+        "  format default|compact|pretty|table|ndjson - set output format (compact = bare tuples, table = aligned columns, ndjson = one JSON object per row; results go to stdout, status lines to stderr)"
     );
     println!(
         "  alias [<name> [<command...>]]          - list, show, or define a command alias (expanded on a bare command's first token)"
@@ -1106,7 +1106,7 @@ fn session(
                         continue;
                     }
                     match core.snapshot(name.trim()) {
-                        Ok(info) => println!(
+                        Ok(info) => eprintln!(
                             "Saved snapshot '{}' ({} relations, {} facts).",
                             info.name, info.relations, info.facts
                         ),
@@ -1200,9 +1200,9 @@ fn session(
                         .and_then(|old| parse_fact(new_atom).map(|new| (old, new)));
                     match parsed {
                         Ok((old, new)) => match core.replace_fact(&old, new) {
-                            Ok(true) => println!("Replaced."),
+                            Ok(true) => eprintln!("Replaced."),
                             Ok(false) => {
-                                println!("Warning: old fact not found; new fact inserted.")
+                                eprintln!("Warning: old fact not found; new fact inserted.")
                             }
                             Err(e) => command_error!("{e}"),
                         },
@@ -1481,7 +1481,7 @@ fn session(
                         continue;
                     }
                     match core.rollback(name) {
-                        Ok(()) => println!("Rolled back to snapshot '{name}'."),
+                        Ok(()) => eprintln!("Rolled back to snapshot '{name}'."),
                         Err(e) => command_error!("{e}"),
                     }
                     continue;

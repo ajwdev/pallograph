@@ -227,9 +227,9 @@ fn unknown_line_exits_2_and_stops() {
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("Unknown command"), "{}", stderr(&out));
     assert!(
-        !stdout(&out).contains("Saved snapshot"),
+        !stderr(&out).contains("Saved snapshot"),
         "ran past the failed line: {}",
-        stdout(&out)
+        stderr(&out)
     );
 }
 
@@ -244,9 +244,9 @@ fn rollback_to_unknown_snapshot_exits_2() {
         stderr(&out)
     );
     assert!(
-        !stdout(&out).contains("Saved snapshot"),
+        !stderr(&out).contains("Saved snapshot"),
         "ran past the failed line: {}",
-        stdout(&out)
+        stderr(&out)
     );
 }
 
@@ -338,7 +338,7 @@ fn piped_repl_stays_forgiving() {
     let ws = Workspace::new();
     let out = ws.run(&[], "bogus line\n::snapshot base\n");
     assert_eq!(out.status.code(), Some(0));
-    assert!(stdout(&out).contains("Saved snapshot 'base'"));
+    assert!(stderr(&out).contains("Saved snapshot 'base'"));
 }
 
 #[test]
@@ -675,4 +675,46 @@ fn rcfile_error_warns_but_session_continues() {
         "{}",
         stderr(&out)
     );
+}
+
+#[test]
+fn ndjson_stdout_is_only_json() {
+    // Results go to stdout and status lines (snapshot, load, rollback) to
+    // stderr, so `--script ... | jq` reads rows without `2>&1` or filtering.
+    let ws = Workspace::new();
+    let out = ws.run_script(&format!(
+        "format ndjson\n\
+         snapshot base\n\
+         k8s::load {}\n\
+         ?- pod\n\
+         rbac::cluster-admin\n\
+         rollback base\n",
+        ws.rendered()
+    ));
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    let stdout = stdout(&out);
+    let rows: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}")))
+        .collect();
+    assert!(
+        rows.iter().any(|r| r["check"] == "cluster-admin"),
+        "no check row: {stdout}"
+    );
+    let stderr = stderr(&out);
+    assert!(stderr.contains("Saved snapshot 'base'"), "{stderr}");
+    assert!(
+        stderr.contains("Rolled back to snapshot 'base'."),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn text_answers_stay_on_stdout() {
+    // A command's answer is output whatever the format; only status moves.
+    let ws = Workspace::new();
+    let out = ws.run_script("snapshot base\nshow k8s\n");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(stdout(&out).contains("k8s/5"), "{}", stdout(&out));
+    assert!(!stdout(&out).contains("Saved snapshot"), "{}", stdout(&out));
 }
