@@ -80,6 +80,18 @@ object_exists(ApiVersion, Kind, Namespace, Name) :-
 object_has_label_key(ApiVersion, Kind, Namespace, Name, LabelKey) :-
     object_label(ApiVersion, Kind, Namespace, Name, LabelKey, _).
 
+# object_label with Name first, for lookups that already know the object.
+#
+# TODO: this only exists because of how Mangle joins. The planner looks a
+# relation up on its first bound column and checks the rest afterwards, and the
+# DD backend turns that into a join keyed on that one column. Keyed on
+# object_label's ApiVersion, every candidate pairs with every label on a "v1"
+# object before the filter: on the medium fixture one k8s::match built about 3M
+# rows and peak memory went from 0.4GB to 2.6GB. Remove it once DD joins are
+# keyed on every bound column.
+object_label_by_name(Name, ApiVersion, Kind, Namespace, LabelKey, LabelValue) :-
+    object_label(ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue).
+
 # Identifies objects that declare at least one selector requirement of any type.
 # Without this guard, sel_obj_candidate would be the full O(n²) cross-product of
 # every object with every other object, even for objects that have no selector.
@@ -169,13 +181,14 @@ expr_in_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
 
 # The NotIn requirement is violated if the object has LabelKey=ExcludedValue for
 # any value in the excluded set. No negation needed — finding any excluded value
-# is a direct positive check.
+# is a direct positive check. The label is looked up by object name; see
+# object_label_by_name.
 expr_notin_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
                        ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
     sel_obj_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
                       ObjApiVersion, ObjKind, ObjNamespace, ObjName),
     selector_expr_notin(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey, ExcludedValue),
-    object_label(ObjApiVersion, ObjKind, ObjNamespace, ObjName, LabelKey, ExcludedValue).
+    object_label_by_name(ObjName, ObjApiVersion, ObjKind, ObjNamespace, LabelKey, ExcludedValue).
 
 # ---- matchExpressions: Exists ----
 
