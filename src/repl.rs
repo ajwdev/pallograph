@@ -14,8 +14,8 @@ use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
 use crate::api::{
-    At, Core, Derivation, Fact, KubeObject, LocalCore, ProvenanceTree, ReachesQuery, RelationInfo,
-    Rows,
+    At, Core, DeltaSummary, Derivation, Fact, KubeObject, LocalCore, ProvenanceTree, ReachesQuery,
+    RelationInfo, Rows,
 };
 use crate::edb::{FactSource, K8sManifestsSource, ShellSource};
 use crate::engine::{ApplySummary, EvalStore, RelationDoc};
@@ -385,7 +385,7 @@ fn print_help() {
         "  load <rel> <src>                       - load flat JSON tuples into <rel>; src is a file or ! <cmd>"
     );
     println!(
-        "  apply-delta <base> <head>              - apply a PR's base->head delta onto live: add head-only objects, update changed ones, retract base-only ones (what Argo prunes), leave identical ones (keeping live drift); each side is a dir, .json file, or - for empty"
+        "  apply-delta <base> <head>              - apply a PR's base->head delta onto live: add head-only objects, update changed ones, retract base-only ones (what Argo prunes), leave identical ones (keeping live drift); each side is a dir, .json file, or - for empty; under ndjson it also prints a summary row listing base objects absent from live (not_live)"
     );
     println!();
     println!("Kubernetes  (k8s::)");
@@ -1303,14 +1303,19 @@ fn session(
                         .and_then(|base| Ok((base, load_delta_side(head_arg)?)));
                     match sides {
                         Ok((base, head)) => match core.apply_delta(base, head) {
-                            Ok(delta) => eprintln!(
-                                "Applied delta: +{} ~{} -{} ({} unchanged, {} removed but not live) and evaluated.",
-                                delta.added,
-                                delta.updated,
-                                delta.removed,
-                                delta.unchanged,
-                                delta.removed_absent
-                            ),
+                            Ok(delta) => {
+                                eprintln!(
+                                    "Applied delta: +{} ~{} -{} ({} unchanged, {} removed but not live) and evaluated.",
+                                    delta.added,
+                                    delta.updated,
+                                    delta.removed,
+                                    delta.unchanged,
+                                    delta.removed_absent
+                                );
+                                if format == OutputFormat::Ndjson {
+                                    println!("{}", delta_json(&delta));
+                                }
+                            }
                             Err(e) => command_error!("{e}"),
                         },
                         Err(e) => command_error!("Delta error: {e:#}"),
@@ -2581,6 +2586,31 @@ fn print_access_diff(diff: &AccessDiff, before_label: &str, after_label: &str) -
     }
     total_gained == 0
 }
+/// The ndjson row `k8s::apply-delta` prints: the counts from the text
+/// sentence, plus every base-render object the live state did not hold.
+fn delta_json(delta: &DeltaSummary) -> serde_json::Value {
+    serde_json::json!({
+        "check": "apply-delta",
+        "added": delta.added,
+        "updated": delta.updated,
+        "removed": delta.removed,
+        "unchanged": delta.unchanged,
+        "removed_not_live": delta.removed_absent,
+        "not_live": delta.not_live.iter()
+            .map(|object| serde_json::json!({
+                "group": object.key.group,
+                "kind": object.key.kind,
+                "namespace": object.key.namespace,
+                "name": object.key.name,
+                // "updated" (the delta creates it), "unchanged" (it stays
+                // absent) or "removed" (nothing to remove).
+                "change": object.change.as_str(),
+                "helm_hook": object.helm_hook,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// JSON form of a violation's explaining binding paths (ndjson output).
 fn paths_json(paths: &[rbac::AccessPath]) -> Vec<serde_json::Value> {
     paths

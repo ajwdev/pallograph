@@ -1473,6 +1473,17 @@ impl Engine {
         }
     }
 
+    /// Which of `keys` name an object loaded in the live EDB, found with one
+    /// scan of its `k8s/5` rows.
+    pub fn loaded_object_keys(&self, keys: &HashSet<ObjectKey>) -> HashSet<ObjectKey> {
+        self.edb
+            .iter()
+            .filter(|(relation, _)| relation == "k8s")
+            .filter_map(|(_, tuple)| ObjectKey::of_k8s_tuple(tuple))
+            .filter(|key| keys.contains(key))
+            .collect()
+    }
+
     pub fn rules_len(&self) -> usize {
         self.rule_sources.len()
     }

@@ -21,7 +21,7 @@ use tracing::debug;
 use crate::dd::session::{LazyProvenance, NegatedFact, ProofNode, ProofTree};
 use crate::dd::value::Row;
 use crate::delta::diff_object_sides;
-use crate::edb::{ObjectFacts, expression_facts, single_object_facts};
+use crate::edb::{ObjectFacts, ObjectKey, expression_facts, single_object_facts};
 use crate::engine::{ApplySummary, Change, Engine, EvalStore, RelationDoc};
 use crate::query::{
     self, body_relations, count_top_level_args, extract_vars, single_atom, split_atom,
@@ -279,6 +279,44 @@ pub struct DeltaSummary {
     pub unchanged: usize,
     /// Removed by the delta but already gone from the live state.
     pub removed_absent: usize,
+    /// Every base-render object the live state did not hold when the delta
+    /// was applied, sorted by kind, namespace, name and group. An updated
+    /// one is created by the delta rather than updated; an unchanged one
+    /// stays absent (the delta leaves identical objects to live); a removed
+    /// one is the `removed_absent` count.
+    pub not_live: Vec<NotLiveObject>,
+}
+
+/// A base-render object absent from the live state, in [`DeltaSummary`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotLiveObject {
+    pub key: ObjectKey,
+    /// What the delta did with it.
+    pub change: DeltaChange,
+    /// Carries a `helm.sh/hook` annotation. Argo runs hooks and deletes
+    /// them, so their absence from live is expected.
+    pub helm_hook: bool,
+}
+
+/// What a delta did with an object that is in the base render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaChange {
+    /// In head with different content: upserted.
+    Updated,
+    /// In head with the same content: left alone.
+    Unchanged,
+    /// Not in head: retracted.
+    Removed,
+}
+
+impl DeltaChange {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeltaChange::Updated => "updated",
+            DeltaChange::Unchanged => "unchanged",
+            DeltaChange::Removed => "removed",
+        }
+    }
 }
 
 /// A relation, as `show` describes it.
@@ -1030,13 +1068,64 @@ impl Core for LocalCore {
         base: Vec<KubeObject>,
         head: Vec<KubeObject>,
     ) -> Result<DeltaSummary, WriteError> {
-        let (changes, added, updated, unchanged) =
-            diff_object_sides(project(&base), project(&head));
+        let base_facts = project(&base);
+        let head_facts = project(&head);
+        // Each base key with whether it is a Helm hook; the last copy of a
+        // repeated key wins, as in the diff.
+        let base_keys: HashMap<ObjectKey, bool> = base_facts
+            .iter()
+            .zip(&base)
+            .map(|(facts, (object, _))| {
+                let helm_hook = object
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .is_some_and(|annotations| annotations.contains_key("helm.sh/hook"));
+                (facts.key.clone(), helm_hook)
+            })
+            .collect();
+        let head_keys: HashSet<ObjectKey> =
+            head_facts.iter().map(|facts| facts.key.clone()).collect();
+        let (changes, added, updated, unchanged) = diff_object_sides(base_facts, head_facts);
         let removed = changes
             .iter()
             .filter(|change| matches!(change, Change::Retract(_)))
             .count();
+        let upserted: HashSet<&ObjectKey> = changes
+            .iter()
+            .filter_map(|change| match change {
+                Change::Upsert(object) => Some(&object.key),
+                Change::Retract(_) => None,
+            })
+            .collect();
+        let classify = |key: &ObjectKey| {
+            if !head_keys.contains(key) {
+                DeltaChange::Removed
+            } else if upserted.contains(key) {
+                DeltaChange::Updated
+            } else {
+                DeltaChange::Unchanged
+            }
+        };
+
         let mut engine = self.engine();
+        // Read before the delta lands, under the same lock, so the answer
+        // describes the state the delta was applied to.
+        let live = engine.loaded_object_keys(&base_keys.keys().cloned().collect());
+        let mut not_live: Vec<NotLiveObject> = base_keys
+            .iter()
+            .filter(|(key, _)| !live.contains(*key))
+            .map(|(key, helm_hook)| NotLiveObject {
+                key: key.clone(),
+                change: classify(key),
+                helm_hook: *helm_hook,
+            })
+            .collect();
+        fn order(key: &ObjectKey) -> (&str, &str, &str, &str) {
+            (&key.kind, &key.namespace, &key.name, &key.group)
+        }
+        not_live.sort_by(|a, b| order(&a.key).cmp(&order(&b.key)));
+
         let applied = engine.apply_changes(changes);
         self.evaluate_live(&engine)?;
         Ok(DeltaSummary {
@@ -1045,6 +1134,7 @@ impl Core for LocalCore {
             removed,
             unchanged,
             removed_absent: applied.removed_absent,
+            not_live,
         })
     }
 
@@ -1926,6 +2016,11 @@ mod tests {
                     unchanged: 1,
                     // `old` was never loaded.
                     removed_absent: 1,
+                    not_live: vec![NotLiveObject {
+                        key: ObjectKey::new("v1", "ConfigMap", "default", "old"),
+                        change: DeltaChange::Removed,
+                        helm_hook: false,
+                    }],
                 }
             );
             let names = sorted(

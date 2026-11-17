@@ -383,6 +383,112 @@ fn apply_delta_retracts_base_only_object_exits_0() {
     );
 }
 
+/// The live side of the not-live test: only mallory-debug Role from
+/// [`EXEC_GRANT`], as if the RoleBinding had drifted away.
+const LIVE_ROLE_ONLY: &str = r#"apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mallory-debug
+  namespace: kube-system
+rules:
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+"#;
+
+/// A Helm pre-install hook ServiceAccount, which Argo deletes after it runs.
+const HOOK_SA: &str = r#"apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pre-install
+  namespace: kube-system
+  annotations:
+    helm.sh/hook: pre-install
+"#;
+
+/// Run the delta script for the not-live tests, with `before` and `after`
+/// around the delta: live holds only the Role; base
+/// renders the Role, its RoleBinding, [`ADMIN_GRANT`] and a hook; head
+/// keeps the Role and ClusterRole, rebinds the RoleBinding to eve, drops
+/// the ClusterRoleBinding and keeps the hook.
+fn not_live_delta(ws: &Workspace, before: &str, after: &str) -> Output {
+    let live = ws.manifests("live", LIVE_ROLE_ONLY);
+    let base = ws.manifests(
+        "base",
+        &format!("{EXEC_GRANT}---\n{ADMIN_GRANT}---\n{HOOK_SA}"),
+    );
+    let (cluster_role, _) = ADMIN_GRANT.split_once("---").unwrap();
+    let head = ws.manifests(
+        "head",
+        &format!(
+            "{}---\n{cluster_role}---\n{HOOK_SA}",
+            EXEC_GRANT.replace("mallory@example.com", "eve@example.com")
+        ),
+    );
+    ws.run_script(&format!(
+        "k8s::load {live}\n{before}k8s::apply-delta {base} {head}\n{after}"
+    ))
+}
+
+#[test]
+fn apply_delta_ndjson_lists_base_objects_not_live() {
+    let ws = Workspace::new();
+    let out = not_live_delta(&ws, "format ndjson\n", "");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let stdout = stdout(&out);
+    let rows: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .map(|line| serde_json::from_str(line).expect("ndjson row"))
+        .collect();
+    let [row] = rows.as_slice() else {
+        panic!("want one row: {stdout}");
+    };
+    let rbac = "rbac.authorization.k8s.io";
+    assert_eq!(
+        *row,
+        serde_json::json!({
+            "check": "apply-delta",
+            "added": 0,
+            "updated": 1,
+            "removed": 1,
+            "unchanged": 3,
+            "removed_not_live": 1,
+            // Sorted by kind, namespace, name. The live Role is left out.
+            "not_live": [
+                {"group": rbac, "kind": "ClusterRole", "namespace": "", "name": "pr-admin",
+                 "change": "unchanged", "helm_hook": false},
+                {"group": rbac, "kind": "ClusterRoleBinding", "namespace": "", "name": "pr-admin",
+                 "change": "removed", "helm_hook": false},
+                {"group": rbac, "kind": "RoleBinding", "namespace": "kube-system",
+                 "name": "mallory-debug", "change": "updated", "helm_hook": false},
+                {"group": "", "kind": "ServiceAccount", "namespace": "kube-system",
+                 "name": "pre-install", "change": "unchanged", "helm_hook": true},
+            ],
+        })
+    );
+    // The sentence for people stays on stderr.
+    assert!(
+        stderr(&out).contains("Applied delta: +0 ~1 -1 (3 unchanged, 1 removed but not live)"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn apply_delta_text_mode_prints_no_row() {
+    // `format ndjson` after the delta does not apply to it retroactively.
+    let ws = Workspace::new();
+    let out = not_live_delta(&ws, "", "format ndjson\n");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(!stdout(&out).contains("apply-delta"), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("Applied delta: +0 ~1 -1"),
+        "{}",
+        stderr(&out)
+    );
+}
+
 #[test]
 fn apply_delta_wrong_arity_exits_2() {
     let ws = Workspace::new();

@@ -71,5 +71,14 @@ closure.
 
 - **Brand-new chart** (empty base, everything is an add): `k8s::apply-delta - head/`.
 - **Chart deleted** (empty head, everything retracted): `k8s::apply-delta base/ -`.
+- **Machine-readable summary**: after `format ndjson`, `k8s::apply-delta`
+  also prints one row to stdout (the sentence above stays on stderr):
+  `{"check":"apply-delta","added":1,"updated":1,"removed":1,"unchanged":2,"removed_not_live":0,"not_live":[]}`.
+  `not_live` lists each base-render object the live state did not hold
+  (`group`, `kind`, `namespace`, `name`), with `change` saying what the
+  delta did with it: `updated` (so it creates it rather than updating
+  it), `unchanged` (so it stays absent: the delta leaves identical
+  objects to live) or `removed` (nothing to remove), and `helm_hook`
+  when it carries a `helm.sh/hook` annotation.
 - **Scope the diagnostic** to any relation: `diff-relation base direct_perm`,
   or diff two snapshots: `diff-relation s1 s2 <relation>`.
