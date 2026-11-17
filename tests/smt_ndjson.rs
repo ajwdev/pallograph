@@ -125,3 +125,22 @@ fn plain_output_annotates_user_principals_and_exits_1() {
     );
     assert_eq!(out.status.code(), Some(1));
 }
+
+#[test]
+fn check_rows_name_the_state_they_ran_against() {
+    let out = run_session(
+        "snapshot base\nuse base rbac::cluster-admin\nrbac::cluster-admin\n::quit\n",
+        "ndjson",
+    );
+    // `snapshot` prints a status line; keep only the JSON rows.
+    let rows: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}")))
+        .collect();
+    let at_base = rows.iter().filter(|r| r["at"] == "base").count();
+    let at_live = rows.iter().filter(|r| r["at"] == "").count();
+    assert!(at_base > 0, "no rows at base: {rows:?}");
+    assert_eq!(at_base, at_live, "base and live differ: {rows:?}");
+    assert_eq!(at_base + at_live, rows.len(), "row without at: {rows:?}");
+}

@@ -451,7 +451,7 @@ fn print_help() {
         "  sched::karpenter                       - find nodeSelector gaps in Karpenter NodePool coverage"
     );
     println!(
-        "                                           (--format ndjson: one JSON object per result/violation; exit status 1 if any check FAILs)"
+        "                                           (--format ndjson: one JSON object per result/violation, its \"at\" naming the state checked; exit status 1 if any check FAILs)"
     );
     println!();
     println!("Engine / debug");
@@ -563,6 +563,9 @@ SYMBOLS
 
   Machine-readable output (`--format ndjson`) emits one object per concrete
   path with the full detail; display-only subsumption does not apply there.
+  Each object's `at` names the state it was checked against: the snapshot
+  under `use <snapshot>`, or `""` for the live state (snapshot names
+  cannot be empty, so the two never collide).
 "#;
 
 /// The output-format reference for `rbac::diff`, shown by `help rbac::diff`.
@@ -2613,6 +2616,21 @@ fn paths_json(paths: &[rbac::AccessPath]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Print one ndjson row of an `rbac::`/`sched::` check, tagged with the
+/// state it was evaluated against: `"at"` is the snapshot name under `use`,
+/// or `""` for the live state; snapshot names are never empty, so the two
+/// cannot collide. Rows lead with `result` and `check`, so `at` goes third.
+fn print_check_row(at: &At, mut row: serde_json::Value) {
+    if let Some(fields) = row.as_object_mut() {
+        let at = match at {
+            At::Live => "",
+            At::Snapshot(name) => name.as_str(),
+        };
+        fields.shift_insert(2.min(fields.len()), "at".to_string(), at.into());
+    }
+    println!("{row}");
+}
+
 /// What an `rbac::`/`sched::` check concluded.
 enum CheckResult {
     Pass,
@@ -2661,9 +2679,9 @@ fn rbac_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) ->
             };
             if violations.is_empty() {
                 if ndjson {
-                    println!(
-                        "{}",
-                        serde_json::json!({"result":"pass","check":"access","namespace":namespace,"resource":resource,"verb":verb})
+                    print_check_row(
+                        at,
+                        serde_json::json!({"result":"pass","check":"access","namespace":namespace,"resource":resource,"verb":verb}),
                     );
                 } else {
                     println!("PASS  can(_, {namespace:?}, {resource:?}, {verb:?})");
@@ -2672,8 +2690,8 @@ fn rbac_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) ->
             } else {
                 if ndjson {
                     for v in &violations {
-                        println!(
-                            "{}",
+                        print_check_row(
+                            at,
                             serde_json::json!({
                                 "result": "fail",
                                 "check": "access",
@@ -2683,7 +2701,7 @@ fn rbac_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) ->
                                 "resource": resource,
                                 "verb": verb,
                                 "paths": paths_json(&v.paths),
-                            })
+                            }),
                         );
                     }
                 } else {
@@ -2769,9 +2787,9 @@ fn rbac_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) ->
 
             if direct.is_empty() && via.is_empty() {
                 if ndjson {
-                    println!(
-                        "{}",
-                        serde_json::json!({"result":"pass","check":subcommand,"namespace":namespace,"apigroup":apigroup,"resource":resource,"verb":verb})
+                    print_check_row(
+                        at,
+                        serde_json::json!({"result":"pass","check":subcommand,"namespace":namespace,"apigroup":apigroup,"resource":resource,"verb":verb}),
                     );
                 } else {
                     println!(
@@ -2783,8 +2801,8 @@ fn rbac_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) ->
                 if ndjson {
                     let emit_violations = |violations: &[rbac::Violation], kind: &str| {
                         for v in violations {
-                            println!(
-                                "{}",
+                            print_check_row(
+                                at,
                                 serde_json::json!({
                                     "result": "fail",
                                     "check": subcommand,
@@ -2796,7 +2814,7 @@ fn rbac_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) ->
                                     "resource": resource,
                                     "verb": verb,
                                     "paths": paths_json(&v.paths),
-                                })
+                                }),
                             );
                         }
                     };
@@ -2860,9 +2878,9 @@ fn rbac_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) ->
             };
             if violations.is_empty() {
                 if ndjson {
-                    println!(
-                        "{}",
-                        serde_json::json!({"result":"pass","check":"isolation","namespace":namespace})
+                    print_check_row(
+                        at,
+                        serde_json::json!({"result":"pass","check":"isolation","namespace":namespace}),
                     );
                 } else {
                     println!(
@@ -2873,9 +2891,9 @@ fn rbac_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) ->
             } else {
                 if ndjson {
                     for v in &violations {
-                        println!(
-                            "{}",
-                            serde_json::json!({"result":"fail","check":"isolation","principal":v.principal.name,"principal_kind":v.principal.kind.as_str(),"namespace":v.namespace,"resource":v.resource,"verb":v.verb})
+                        print_check_row(
+                            at,
+                            serde_json::json!({"result":"fail","check":"isolation","principal":v.principal.name,"principal_kind":v.principal.kind.as_str(),"namespace":v.namespace,"resource":v.resource,"verb":v.verb}),
                         );
                     }
                 } else {
@@ -2921,9 +2939,9 @@ fn sched_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) -
             };
             if unschedulable.is_empty() {
                 if ndjson {
-                    println!(
-                        "{}",
-                        serde_json::json!({"result":"pass","check":"node-selector"})
+                    print_check_row(
+                        at,
+                        serde_json::json!({"result":"pass","check":"node-selector"}),
                     );
                 } else {
                     println!("PASS  all pods with nodeSelectors are schedulable");
@@ -2932,9 +2950,9 @@ fn sched_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) -
             } else {
                 if ndjson {
                     for p in &unschedulable {
-                        println!(
-                            "{}",
-                            serde_json::json!({"result":"fail","check":"node-selector","namespace":p.namespace,"pod":p.name})
+                        print_check_row(
+                            at,
+                            serde_json::json!({"result":"fail","check":"node-selector","namespace":p.namespace,"pod":p.name}),
                         );
                     }
                 } else {
@@ -2958,9 +2976,9 @@ fn sched_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) -
             match placement {
                 PlacementResult::Sat(assignment) if assignment.is_empty() => {
                     if ndjson {
-                        println!(
-                            "{}",
-                            serde_json::json!({"result":"pass","check":"anti-affinity"})
+                        print_check_row(
+                            at,
+                            serde_json::json!({"result":"pass","check":"anti-affinity"}),
                         );
                     } else {
                         println!("PASS  no anti-affinity conflicts found");
@@ -2971,9 +2989,9 @@ fn sched_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) -
                     assignment.sort_by(|a, b| a.0.cmp(&b.0));
                     if ndjson {
                         for (pod, node) in &assignment {
-                            println!(
-                                "{}",
-                                serde_json::json!({"result":"pass","check":"anti-affinity","pod":pod,"node":node})
+                            print_check_row(
+                                at,
+                                serde_json::json!({"result":"pass","check":"anti-affinity","pod":pod,"node":node}),
                             );
                         }
                     } else {
@@ -2986,9 +3004,9 @@ fn sched_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) -
                 }
                 PlacementResult::Unsat => {
                     if ndjson {
-                        println!(
-                            "{}",
-                            serde_json::json!({"result":"fail","check":"anti-affinity"})
+                        print_check_row(
+                            at,
+                            serde_json::json!({"result":"fail","check":"anti-affinity"}),
                         );
                     } else {
                         println!(
@@ -3009,10 +3027,7 @@ fn sched_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) -
             };
             if gaps.is_empty() {
                 if ndjson {
-                    println!(
-                        "{}",
-                        serde_json::json!({"result":"pass","check":"karpenter"})
-                    );
+                    print_check_row(at, serde_json::json!({"result":"pass","check":"karpenter"}));
                 } else {
                     println!("PASS  full coverage — no nodeSelector gap found (Z3 UNSAT)");
                 }
@@ -3025,9 +3040,9 @@ fn sched_command(input: &str, core: &LocalCore, at: &At, format: OutputFormat) -
                             .iter()
                             .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
                             .collect();
-                        println!(
-                            "{}",
-                            serde_json::json!({"result":"fail","check":"karpenter","labels":labels})
+                        print_check_row(
+                            at,
+                            serde_json::json!({"result":"fail","check":"karpenter","labels":labels}),
                         );
                     }
                 } else {
