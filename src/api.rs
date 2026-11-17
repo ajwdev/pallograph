@@ -293,9 +293,6 @@ pub struct NotLiveObject {
     pub key: ObjectKey,
     /// What the delta did with it.
     pub change: DeltaChange,
-    /// Carries a `helm.sh/hook` annotation. Argo runs hooks and deletes
-    /// them, so their absence from live is expected.
-    pub helm_hook: bool,
 }
 
 /// What a delta did with an object that is in the base render.
@@ -1070,20 +1067,8 @@ impl Core for LocalCore {
     ) -> Result<DeltaSummary, WriteError> {
         let base_facts = project(&base);
         let head_facts = project(&head);
-        // Each base key with whether it is a Helm hook; the last copy of a
-        // repeated key wins, as in the diff.
-        let base_keys: HashMap<ObjectKey, bool> = base_facts
-            .iter()
-            .zip(&base)
-            .map(|(facts, (object, _))| {
-                let helm_hook = object
-                    .metadata
-                    .annotations
-                    .as_ref()
-                    .is_some_and(|annotations| annotations.contains_key("helm.sh/hook"));
-                (facts.key.clone(), helm_hook)
-            })
-            .collect();
+        let base_keys: HashSet<ObjectKey> =
+            base_facts.iter().map(|facts| facts.key.clone()).collect();
         let head_keys: HashSet<ObjectKey> =
             head_facts.iter().map(|facts| facts.key.clone()).collect();
         let (changes, added, updated, unchanged) = diff_object_sides(base_facts, head_facts);
@@ -1111,14 +1096,13 @@ impl Core for LocalCore {
         let mut engine = self.engine();
         // Read before the delta lands, under the same lock, so the answer
         // describes the state the delta was applied to.
-        let live = engine.loaded_object_keys(&base_keys.keys().cloned().collect());
+        let live = engine.loaded_object_keys(&base_keys);
         let mut not_live: Vec<NotLiveObject> = base_keys
             .iter()
-            .filter(|(key, _)| !live.contains(*key))
-            .map(|(key, helm_hook)| NotLiveObject {
+            .filter(|key| !live.contains(*key))
+            .map(|key| NotLiveObject {
                 key: key.clone(),
                 change: classify(key),
-                helm_hook: *helm_hook,
             })
             .collect();
         fn order(key: &ObjectKey) -> (&str, &str, &str, &str) {
@@ -2019,7 +2003,6 @@ mod tests {
                     not_live: vec![NotLiveObject {
                         key: ObjectKey::new("v1", "ConfigMap", "default", "old"),
                         change: DeltaChange::Removed,
-                        helm_hook: false,
                     }],
                 }
             );

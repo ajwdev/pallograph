@@ -2605,7 +2605,6 @@ fn delta_json(delta: &DeltaSummary) -> serde_json::Value {
                 // "updated" (the delta creates it), "unchanged" (it stays
                 // absent) or "removed" (nothing to remove).
                 "change": object.change.as_str(),
-                "helm_hook": object.helm_hook,
             }))
             .collect::<Vec<_>>(),
     })

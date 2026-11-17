@@ -78,7 +78,6 @@ closure.
   (`group`, `kind`, `namespace`, `name`), with `change` saying what the
   delta did with it: `updated` (so it creates it rather than updating
   it), `unchanged` (so it stays absent: the delta leaves identical
-  objects to live) or `removed` (nothing to remove), and `helm_hook`
-  when it carries a `helm.sh/hook` annotation.
+  objects to live) or `removed` (nothing to remove).
 - **Scope the diagnostic** to any relation: `diff-relation base direct_perm`,
   or diff two snapshots: `diff-relation s1 s2 <relation>`.
