@@ -935,7 +935,7 @@ fn access_diff_ndjson_no_changes_passes() {
         serde_json::json!({
             "check": "diff",
             "before": "base",
-            "after": "current",
+            "after": "",
             "result": "pass",
             "gained": 0,
             "lost": 0,

@@ -624,7 +624,8 @@ SYMBOLS
 NDJSON
   Under `format ndjson` (or `--format ndjson`) the text is replaced by one
   verdict row, then one row per change in the text's order. Every row has
-  "check":"diff" and the "before"/"after" state names.
+  "check":"diff" and the "before"/"after" snapshot names; the live state
+  is "" (snapshot names are never empty).
 
   The verdict row carries "result" ("fail" when anything was gained, else
   "pass"), the "gained"/"lost" totals, and "principals": the Per-principal
@@ -1450,7 +1451,14 @@ fn session(
                     match core.rbac_diff(&before, &after) {
                         Ok(diff) => {
                             let clean = if format == OutputFormat::Ndjson {
-                                print_access_diff_ndjson(&diff, before_label, after_label)
+                                // JSON names only snapshots; the live state
+                                // is "" (snapshot names are never empty), not
+                                // the text header's "current".
+                                let after_name = match &after {
+                                    At::Live => "",
+                                    At::Snapshot(name) => name.as_str(),
+                                };
+                                print_access_diff_ndjson(&diff, before_label, after_name)
                             } else {
                                 print_access_diff(
                                     &diff,
