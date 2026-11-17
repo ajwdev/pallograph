@@ -204,15 +204,33 @@ async fn load_datasource(
 
 /// Exits 2 on an error, as `--script` does when a command fails, so it is
 /// never mistaken for a finding (exit 1).
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // Before the tokio runtime, so its worker threads get no arenas of their own.
+    limit_malloc_arenas();
     init_tracing();
-    match run(Cli::parse()).await {
+    let result = tokio::runtime::Runtime::new()
+        .context("start tokio runtime")
+        .and_then(|runtime| runtime.block_on(run(Cli::parse())));
+    match result {
         Ok(code) => code,
         Err(e) => {
             eprintln!("Error: {e:?}");
             ExitCode::from(repl::SessionStatus::Error.exit_code())
         }
+    }
+}
+
+/// Keep glibc to a single malloc arena. The DD backend runs each batch
+/// evaluation on a fresh timely worker thread, and glibc gives every new
+/// thread its own arena without reusing memory freed in another, so peak
+/// memory grew by about one evaluation per batch (#65). One arena means one
+/// lock; revisit once evaluation runs on several threads at once. musl has
+/// no per-thread arenas, so the release builds never needed this.
+fn limit_malloc_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: called first thing in main, before any other thread exists.
+    unsafe {
+        libc::mallopt(libc::M_ARENA_MAX, 1);
     }
 }
 

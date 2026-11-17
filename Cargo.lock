@@ -1693,6 +1693,7 @@ dependencies = [
  "glob",
  "k8s-openapi",
  "kube",
+ "libc",
  "mangle-analysis",
  "mangle-ast",
  "mangle-common",
