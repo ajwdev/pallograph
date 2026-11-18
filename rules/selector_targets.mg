@@ -47,6 +47,7 @@ selector_target_kind("apps/v1", "DaemonSet", "apps/v1", "ControllerRevision", /s
 selector_target_kind("batch/v1", "Job", "v1", "Pod", /same_namespace).
 selector_target_kind("policy/v1", "PodDisruptionBudget", "v1", "Pod", /same_namespace).
 selector_target_kind("policy/v1beta1", "PodDisruptionBudget", "v1", "Pod", /same_namespace).
+selector_target_kind("networking.k8s.io/v1", "NetworkPolicy", "v1", "Pod", /same_namespace).
 selector_target_kind("v1", "PersistentVolumeClaim", "v1", "PersistentVolume", /cluster).
 
 # The synthetic owner edb.rs emits for each ClusterRole

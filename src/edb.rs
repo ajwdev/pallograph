@@ -833,8 +833,14 @@ fn extract_labels_and_selectors(
     // it is, how it is written, and whether one without requirements selects
     // everything depend on the kind; selector_targets.mg says what it selects.
     let (field, shape, empty_selects_all) = selector_field(api_version, kind);
-    let Some(selector) = data.get("spec").and_then(|s| s.get(field)) else {
-        return;
+    let selector = data.get("spec").and_then(|s| s.get(field));
+    // A NetworkPolicy's podSelector is a LabelSelector value, not a pointer,
+    // so a missing one is {}. Elsewhere a missing selector selects nothing.
+    let empty = Json::Object(Default::default());
+    let selector = match selector {
+        Some(selector) => selector,
+        None if field == "podSelector" => &empty,
+        None => return,
     };
     let description = if namespace.is_empty() {
         format!("{kind} {name} spec.{field}")
@@ -860,6 +866,9 @@ fn extract_labels_and_selectors(
 fn selector_field(api_version: &str, kind: &str) -> (&'static str, SelectorShape, bool) {
     match (api_version, kind) {
         ("v1", "Service" | "ReplicationController") => ("selector", SelectorShape::FlatMap, false),
+        ("networking.k8s.io/v1", "NetworkPolicy") => {
+            ("podSelector", SelectorShape::LabelSelector, true)
+        }
         ("policy/v1beta1", "PodDisruptionBudget") => {
             ("selector", SelectorShape::LabelSelector, false)
         }
@@ -1727,7 +1736,7 @@ mod tests {
     // A selector without requirements selects everything only where
     // Kubernetes reads it as a LabelSelector that is {}: not for a flat map,
     // a policy/v1beta1 PodDisruptionBudget, a missing selector or a custom
-    // resource.
+    // resource. A NetworkPolicy without a podSelector is {}.
     #[test]
     fn empty_selector_selects_all_by_kind() {
         let selects_all = BTreeSet::from([("selector_selects_all".to_string(), vec![])]);
@@ -1763,6 +1772,18 @@ mod tests {
                 "PodDisruptionBudget",
                 json!({"selector": {}}),
                 &BTreeSet::new(),
+            ),
+            (
+                "networking.k8s.io/v1",
+                "NetworkPolicy",
+                json!({"podSelector": {}}),
+                &selects_all,
+            ),
+            (
+                "networking.k8s.io/v1",
+                "NetworkPolicy",
+                json!({}),
+                &selects_all,
             ),
             ("v1", "Service", json!({"selector": {}}), &BTreeSet::new()),
             (
