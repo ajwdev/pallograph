@@ -45,6 +45,9 @@
 #                               matchExpressions Exists operator.
 #   selector_expr_notexists/5 - (ApiVersion, Kind, Namespace, Name, LabelKey)
 #                               matchExpressions DoesNotExist operator.
+#   selector_selects_all/4    - (ApiVersion, Kind, Namespace, Name)
+#                               A selector with no requirements that selects every
+#                               target, like a PodDisruptionBudget's selector: {}.
 #
 # Predicate hierarchy (IDB - Intensional Database, i.e. facts derived by rules):
 #   k8s/5
@@ -102,7 +105,8 @@ object_has_label_key(ApiVersion, Kind, Namespace, Name, LabelKey) :-
 object_label_by_name(Name, ApiVersion, Kind, Namespace, LabelKey, LabelValue) :-
     object_label(ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue).
 
-# Objects that own a selector with at least one requirement.
+# Objects that own a selector: one with at least one requirement, or one
+# that selects everything.
 selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
     selector_match_label(SelApiVersion, SelKind, SelNamespace, SelName, _, _).
 selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
@@ -113,6 +117,8 @@ selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
     selector_expr_exists(SelApiVersion, SelKind, SelNamespace, SelName, _).
 selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
     selector_expr_notexists(SelApiVersion, SelKind, SelNamespace, SelName, _).
+selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
+    selector_selects_all(SelApiVersion, SelKind, SelNamespace, SelName).
 
 # ---- selector_candidate ----
 #
@@ -122,6 +128,9 @@ selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
 #   1. Scopes work to pairs that are actually worth evaluating.
 #   2. Guarantees that all eight position variables are bound by a positive literal
 #      before any negation fires — a hard requirement in Mangle.
+#
+# A selector with no requirements (selector_selects_all) has nothing to be
+# unsatisfied, so it selects every candidate.
 #
 # True cross-namespace selectors (e.g. Prometheus Operator namespaceSelector,
 # pod affinity namespaceSelector) are a different data shape and are handled

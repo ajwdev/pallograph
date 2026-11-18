@@ -157,13 +157,15 @@ Decl selector_expr_notexists(ApiVersion, Kind, Namespace, Name, LabelKey)
   ]
   bound [/string, /string, /string, /string, /string].
 
-Decl clusterrole_aggregation_empty_selector(ClusterRole, Index)
+Decl selector_selects_all(ApiVersion, Kind, Namespace, Name)
   descr [
-    doc("ClusterRole aggregationRule.clusterRoleSelectors entries with no requirements at all ({} or {matchLabels: {}}), which match every ClusterRole. An entry whose requirements could not be encoded gets no row and matches nothing."),
-    arg(ClusterRole, "aggregating ClusterRole name"),
-    arg(Index, "entry index as a string; the Namespace of its synthetic pallograph.dev/agg selector owner")
+    doc("Selectors with no requirements that select every object in scope, like a policy/v1 PodDisruptionBudget's selector: {}. A Service's empty selector, or a missing one, selects nothing and gets no row."),
+    arg(ApiVersion, "selecting object apiVersion"),
+    arg(Kind, "selecting object kind"),
+    arg(Namespace, "selecting object namespace; empty for cluster-scoped"),
+    arg(Name, "selecting object name")
   ]
-  bound [/string, /string].
+  bound [/string, /string, /string, /string].
 
 Decl nodepool_requirement(Pool, Key, Operator, Value)
   descr [
