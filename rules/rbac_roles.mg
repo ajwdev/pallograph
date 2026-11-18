@@ -90,7 +90,10 @@ clusterrole_own_rule(Role, Rule) :-
 # across selectors. An empty selector ({} or {matchLabels: {}}) has no
 # requirements and matches every ClusterRole, as in Kubernetes; edb.rs marks
 # it with clusterrole_aggregation_empty_selector. A selector edb.rs could not
-# encode gets neither requirements nor the marker, so it matches nothing.
+# encode gets neither requirements nor the marker, so it matches nothing. The
+# entry index sits in the Namespace slot, but the owner only selects
+# cluster-scoped ClusterRoles (selector_targets.mg), so a namespace named "0"
+# is never confused with it.
 
 Decl clusterrole_aggregates(Aggregator, Source)
   descr [

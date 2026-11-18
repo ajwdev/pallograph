@@ -197,7 +197,7 @@ raw objects into typed relations; the three `rbac_roles.mg`, `rbac_subjects.mg`
 and `rbac.mg` files model RBAC (see below); `escalation.mg` models identity
 theft paths (exec into a pod, mint a token, impersonate); `rbac_write.mg`
 models granting yourself a role by writing RBAC objects (`bind`,
-`escalate`) and continues those paths through it; `labels.mg` implements label selectors; `summary.mg` does
+`escalate`) and continues those paths through it; `labels.mg` implements label selectors, evaluated against the kinds and scope Kubernetes uses for each owner (`selector_targets.mg`); `summary.mg` does
 inventory counts. `build.rs` compiles every rule file at build time, so a
 broken rule fails `cargo build` instead of your demo.
 
@@ -299,7 +299,9 @@ controller lists: a Service against Pods in its namespace, a Deployment
 against its ReplicaSets, a PersistentVolumeClaim against
 PersistentVolumes. That table is restated from the controllers, not
 imported. `hack/compat-gen.sh` writes the results to
-`target/labels-compat/`.
+`target/labels-compat/`, and `tests/labels_compat.rs` checks
+`selector_matches` and `k8s::match` against them on both backends, with
+no baseline of known gaps.
 
 ## Development
 

@@ -31,6 +31,10 @@ Only the non-obvious parts:
 - `rules/*.mg` - Mangle rules. `00_edb_prelude.mg` declares the input
   relations and is `include_str!`'d into the binary; `build.rs` compiles every
   rule file at build time, so a broken rule fails `cargo build`.
+- Label selectors: `rules/labels.mg` matches a selector against candidate
+  objects, and `rules/selector_targets.mg` says which kinds and scope each
+  owner kind selects, as upstream controllers do. Matching any kind is the
+  opt-in `examples/selectors-any-kind/`.
 - RBAC rules are split three ways: `rules/rbac_roles.mg` (what a role grants,
   aggregation included), `rules/rbac_subjects.mg` (who a binding applies to,
   and the subjects a principal acts as) and `rules/rbac.mg` (`direct_perm`,

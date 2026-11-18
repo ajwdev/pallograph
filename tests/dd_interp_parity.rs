@@ -325,6 +325,38 @@ fn repeated_variable_in_atom() {
     );
 }
 
+/// A variable bound once and written twice in the head, a constant leading
+/// a body atom, and a table of facts written in the rules keyed by name
+/// constants: the shapes of labels.mg's selector_candidate rules.
+#[test]
+fn repeated_variable_in_head_with_rule_facts() {
+    let e = edb(&[
+        ("owner", vec![s("Service"), s("a"), s("web")]),
+        ("owner", vec![s("Claim"), s("a"), s("data")]),
+        ("owner", vec![s("Query"), s("b"), s("q")]),
+        ("object", vec![s("a"), s("Pod"), s("p1")]),
+        ("object", vec![s("a"), s("ConfigMap"), s("c1")]),
+        ("object", vec![s("b"), s("Pod"), s("p2")]),
+        ("object", vec![s(""), s("Volume"), s("v1")]),
+    ]);
+    assert_parity(
+        "repeated_variable_in_head",
+        &e,
+        "Decl owner(Kind, Namespace, Name).\n\
+         Decl object(Namespace, Kind, Name).\n\
+         Decl target(OwnerKind, ObjectKind, Scope).\n\
+         Decl candidate(OwnerKind, OwnerNamespace, OwnerName, ObjectKind, ObjectNamespace, ObjectName).\n\
+         target(\"Service\", \"Pod\", /same_namespace).\n\
+         target(\"Claim\", \"Volume\", /cluster).\n\
+         candidate(K, Ns, N, OK, Ns, ON) :-\n\
+             owner(K, Ns, N), target(K, OK, /same_namespace), object(Ns, OK, ON).\n\
+         candidate(K, Ns, N, OK, ONs, ON) :-\n\
+             owner(K, Ns, N), target(K, OK, /cluster), object(ONs, OK, ON), ONs = \"\".\n\
+         candidate(\"Query\", Ns, N, OK, Ns, ON) :-\n\
+             owner(\"Query\", Ns, N), object(Ns, OK, ON).",
+    );
+}
+
 #[test]
 fn self_join() {
     let e = edb(&[

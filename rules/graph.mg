@@ -2,8 +2,10 @@
 #
 # A "graph edge" is any directed relationship between two Kubernetes objects.
 # Currently the only edge source is label selector matching (selector_matches/8
-# from labels.mg). Owner references will be added as a second edge source once
-# that EDB is available; no changes to reachable/8 will be required at that point.
+# from labels.mg), which follows the kinds Kubernetes evaluates each selector
+# against: a Service has edges to its Pods, a Deployment to its ReplicaSets.
+# Owner references will be added as a second edge source once that EDB is
+# available; no changes to reachable/8 will be required at that point.
 #
 # Predicate hierarchy:
 #   selector_matches/8  (from labels.mg)

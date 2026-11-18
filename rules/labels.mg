@@ -1,9 +1,14 @@
-# Label selector rules - evaluates Kubernetes label selectors against any object.
+# Label selector rules - which objects a Kubernetes label selector selects.
 #
-# Unlike native Kubernetes, which restricts label selectors to a single Kind,
-# these rules match a selector against all objects in the store regardless of
-# ApiVersion or Kind. For example, a Deployment's selector can be evaluated
-# against Pods, StatefulSets, or any other type simultaneously.
+# As in Kubernetes, a selector is evaluated only against the kinds its owner
+# selects, in the owner's namespace or among cluster-scoped objects:
+# selector_targets.mg lists them (a Service selects Pods in its namespace, a
+# PersistentVolumeClaim selects PersistentVolumes). The matching itself does
+# not care about kind: it checks every requirement of a selector against
+# every candidate object, and selector_matches/8 keeps the pairs the target
+# table allows. To match selectors against objects of any kind, see
+# examples/selectors-any-kind/, which adds candidates and reads
+# selector_pair_matches/8.
 #
 # Variable naming convention:
 #   ApiVersion  - the apiVersion field from the object (e.g. "apps/v1", "v1").
@@ -41,14 +46,14 @@
 #
 # Predicate hierarchy (IDB - Intensional Database, i.e. facts derived by rules):
 #   k8s/5
-#     → object_exists/4              (any object in the store; see TODO below)
+#     → object_in_namespace/4        (objects keyed by namespace, for candidate lookups)
 #   object_label/6
 #     → object_has_label_key/5       (strips LabelValue; needed because Mangle forbids
 #                                     unbound wildcards in negated literals — see below)
-#   selector_* + object_exists/4
-#     → selector_has_requirements/4  (guards the cross-product: only objects that
-#                                     actually declare a selector are considered)
-#     → sel_obj_candidate/8          (cross-product of selector owners × all objects;
+#     → object_label_by_name/6       (object_label keyed by object name)
+#   selector_* + selector_target_kind/5 (selector_targets.mg) + object_in_namespace/4
+#     → selector_declared/4          (objects that own a selector)
+#     → selector_candidate/8         (each selector paired with the objects it may select;
 #                                     ensures every variable is bound before negation fires)
 #     → matchlabel_unsatisfied/8     (a matchLabels Key=Value requirement is not met)
 #     → expr_in_satisfied/9          (an In requirement IS met; a separate named predicate
@@ -59,15 +64,18 @@
 #     → expr_exists_unsatisfied/8    (the required key is absent)
 #     → expr_notexists_unsatisfied/8 (the forbidden key is present)
 #     → selector_any_unsatisfied/8   (union of all failure modes; again a separate named
-#                                     predicate so that selector_matches can negate it)
-#     → selector_matches/8           (no requirement of any type is unsatisfied)
+#                                     predicate so that selector_pair_matches can negate it)
+#     → selector_pair_matches/8      (a candidate pair with no requirement unsatisfied)
+#     → selector_matches/8           (the pairs the target table allows)
 
 # ---- Base helpers ----
 
-# Any object in the store is a potential selector target.
-# TODO: object_exists is a redundant alias for k8s/5 with the data arg dropped.
-# It can be removed by inlining k8s(ApiVersion, Kind, Namespace, Name, _) at each use site.
-object_exists(ApiVersion, Kind, Namespace, Name) :-
+# Every object, keyed by its namespace. Candidate rules look objects up by
+# the selector owner's namespace; keyed on k8s/5's leading ApiVersion
+# instead, each selector would pair with every "v1" object in the cluster
+# before the namespace filter (see "Write rules with the planner's lookups
+# in mind" in AGENTS.md).
+object_in_namespace(Namespace, Kind, ApiVersion, Name) :-
     k8s(ApiVersion, Kind, Namespace, Name, _).
 
 # Strips LabelValue so the key alone can be tested in negation.
@@ -92,53 +100,52 @@ object_has_label_key(ApiVersion, Kind, Namespace, Name, LabelKey) :-
 object_label_by_name(Name, ApiVersion, Kind, Namespace, LabelKey, LabelValue) :-
     object_label(ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue).
 
-# Identifies objects that declare at least one selector requirement of any type.
-# Without this guard, sel_obj_candidate would be the full O(n²) cross-product of
-# every object with every other object, even for objects that have no selector.
-selector_has_requirements(SelApiVersion, SelKind, SelNamespace, SelName) :-
+# Objects that own a selector with at least one requirement.
+selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
     selector_match_label(SelApiVersion, SelKind, SelNamespace, SelName, _, _).
-selector_has_requirements(SelApiVersion, SelKind, SelNamespace, SelName) :-
+selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
     selector_expr_in(SelApiVersion, SelKind, SelNamespace, SelName, _, _).
-selector_has_requirements(SelApiVersion, SelKind, SelNamespace, SelName) :-
+selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
     selector_expr_notin(SelApiVersion, SelKind, SelNamespace, SelName, _, _).
-selector_has_requirements(SelApiVersion, SelKind, SelNamespace, SelName) :-
+selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
     selector_expr_exists(SelApiVersion, SelKind, SelNamespace, SelName, _).
-selector_has_requirements(SelApiVersion, SelKind, SelNamespace, SelName) :-
+selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
     selector_expr_notexists(SelApiVersion, SelKind, SelNamespace, SelName, _).
 
-# Cross-product of selector owners × candidate objects.
+# ---- selector_candidate ----
 #
-# Every *_unsatisfied rule below includes sel_obj_candidate in its body. This
-# serves two purposes:
+# Each selector paired with the objects it may select. Every *_unsatisfied
+# rule below includes selector_candidate in its body. This serves two
+# purposes:
 #   1. Scopes work to pairs that are actually worth evaluating.
 #   2. Guarantees that all eight position variables are bound by a positive literal
 #      before any negation fires — a hard requirement in Mangle.
-#
-# Matching is restricted to two cases to avoid an O(selectors × objects)
-# cross-product blowup at scale:
-#   1. Same-namespace pairs: the common case for all namespace-scoped objects
-#      (Pods, Services, Deployments, etc.).
-#   2. Selector → cluster-scoped target (ObjNamespace = ""): covers nodeSelector
-#      matching against Nodes, PVC selector matching against PersistentVolumes,
-#      and any other selector that targets cluster-scoped objects.
 #
 # True cross-namespace selectors (e.g. Prometheus Operator namespaceSelector,
 # pod affinity namespaceSelector) are a different data shape and are handled
 # by separate EDB predicates and rules, not by this predicate.
 
-# Case 1: selector owner and target are in the same namespace.
-sel_obj_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
-                  ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
-    selector_has_requirements(SelApiVersion, SelKind, SelNamespace, SelName),
-    object_exists(ObjApiVersion, ObjKind, ObjNamespace, ObjName),
-    SelNamespace = ObjNamespace.
+# Target kinds in the owner's namespace (a Service's Pods).
+selector_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
+                   ObjApiVersion, ObjKind, SelNamespace, ObjName) :-
+    selector_declared(SelApiVersion, SelKind, SelNamespace, SelName),
+    selector_target_kind(SelApiVersion, SelKind, ObjApiVersion, ObjKind, /same_namespace),
+    object_in_namespace(SelNamespace, ObjKind, ObjApiVersion, ObjName).
 
-# Case 2: target is cluster-scoped (namespace ""). Covers Nodes, PersistentVolumes, etc.
-sel_obj_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
-                  ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
-    selector_has_requirements(SelApiVersion, SelKind, SelNamespace, SelName),
-    object_exists(ObjApiVersion, ObjKind, ObjNamespace, ObjName),
+# Cluster-scoped target kinds (a PersistentVolumeClaim's PersistentVolumes).
+selector_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
+                   ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
+    selector_declared(SelApiVersion, SelKind, SelNamespace, SelName),
+    selector_target_kind(SelApiVersion, SelKind, ObjApiVersion, ObjKind, /cluster),
+    object_in_namespace(ObjNamespace, ObjKind, ObjApiVersion, ObjName),
     ObjNamespace = "".
+
+# The query owner k8s::match adds (see match_selector in src/api.rs): every
+# object in its namespace, whatever the kind.
+selector_candidate("pallograph.dev/query", SelKind, SelNamespace, SelName,
+                   ObjApiVersion, ObjKind, SelNamespace, ObjName) :-
+    selector_declared("pallograph.dev/query", SelKind, SelNamespace, SelName),
+    object_in_namespace(SelNamespace, ObjKind, ObjApiVersion, ObjName).
 
 # ---- matchLabels ----
 
@@ -147,8 +154,8 @@ sel_obj_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
 # object_label literal has all six arguments bound.
 matchlabel_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
                        ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
-    sel_obj_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
-                      ObjApiVersion, ObjKind, ObjNamespace, ObjName),
+    selector_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
+                       ObjApiVersion, ObjKind, ObjNamespace, ObjName),
     selector_match_label(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey, LabelValue),
     !object_label(ObjApiVersion, ObjKind, ObjNamespace, ObjName, LabelKey, LabelValue).
 
@@ -159,11 +166,14 @@ matchlabel_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
 #
 # This must be a separate named predicate because expr_in_unsatisfied needs to negate
 # the entire "any value matched" check. Mangle cannot negate an inline conjunction,
-# only a named predicate.
+# only a named predicate. The label is looked up by object name; see
+# object_label_by_name.
 expr_in_satisfied(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey,
                   ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
+    selector_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
+                       ObjApiVersion, ObjKind, ObjNamespace, ObjName),
     selector_expr_in(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey, AllowedValue),
-    object_label(ObjApiVersion, ObjKind, ObjNamespace, ObjName, LabelKey, AllowedValue).
+    object_label_by_name(ObjName, ObjApiVersion, ObjKind, ObjNamespace, LabelKey, AllowedValue).
 
 # The In requirement is unsatisfied when no value in the allowed set matches.
 # The wildcard _ in selector_expr_in(..., LabelKey, _) is in a positive literal —
@@ -171,8 +181,8 @@ expr_in_satisfied(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey,
 # in the negation below without committing to a specific value.
 expr_in_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
                     ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
-    sel_obj_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
-                      ObjApiVersion, ObjKind, ObjNamespace, ObjName),
+    selector_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
+                       ObjApiVersion, ObjKind, ObjNamespace, ObjName),
     selector_expr_in(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey, _),
     !expr_in_satisfied(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey,
                        ObjApiVersion, ObjKind, ObjNamespace, ObjName).
@@ -185,8 +195,8 @@ expr_in_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
 # object_label_by_name.
 expr_notin_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
                        ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
-    sel_obj_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
-                      ObjApiVersion, ObjKind, ObjNamespace, ObjName),
+    selector_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
+                       ObjApiVersion, ObjKind, ObjNamespace, ObjName),
     selector_expr_notin(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey, ExcludedValue),
     object_label_by_name(ObjName, ObjApiVersion, ObjKind, ObjNamespace, LabelKey, ExcludedValue).
 
@@ -197,8 +207,8 @@ expr_notin_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
 # in the negated position (see object_has_label_key comment above).
 expr_exists_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
                         ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
-    sel_obj_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
-                      ObjApiVersion, ObjKind, ObjNamespace, ObjName),
+    selector_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
+                       ObjApiVersion, ObjKind, ObjNamespace, ObjName),
     selector_expr_exists(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey),
     !object_has_label_key(ObjApiVersion, ObjKind, ObjNamespace, ObjName, LabelKey).
 
@@ -208,16 +218,16 @@ expr_exists_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
 # regardless of its value. Again a direct positive check — no negation needed.
 expr_notexists_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
                            ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
-    sel_obj_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
-                      ObjApiVersion, ObjKind, ObjNamespace, ObjName),
+    selector_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
+                       ObjApiVersion, ObjKind, ObjNamespace, ObjName),
     selector_expr_notexists(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey),
     object_has_label_key(ObjApiVersion, ObjKind, ObjNamespace, ObjName, LabelKey).
 
 # ---- selector_any_unsatisfied ----
 #
 # Union of all five failure modes. A separate named predicate is required here for
-# the same reason as expr_in_satisfied: selector_matches must negate a single named
-# predicate — it cannot negate a disjunction inline.
+# the same reason as expr_in_satisfied: selector_pair_matches must negate a single
+# named predicate — it cannot negate a disjunction inline.
 
 selector_any_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
                          ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
@@ -240,41 +250,56 @@ selector_any_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
     expr_notexists_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
                                ObjApiVersion, ObjKind, ObjNamespace, ObjName).
 
+# ---- selector_pair_matches ----
+#
+# A candidate pair where no requirement of any type is unsatisfied. Rules
+# loaded with --rules may add candidates (see examples/selectors-any-kind/),
+# so this can hold pairs Kubernetes would never evaluate; selector_matches
+# below keeps only the ones it would.
+
+selector_pair_matches(SelApiVersion, SelKind, SelNamespace, SelName,
+                      ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
+    selector_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
+                       ObjApiVersion, ObjKind, ObjNamespace, ObjName),
+    !selector_any_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
+                              ObjApiVersion, ObjKind, ObjNamespace, ObjName).
+
 # ---- selector_matches ----
 #
-# A selector matches an object when it is a candidate pair and no requirement
-# of any type is unsatisfied. This is the primary exported predicate.
-#
-# This predicate is cross-Kind: it matches a selector against objects of every
-# Kind, which native Kubernetes does not do. For native-K8s single-Kind scoping,
-# see selector_matches_kind below.
+# The objects a selector selects in Kubernetes: matching pairs whose object
+# kind and scope the target table allows for the owner, plus k8s::match's
+# query owner. This is the primary exported predicate.
 #
 # Args: (SelApiVersion, SelKind, SelNamespace, SelName,
 #        ObjApiVersion, ObjKind, ObjNamespace, ObjName)
 
 selector_matches(SelApiVersion, SelKind, SelNamespace, SelName,
+                 ObjApiVersion, ObjKind, SelNamespace, ObjName) :-
+    selector_pair_matches(SelApiVersion, SelKind, SelNamespace, SelName,
+                          ObjApiVersion, ObjKind, SelNamespace, ObjName),
+    selector_target_kind(SelApiVersion, SelKind, ObjApiVersion, ObjKind, /same_namespace).
+
+selector_matches(SelApiVersion, SelKind, SelNamespace, SelName,
                  ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
-    sel_obj_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
-                      ObjApiVersion, ObjKind, ObjNamespace, ObjName),
-    !selector_any_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
-                              ObjApiVersion, ObjKind, ObjNamespace, ObjName).
+    selector_pair_matches(SelApiVersion, SelKind, SelNamespace, SelName,
+                          ObjApiVersion, ObjKind, ObjNamespace, ObjName),
+    ObjNamespace = "",
+    selector_target_kind(SelApiVersion, SelKind, ObjApiVersion, ObjKind, /cluster).
+
+selector_matches("pallograph.dev/query", SelKind, SelNamespace, SelName,
+                 ObjApiVersion, ObjKind, SelNamespace, ObjName) :-
+    selector_pair_matches("pallograph.dev/query", SelKind, SelNamespace, SelName,
+                          ObjApiVersion, ObjKind, SelNamespace, ObjName).
 
 # ---- selector_matches_kind ----
 #
-# Native-Kubernetes-style scoped matching: restricts matches to a single target
-# Kind, the way a real selector is evaluated against one resource type. Built
-# directly on selector_matches/8, so all five requirement types and AND/OR
-# semantics are inherited unchanged.
+# selector_matches restricted to one target kind, for owners that select
+# more than one (a StatefulSet's Pods but not its ControllerRevisions).
 #
 # TargetApiVersion/TargetKind are bound by the caller and unified with the
 # object's type, so the Obj type positions can be left as wildcards at the call
 # site:
-#   selector_matches_kind("apps/v1", "Deployment", "ns", "dep", "v1", "Pod", _, _, _, _)
-#
-# Scoping to a Kind makes the cluster-scoped over-match of negative requirements
-# (e.g. a NotIn-only selector matching every Node and ClusterRole) structurally
-# impossible here, while NotIn-matches-all-objects-lacking-the-key within the
-# target Kind stays correct.
+#   selector_matches_kind("apps/v1", "StatefulSet", "ns", "db", "v1", "Pod", _, _, _, _)
 #
 # Args: (SelApiVersion, SelKind, SelNamespace, SelName,
 #        TargetApiVersion, TargetKind,

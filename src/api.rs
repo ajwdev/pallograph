@@ -1161,17 +1161,13 @@ impl Core for LocalCore {
 
         // selector_matches columns: 0 SelApiVersion, 1 SelKind, 2
         // SelNamespace, 3 SelName, 4 ObjApiVersion, 5 ObjKind, 6
-        // ObjNamespace, 7 ObjName. Only objects in `namespace` count, like
-        // `kubectl -n`: labels.mg also pairs a namespaced selector with
-        // cluster-scoped objects, which negative selectors (matching by
-        // absence) would otherwise surface.
-        let namespace = Value::String(namespace.to_string());
+        // ObjNamespace, 7 ObjName. labels.mg pairs the query owner only
+        // with objects in its namespace, like `kubectl -n`.
         let kind = kind.map(|kind| Value::String(kind.to_string()));
         let mut rows: Vec<Vec<Value>> = store
             .scan("selector_matches")
             .iter()
             .filter(|row| row.len() == 8 && row[0..4] == owner[..])
-            .filter(|row| row[6] == namespace)
             .filter(|row| kind.as_ref().is_none_or(|kind| row[5] == *kind))
             .map(|row| row[4..8].to_vec())
             .collect();

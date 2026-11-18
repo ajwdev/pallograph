@@ -552,11 +552,11 @@ fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str
 /// owner, so requirements within a single selector are AND'd (all must hold) while
 /// separate selectors are OR'd (independent owners) — matching K8s semantics.
 ///
-/// The sel_obj_candidate Case 2 rule in labels.mg (Namespace="") then pairs these
-/// selectors against all cluster-scoped objects, which includes ClusterRoles.
-/// The aggregation rule in rbac_roles.mg pins the object to
-/// "rbac.authorization.k8s.io/v1" / "ClusterRole" / "" to extract the source
-/// ClusterRole from the matches.
+/// selector_targets.mg gives this owner cluster-scoped ClusterRoles as its
+/// targets, so labels.mg pairs these selectors with every ClusterRole, and
+/// never with an object in a namespace that happens to be named like an
+/// index. The aggregation rule in rbac_roles.mg reads the source ClusterRole
+/// from the matches.
 ///
 /// An empty selector (`{}` or `{matchLabels: {}}`) matches every ClusterRole in
 /// Kubernetes, and selector_matches cannot see a selector without requirements,
