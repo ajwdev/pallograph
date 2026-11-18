@@ -1,7 +1,7 @@
 # An empty aggregation selector, "{}", selects every ClusterRole but the
 # aggregator itself, so match-all-empty ends up with every source's rules,
 # URL rules included. aggregation-match-all-labels does the same for
-# "{matchLabels: {}}". TestAggregationMatchAllDecisions in tools/rbac-oracle
+# "{matchLabels: {}}". TestAggregationMatchAllDecisions in tools/k8s-oracle
 # pins the decisions.
 #
 # Each world has one match-all aggregator. Two would select each other, an

@@ -4,7 +4,7 @@
 # The clusterrole-aggregation controller replaces an aggregated role's own
 # rules with its sources' rules. On a cycle, what it leaves depends on the
 # order it visits roles and on what the roles held before:
-# TestAggregationCycleVisitOrder in tools/rbac-oracle shows two orders
+# TestAggregationCycleVisitOrder in tools/k8s-oracle shows two orders
 # disagreeing. So neither Pallograph (rules/rbac_roles.mg) nor the oracle
 # recomputes a role on a cycle. Its rules are taken as stored, as in a
 # snapshot of a cluster the controller has settled, and the rules written

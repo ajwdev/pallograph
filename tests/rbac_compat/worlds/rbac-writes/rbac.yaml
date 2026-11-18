@@ -2,7 +2,7 @@
 # binding when it may bind the role (verb bind), and a role when it may
 # escalate (verb escalate), or in either case when it already holds every
 # rule granted; the authorizer must allow the plain create or update too.
-# TestRBACWriteDecisions in tools/rbac-oracle pins the decisions.
+# TestRBACWriteDecisions in tools/k8s-oracle pins the decisions.
 
 # Roles to grant.
 apiVersion: rbac.authorization.k8s.io/v1

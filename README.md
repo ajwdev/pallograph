@@ -246,7 +246,7 @@ permissions gained are joined on demand rather than stored.
 ### RBAC compatibility harness
 
 `tests/rbac_compat.rs` checks `rbac_allowed` against upstream Kubernetes
-itself. The Go program in [`tools/rbac-oracle/`](tools/rbac-oracle/) loads a
+itself. The Go program in [`tools/k8s-oracle/`](tools/k8s-oracle/) loads a
 world of RBAC objects with the API server's defaulting, validation and
 ClusterRole aggregation, generates probe requests for it, and decides them
 with the real RBAC authorizer (the oracle). Pallograph decides the same
@@ -264,7 +264,7 @@ single-step relations of its escalation rules; the table in
 
 - Curated worlds under `tests/rbac_compat/worlds/` each target a corner of
   RBAC (resourceNames, nonResourceURLs, subresources, aggregation shapes,
-  subject kinds, the v1.37 bootstrap policy). `hack/rbac-compat-gen.sh`
+  subject kinds, the v1.37 bootstrap policy). `hack/compat-gen.sh`
   generates their requests and decisions into `target/rbac-compat/`.
 - `tests/rbac_compat/baseline.json` is a ratchet of known mismatch counts
   per world. Every authorization request matches the authorizer exactly.
@@ -293,7 +293,7 @@ CI runs inside the Nix shell, so run checks the same way:
 ```sh
 nix develop .#ci -c cargo fmt --check
 nix develop .#ci -c cargo clippy --all-targets --locked -- -D warnings
-nix develop .#ci -c hack/rbac-compat-gen.sh   # needed before rbac_compat tests
+nix develop .#ci -c hack/compat-gen.sh   # needed before rbac_compat tests
 nix develop .#ci -c cargo test --all-targets --locked
 ```
 

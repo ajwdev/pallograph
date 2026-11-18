@@ -1,14 +1,16 @@
-// rbac-oracle answers Kubernetes RBAC authorization requests with the
-// kube-apiserver RBAC authorizer, and impersonation and RBAC write
-// questions with the API server code around it, as ground truth for
-// Pallograph's RBAC model.
+// k8s-oracle answers questions about Kubernetes with the upstream code
+// that decides them, as ground truth for Pallograph's model:
 //
-// A world is a directory holding rbac.yaml. Subcommands:
+//   - rbac: authorization requests with the kube-apiserver RBAC
+//     authorizer, and impersonation and RBAC write questions with the API
+//     server code around it.
 //
-//	rbac-oracle gen-worlds -seed S -count N <dir>      writes N random worlds under <dir>
-//	rbac-oracle gen [-limit N] [-seed S] <world>...    writes <world>/requests.ndjson
-//	rbac-oracle eval <world>...                        writes <world>/oracle.ndjson
-//	rbac-oracle kind-verify [-context C] <world>...    checks the oracle against a live API server
+// A world is a directory of manifests. Subcommands:
+//
+//	k8s-oracle rbac gen-worlds -seed S -count N <dir>      writes N random worlds under <dir>
+//	k8s-oracle rbac gen [-limit N] [-seed S] <world>...    writes <world>/requests.ndjson
+//	k8s-oracle rbac eval <world>...                        writes <world>/oracle.ndjson
+//	k8s-oracle rbac kind-verify [-context C] <world>...    checks the oracle against a live API server
 package main
 
 import (
@@ -20,34 +22,43 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
+	if len(os.Args) < 3 {
 		usage()
 	}
 
 	var err error
 	switch os.Args[1] {
-	case "gen-worlds":
-		err = runGenWorlds(os.Args[2:])
-	case "gen":
-		err = runGen(os.Args[2:])
-	case "eval":
-		err = runEval(os.Args[2:])
-	case "kind-verify":
-		err = runKindVerify(os.Args[2:])
+	case "rbac":
+		err = runRBAC(os.Args[2], os.Args[3:])
 	default:
 		usage()
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "rbac-oracle:", err)
+		fmt.Fprintln(os.Stderr, "k8s-oracle:", err)
 		os.Exit(1)
 	}
 }
 
+func runRBAC(command string, args []string) error {
+	switch command {
+	case "gen-worlds":
+		return runGenWorlds(args)
+	case "gen":
+		return runGen(args)
+	case "eval":
+		return runEval(args)
+	case "kind-verify":
+		return runKindVerify(args)
+	}
+	usage()
+	return nil
+}
+
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: rbac-oracle gen-worlds -seed S -count N <dir>
-       rbac-oracle gen [-limit N] [-seed S] <world>...
-       rbac-oracle eval <world>...
-       rbac-oracle kind-verify [-context C] [-sample N] <world>...`)
+	fmt.Fprintln(os.Stderr, `usage: k8s-oracle rbac gen-worlds -seed S -count N <dir>
+       k8s-oracle rbac gen [-limit N] [-seed S] <world>...
+       k8s-oracle rbac eval <world>...
+       k8s-oracle rbac kind-verify [-context C] [-sample N] <world>...`)
 	os.Exit(2)
 }
 

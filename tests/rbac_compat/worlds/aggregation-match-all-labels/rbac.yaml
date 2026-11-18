@@ -1,7 +1,7 @@
 # An aggregation selector with empty matchLabels, "{matchLabels: {}}",
 # selects every ClusterRole but the aggregator itself, like "{}" in
 # aggregation-match-all. TestAggregationMatchAllLabelsDecisions in
-# tools/rbac-oracle pins the decisions.
+# tools/k8s-oracle pins the decisions.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

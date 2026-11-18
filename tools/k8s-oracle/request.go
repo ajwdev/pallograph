@@ -101,7 +101,7 @@ func splitServiceAccount(username string) (namespace, name string, ok bool) {
 }
 
 // The files a world's requests and the oracle's decisions are written to,
-// as NDJSON. They are generated (hack/rbac-compat-gen.sh), never committed.
+// as NDJSON. They are generated (hack/compat-gen.sh), never committed.
 const (
 	requestsFile = "requests.ndjson"
 	oracleFile   = "oracle.ndjson"

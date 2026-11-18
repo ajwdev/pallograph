@@ -80,7 +80,7 @@ clusterrole_own_rule(Role, Rule) :-
 # controller's output, and recomputing them gives the same answer, except on
 # an aggregation cycle (see "Aggregation cycles" below), where stored rules
 # are used as they are. This mirrors aggregate() in
-# tools/rbac-oracle/world.go.
+# tools/k8s-oracle/world.go.
 #
 # Each clusterRoleSelectors[i] entry is emitted by edb.rs as a synthetic
 # selector owner (ApiVersion="pallograph.dev/agg", Kind="ClusterRoleAggregation",
