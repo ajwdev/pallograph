@@ -1199,11 +1199,11 @@ impl Engine {
     /// backend cannot translate is reported as an error (and left in
     /// `rule_sources` for the caller to roll back) rather than silently dropped.
     pub fn add_rule(&mut self, rule: String) -> Result<()> {
-        let new_head = extract_head_pred(&rule);
+        let new_heads = rule_head_predicates(&rule);
         self.rule_sources.push(rule);
         self.note_change();
         if let Some(s) = &mut self.session {
-            s.add_idb(new_head.as_deref(), &self.edb, &self.rule_sources)?;
+            s.add_idb(new_heads.as_deref(), &self.edb, &self.rule_sources)?;
         }
         Ok(())
     }
@@ -1652,25 +1652,17 @@ fn last_per_key(objects: Vec<ObjectFacts>) -> (Vec<ObjectFacts>, usize) {
     (kept, dropped)
 }
 
-/// Extract the head predicate name from a Mangle rule source string.
-///
-/// Scans for the first non-empty, non-`Decl`, non-comment line and returns
-/// the identifier before the opening `(`.  Returns `None` if the source
-/// contains only declarations (or cannot be parsed).
-fn extract_head_pred(rule_src: &str) -> Option<String> {
-    for line in rule_src.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("Decl") || line.starts_with("//") {
-            continue;
-        }
-        if let Some(pred) = line.split('(').next() {
-            let pred = pred.trim();
-            if !pred.is_empty() {
-                return Some(pred.to_string());
-            }
-        }
-    }
-    None
+/// The head predicate of every rule in a Mangle source string, which may
+/// hold many rules (a sourced file). `None` if it does not parse.
+fn rule_head_predicates(rule_src: &str) -> Option<Vec<String>> {
+    let arena = mangle_ast::Arena::new_with_global_interner();
+    let mut parser = mangle_parse::Parser::new(&arena, rule_src.as_bytes(), "rule");
+    parser.next_token().ok()?;
+    let unit = parser.parse_unit().ok()?;
+    unit.clauses
+        .iter()
+        .map(|clause| arena.predicate_name(clause.head.sym).map(str::to_string))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1933,6 +1925,31 @@ mod tests {
         let mut blocked = dd.query_live("blocked").unwrap();
         blocked.sort();
         assert_eq!(blocked, vec![vec![s("a")], vec![s("b")], vec![s("c")]]);
+    }
+
+    /// One `add_rule` chunk (a sourced file) can hold a rule for a new
+    /// relation and a clause for an existing one. DD must rebuild for the
+    /// second rather than layer the chunk on the first rule's head, which
+    /// would drop the new clause. A leading `#` comment is not a head.
+    #[test]
+    fn add_rule_chunk_extending_existing_relation() {
+        for chunk in [
+            "fresh(X) :- path(X, \"d\").\npath(X, \"z\") :- edge(X, \"b\").",
+            "# A comment first.\nfresh(X) :- path(X, \"d\").\npath(X, \"z\") :- edge(X, \"b\").",
+        ] {
+            let (edb, rules) = diamond();
+            let mut interp =
+                Engine::from_parts(edb.clone(), rules.clone(), Box::new(InterpreterBackend))
+                    .unwrap();
+            let mut dd =
+                Engine::from_parts(edb, rules, Box::new(DdBackend { provenance: false })).unwrap();
+            interp.add_rule(chunk.to_string()).unwrap();
+            dd.add_rule(chunk.to_string()).unwrap();
+
+            assert_same_facts(&dd, &interp);
+            let path = dd.query_live("path").unwrap();
+            assert!(path.contains(&vec![s("a"), s("z")]), "{chunk}: {path:?}");
+        }
     }
 
     /// Once a negation rule is in place, facts added incrementally to the
