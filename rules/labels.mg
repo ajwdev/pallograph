@@ -35,8 +35,10 @@
 #   selector_match_label/6    - (ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue)
 #                               One fact per matchLabels entry. Also covers flat
 #                               Service-style .spec.selector maps (treated as matchLabels).
-#   selector_expr_in/6        - (ApiVersion, Kind, Namespace, Name, LabelKey, AllowedValue)
+#   selector_expr_in/7        - (ApiVersion, Kind, Namespace, Name, Index, LabelKey, AllowedValue)
 #                               matchExpressions In operator; one fact per allowed value.
+#                               Index is the expression's position, so two In
+#                               expressions on one key are separate requirements.
 #   selector_expr_notin/6     - (ApiVersion, Kind, Namespace, Name, LabelKey, ExcludedValue)
 #                               matchExpressions NotIn operator; one fact per excluded value.
 #   selector_expr_exists/5    - (ApiVersion, Kind, Namespace, Name, LabelKey)
@@ -104,7 +106,7 @@ object_label_by_name(Name, ApiVersion, Kind, Namespace, LabelKey, LabelValue) :-
 selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
     selector_match_label(SelApiVersion, SelKind, SelNamespace, SelName, _, _).
 selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
-    selector_expr_in(SelApiVersion, SelKind, SelNamespace, SelName, _, _).
+    selector_expr_in(SelApiVersion, SelKind, SelNamespace, SelName, _, _, _).
 selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
     selector_expr_notin(SelApiVersion, SelKind, SelNamespace, SelName, _, _).
 selector_declared(SelApiVersion, SelKind, SelNamespace, SelName) :-
@@ -161,38 +163,40 @@ matchlabel_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
 
 # ---- matchExpressions: In ----
 
-# The In requirement for LabelKey is satisfied if the object has LabelKey=AllowedValue
-# for at least one AllowedValue from the set.
+# In expression Index is satisfied if the object has LabelKey=AllowedValue for
+# at least one AllowedValue from its set. Keyed on Index rather than LabelKey
+# so that two In expressions on one key must both hold, as in Kubernetes.
 #
 # This must be a separate named predicate because expr_in_unsatisfied needs to negate
 # the entire "any value matched" check. Mangle cannot negate an inline conjunction,
 # only a named predicate. The label is looked up by object name; see
 # object_label_by_name.
-expr_in_satisfied(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey,
+expr_in_satisfied(SelApiVersion, SelKind, SelNamespace, SelName, Index,
                   ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
     selector_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
                        ObjApiVersion, ObjKind, ObjNamespace, ObjName),
-    selector_expr_in(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey, AllowedValue),
+    selector_expr_in(SelApiVersion, SelKind, SelNamespace, SelName, Index, LabelKey, AllowedValue),
     object_label_by_name(ObjName, ObjApiVersion, ObjKind, ObjNamespace, LabelKey, AllowedValue).
 
-# The In requirement is unsatisfied when no value in the allowed set matches.
-# The wildcard _ in selector_expr_in(..., LabelKey, _) is in a positive literal —
-# it asserts that some In requirement for LabelKey exists, binding LabelKey for use
-# in the negation below without committing to a specific value.
+# An In expression is unsatisfied when no value in its allowed set matches.
+# The wildcards in selector_expr_in(..., Index, _, _) are in a positive
+# literal: it asserts that In expression Index exists, binding Index for the
+# negation below without committing to a specific value.
 expr_in_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
                     ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
     selector_candidate(SelApiVersion, SelKind, SelNamespace, SelName,
                        ObjApiVersion, ObjKind, ObjNamespace, ObjName),
-    selector_expr_in(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey, _),
-    !expr_in_satisfied(SelApiVersion, SelKind, SelNamespace, SelName, LabelKey,
+    selector_expr_in(SelApiVersion, SelKind, SelNamespace, SelName, Index, _, _),
+    !expr_in_satisfied(SelApiVersion, SelKind, SelNamespace, SelName, Index,
                        ObjApiVersion, ObjKind, ObjNamespace, ObjName).
 
 # ---- matchExpressions: NotIn ----
 
 # The NotIn requirement is violated if the object has LabelKey=ExcludedValue for
 # any value in the excluded set. No negation needed — finding any excluded value
-# is a direct positive check. The label is looked up by object name; see
-# object_label_by_name.
+# is a direct positive check. Several NotIn expressions on one key need no
+# index: excluding each set is the same as excluding their union. The label
+# is looked up by object name; see object_label_by_name.
 expr_notin_unsatisfied(SelApiVersion, SelKind, SelNamespace, SelName,
                        ObjApiVersion, ObjKind, ObjNamespace, ObjName) :-
     selector_candidate(SelApiVersion, SelKind, SelNamespace, SelName,

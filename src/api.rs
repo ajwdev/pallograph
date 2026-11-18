@@ -1140,7 +1140,8 @@ impl Core for LocalCore {
         ];
         let facts: Vec<(String, Vec<Value>)> = expressions
             .iter()
-            .flat_map(|expression| expression_facts(&owner, expression))
+            .enumerate()
+            .flat_map(|(index, expression)| expression_facts(&owner, index, expression))
             .map(|(relation, args)| (relation.to_string(), args))
             .collect();
 

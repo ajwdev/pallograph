@@ -357,6 +357,40 @@ fn repeated_variable_in_head_with_rule_facts() {
     );
 }
 
+/// A selector with no requirements selects every candidate (nothing is
+/// unsatisfied), and two In requirements on one key, told apart by index,
+/// must both hold: labels.mg's selects-all and In shapes.
+#[test]
+fn requirements_by_index_and_none() {
+    let e = edb(&[
+        ("candidate", vec![s("all"), s("web")]),
+        ("candidate", vec![s("all"), s("db")]),
+        ("candidate", vec![s("two-in"), s("web")]),
+        ("candidate", vec![s("two-in"), s("db")]),
+        ("candidate", vec![s("two-in"), s("cache")]),
+        ("expr_in", vec![s("two-in"), s("0"), s("app"), s("web")]),
+        ("expr_in", vec![s("two-in"), s("0"), s("app"), s("db")]),
+        ("expr_in", vec![s("two-in"), s("1"), s("app"), s("db")]),
+        ("expr_in", vec![s("two-in"), s("1"), s("app"), s("cache")]),
+        ("label", vec![s("web"), s("app"), s("web")]),
+        ("label", vec![s("db"), s("app"), s("db")]),
+        ("label", vec![s("cache"), s("app"), s("cache")]),
+    ]);
+    assert_parity(
+        "requirements_by_index",
+        &e,
+        "Decl candidate(Selector, Object).\n\
+         Decl expr_in(Selector, Index, Key, Value).\n\
+         Decl label(Object, Key, Value).\n\
+         Decl in_satisfied(Selector, Index, Object).\n\
+         Decl unsatisfied(Selector, Object).\n\
+         Decl matches(Selector, Object).\n\
+         in_satisfied(S, I, O) :- candidate(S, O), expr_in(S, I, K, V), label(O, K, V).\n\
+         unsatisfied(S, O) :- candidate(S, O), expr_in(S, I, _, _), !in_satisfied(S, I, O).\n\
+         matches(S, O) :- candidate(S, O), !unsatisfied(S, O).",
+    );
+}
+
 #[test]
 fn self_join() {
     let e = edb(&[

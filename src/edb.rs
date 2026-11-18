@@ -599,23 +599,31 @@ fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Js
 ///
 /// The fact shapes match those emitted by `emit_selector_requirements`:
 ///   Equal        -> selector_match_label
-///   In           -> selector_expr_in     (one per value)
+///   In           -> selector_expr_in     (one per value, under `index`)
 ///   NotIn        -> selector_expr_notin  (one per value)
 ///   NotEqual     -> selector_expr_notin  (single value; NotEqual(k,v) == NotIn(k,{v}))
 ///   Exists       -> selector_expr_exists
 ///   DoesNotExist -> selector_expr_notexists
-pub fn expression_facts(owner: &[Value], expr: &Expression) -> Vec<(&'static str, Vec<Value>)> {
+///
+/// `index` is the expression's position in its selector, which tells two In
+/// expressions on one key apart.
+pub fn expression_facts(
+    owner: &[Value],
+    index: usize,
+    expr: &Expression,
+) -> Vec<(&'static str, Vec<Value>)> {
     let fact = |rel: &'static str, extra: &[&str]| {
         let mut args = owner.to_vec();
         args.extend(extra.iter().map(|e| Value::String((*e).to_string())));
         (rel, args)
     };
+    let index = index.to_string();
     match expr {
         Expression::Equal(k, v) => vec![fact("selector_match_label", &[k, v])],
         Expression::NotEqual(k, v) => vec![fact("selector_expr_notin", &[k, v])],
         Expression::In(k, set) => set
             .iter()
-            .map(|v| fact("selector_expr_in", &[k, v]))
+            .map(|v| fact("selector_expr_in", &[&index, k, v]))
             .collect(),
         Expression::NotIn(k, set) => set
             .iter()
@@ -646,7 +654,7 @@ enum SelectorFacts {
 /// which identifies the object that "owns" this selector (i.e. the object whose
 /// spec.selector or aggregation clusterRoleSelector this is).
 ///
-/// Emits: selector_match_label/6, selector_expr_in/6, selector_expr_notin/6,
+/// Emits: selector_match_label/6, selector_expr_in/7, selector_expr_notin/6,
 ///        selector_expr_exists/5, selector_expr_notexists/5.
 ///
 /// These feed the selector_matches/8 engine in labels.mg, which implements
@@ -730,7 +738,8 @@ fn selector_requirement_facts(
         Some(Json::Array(expressions)) => expressions,
         Some(other) => return Err(format!("matchExpressions {other} is not a list")),
     };
-    for expression in expressions {
+    for (index, expression) in expressions.iter().enumerate() {
+        let index = index.to_string();
         let key = match expression.get("key") {
             Some(key) => string(key, "matchExpressions key")?,
             None => return Err(format!("matchExpressions entry {expression} has no key")),
@@ -757,7 +766,7 @@ fn selector_requirement_facts(
         match operator.as_str() {
             "In" => {
                 for value in values()? {
-                    facts.push(fact("selector_expr_in", &[&key, &value]));
+                    facts.push(fact("selector_expr_in", &[&index, &key, &value]));
                 }
             }
             "NotIn" => {
@@ -1000,6 +1009,7 @@ mod tests {
     use super::*;
     use crate::engine::{Engine, InterpreterBackend};
     use serde_json::json;
+    use std::collections::BTreeSet;
     use std::path::Path;
 
     fn engine_from_store(store: MemStore) -> Engine {
@@ -1636,6 +1646,62 @@ mod tests {
                 "{selector} must grant nothing"
             );
         }
+    }
+
+    /// The selector facts loading `object` emits, as (relation, the columns
+    /// after the owner).
+    fn selector_facts(object: serde_json::Value) -> BTreeSet<(String, Vec<String>)> {
+        let object: DynamicObject = serde_json::from_value(object).unwrap();
+        let mut store = MemStore::new();
+        add_object(&mut store, &object, None);
+        let mut facts = BTreeSet::new();
+        for relation in store.relation_names() {
+            if !relation.starts_with("selector_") {
+                continue;
+            }
+            for row in store.get_facts(&relation) {
+                let rest = row[4..]
+                    .iter()
+                    .map(|value| match value {
+                        Value::String(text) => text.clone(),
+                        other => panic!("{relation}: {other:?}"),
+                    })
+                    .collect();
+                facts.insert((relation.clone(), rest));
+            }
+        }
+        facts
+    }
+
+    // Each In expression carries its position, so two on one key stay two
+    // requirements. NotIn needs no index.
+    #[test]
+    fn in_expressions_carry_their_index() {
+        let facts = selector_facts(json!({
+            "apiVersion": "policy/v1",
+            "kind": "PodDisruptionBudget",
+            "metadata": {"name": "o", "namespace": "ns"},
+            "spec": {"selector": {"matchExpressions": [
+                {"key": "app", "operator": "In", "values": ["web", "db"]},
+                {"key": "tier", "operator": "NotIn", "values": ["x"]},
+                {"key": "app", "operator": "In", "values": ["db"]},
+            ]}},
+        }));
+        let row = |relation: &str, columns: &[&str]| {
+            (
+                relation.to_string(),
+                columns.iter().map(|c| c.to_string()).collect(),
+            )
+        };
+        assert_eq!(
+            facts,
+            BTreeSet::from([
+                row("selector_expr_in", &["0", "app", "web"]),
+                row("selector_expr_in", &["0", "app", "db"]),
+                row("selector_expr_notin", &["tier", "x"]),
+                row("selector_expr_in", &["2", "app", "db"]),
+            ])
+        );
     }
 
     // Only a selector with no matchLabels entries and no matchExpressions

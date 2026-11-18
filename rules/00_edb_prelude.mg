@@ -110,17 +110,18 @@ Decl selector_match_label(ApiVersion, Kind, Namespace, Name, LabelKey, LabelValu
   ]
   bound [/string, /string, /string, /string, /string, /string].
 
-Decl selector_expr_in(ApiVersion, Kind, Namespace, Name, LabelKey, AllowedValue)
+Decl selector_expr_in(ApiVersion, Kind, Namespace, Name, Index, LabelKey, AllowedValue)
   descr [
-    doc("matchExpressions In terms, one row per allowed value."),
+    doc("matchExpressions In terms, one row per allowed value. Each expression must hold, so two In expressions on one key are told apart by Index."),
     arg(ApiVersion, "selecting object apiVersion"),
     arg(Kind, "selecting object kind"),
     arg(Namespace, "selecting object namespace; empty for cluster-scoped"),
     arg(Name, "selecting object name"),
+    arg(Index, "the expression's position in matchExpressions, as a string"),
     arg(LabelKey, "label key the expression matches on"),
     arg(AllowedValue, "one value from the In set")
   ]
-  bound [/string, /string, /string, /string, /string, /string].
+  bound [/string, /string, /string, /string, /string, /string, /string].
 
 Decl selector_expr_notin(ApiVersion, Kind, Namespace, Name, LabelKey, ExcludedValue)
   descr [
