@@ -8,7 +8,7 @@
 //!
 //! Each world under `tests/rbac_compat/worlds/` is an `rbac.yaml`. Its
 //! requests and the oracle's decisions are generated, not committed:
-//! `hack/rbac-compat-gen.sh` runs `tools/rbac-oracle` (Go) to write them as
+//! `hack/compat-gen.sh` runs `tools/k8s-oracle` (Go) to write them as
 //! NDJSON under `target/rbac-compat/worlds/<world>/`, and this test refuses
 //! to run on missing or stale output. Every request is decided by both
 //! backends, which must agree exactly. Each disagreement with the oracle has a direction (over-grant:
@@ -98,7 +98,7 @@ fn report_dir() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("rbac-compat")
 }
 
-/// Where hack/rbac-compat-gen.sh writes the curated worlds' requests and
+/// Where hack/compat-gen.sh writes the curated worlds' requests and
 /// decisions: `<target>/rbac-compat/worlds`, `<target>/tmp` being
 /// `CARGO_TARGET_TMPDIR`.
 fn generated_dir() -> PathBuf {
@@ -130,13 +130,13 @@ fn curated_worlds() -> Result<Vec<PathBuf>> {
             .with_context(|| format!("reading {}", path.display()))?
             .modified()?)
     };
-    let oracle_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/rbac-oracle");
+    let oracle_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/k8s-oracle");
     let mut oracle_modified = std::time::SystemTime::UNIX_EPOCH;
     for entry in std::fs::read_dir(&oracle_dir)? {
         oracle_modified = oracle_modified.max(modified(&entry?.path())?);
     }
 
-    let regenerate = "run hack/rbac-compat-gen.sh (in nix develop) to regenerate";
+    let regenerate = "run hack/compat-gen.sh (in nix develop) to regenerate";
     let mut worlds = Vec::new();
     for entry in std::fs::read_dir(compat_dir().join("worlds"))? {
         let source = entry?.path();
@@ -151,7 +151,7 @@ fn curated_worlds() -> Result<Vec<PathBuf>> {
         let generated = modified(&decisions)?;
         if generated < modified(&source.join("rbac.yaml"))? || generated < oracle_modified {
             bail!(
-                "{} is older than its world or tools/rbac-oracle; {regenerate}",
+                "{} is older than its world or tools/k8s-oracle; {regenerate}",
                 decisions.display()
             );
         }
@@ -535,7 +535,7 @@ fn load_world(world: &Path) -> Result<LoadedWorld> {
     let decisions = read_ndjson(&world.join("oracle.ndjson"))?;
     if requests.len() != decisions.len() {
         bail!(
-            "{}: {} requests but {} decisions; rerun rbac-oracle eval",
+            "{}: {} requests but {} decisions; rerun k8s-oracle rbac eval",
             world.display(),
             requests.len(),
             decisions.len()

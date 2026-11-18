@@ -2,7 +2,7 @@
 # controller replaces an aggregated role's own rules with its sources'
 # rules, unless the sources have none, in which case the own rules stay
 # (see aggregation-without-sources). TestAggregationShapesDecisions in
-# tools/rbac-oracle pins the decisions.
+# tools/k8s-oracle pins the decisions.
 #
 # Roles on an aggregation cycle are not recomputed: their rules are taken
 # as stored (see aggregation-cycle-own-rules).

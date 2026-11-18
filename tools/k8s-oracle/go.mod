@@ -1,4 +1,4 @@
-module github.com/ajwdev/pallograph/tools/rbac-oracle
+module github.com/ajwdev/pallograph/tools/k8s-oracle
 
 go 1.26.0
 

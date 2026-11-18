@@ -3,7 +3,7 @@
 # ClusterRoleBinding can allow it, and about a ServiceAccount in the
 # ServiceAccount's own namespace, so a RoleBinding allows the
 # ServiceAccounts of its namespace. TestImpersonationDecisions in
-# tools/rbac-oracle pins the decisions.
+# tools/k8s-oracle pins the decisions.
 
 # Identities worth impersonating: a user and two groups holding grants of
 # their own, and three ServiceAccounts.

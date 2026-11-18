@@ -226,7 +226,7 @@ func applyWorld(ctx context.Context, client kubernetes.Interface, world *World) 
 	}
 	ignoreNotFound := func(err error) {
 		if err != nil && !apierrors.IsNotFound(err) {
-			fmt.Fprintln(os.Stderr, "rbac-oracle: cleanup:", err)
+			fmt.Fprintln(os.Stderr, "k8s-oracle: cleanup:", err)
 		}
 	}
 	strip := func(meta *metav1.ObjectMeta) metav1.ObjectMeta {

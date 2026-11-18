@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fuzz tier of the RBAC compatibility harness: generate random RBAC worlds,
-# decide their requests with the kube-apiserver authorizer (tools/rbac-oracle),
+# decide their requests with the kube-apiserver authorizer (tools/k8s-oracle),
 # then check Pallograph's rbac_allowed against those decisions.
 #
 # Usage: hack/rbac-compat.sh [-s SEED] [-n COUNT]
@@ -21,14 +21,14 @@ done
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 worlds="$repo/target/rbac-compat-fuzz/seed-$seed"
-oracle="$repo/target/rbac-oracle"
+oracle="$repo/target/k8s-oracle"
 
 echo "seed $seed, $count worlds in $worlds" >&2
 rm -rf "$worlds"
-go -C "$repo/tools/rbac-oracle" build -o "$oracle" .
-"$oracle" gen-worlds -seed "$seed" -count "$count" "$worlds"
-"$oracle" gen "$worlds"/*/ 2>/dev/null
-"$oracle" eval "$worlds"/*/ 2>/dev/null
+go -C "$repo/tools/k8s-oracle" build -o "$oracle" .
+"$oracle" rbac gen-worlds -seed "$seed" -count "$count" "$worlds"
+"$oracle" rbac gen "$worlds"/*/ 2>/dev/null
+"$oracle" rbac eval "$worlds"/*/ 2>/dev/null
 
 RBAC_COMPAT_WORLDS="$worlds" cargo test --release --test rbac_compat -- \
 	--ignored --exact fuzz_worlds --nocapture 2>&1 | grep -v '^\[mangle\]'

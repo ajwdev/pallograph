@@ -1,0 +1,8 @@
+{"namespace": "exprs", "kind": "Pod", "selector": "app in (web,db),app in (db,cache)"}
+{"namespace": "exprs", "kind": "Pod", "selector": "app notin (web),app notin (db)"}
+{"namespace": "exprs", "kind": "Pod", "selector": "app!=web"}
+{"namespace": "exprs", "kind": "Pod", "selector": "tier,!canary"}
+{"namespace": "exprs", "kind": "Pod", "selector": "tier=backend,app in (web,cache)"}
+{"namespace": "exprs", "selector": "app=web"}
+{"namespace": "exprs", "selector": "app!=web"}
+{"namespace": "", "kind": "Pod", "selector": "app=web"}

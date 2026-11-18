@@ -75,9 +75,11 @@ Only the non-obvious parts:
 - `api-resources.txt` (repo root) is `include_str!`'d by the fixture
   anonymizer (`src/bin/anonymize.rs`). It is not a stray; deleting it breaks
   the build.
-- `tools/rbac-oracle/` - Go program wrapping upstream k8s RBAC authorization,
-  the impersonation filters and the RBAC registry's escalation checks, used
-  as the oracle for `tests/rbac_compat.rs`.
+- `tools/k8s-oracle/` - Go program answering questions with upstream k8s
+  code, as the oracle for the compatibility tests. `rbac` wraps RBAC
+  authorization, the impersonation filters and the RBAC registry's
+  escalation checks (for `tests/rbac_compat.rs`); `labels` evaluates label
+  selectors with apimachinery, over the worlds in `tests/labels_compat/`.
 - `notes/` is gitignored scratch space. Don't rely on it existing.
 
 ## Building and testing
@@ -88,16 +90,17 @@ them the same way:
 ```sh
 nix develop .#ci -c cargo fmt --check
 nix develop .#ci -c cargo clippy --all-targets --locked -- -D warnings
-nix develop .#ci -c hack/rbac-compat-gen.sh   # needed before rbac_compat tests
+nix develop .#ci -c hack/compat-gen.sh   # needed before rbac_compat tests
 nix develop .#ci -c cargo test --all-targets --locked
 ```
 
 The CI fmt job runs on `dtolnay/rust-toolchain@stable` rather than Nix (see
 `.github/workflows/ci.yml`), so rustfmt there can be newer than the pinned one.
 
-`hack/rbac-compat-gen.sh` builds the Go oracle and writes generated test data
-to `target/rbac-compat/`. That output is never committed; rerun it after
-changing a world under `tests/rbac_compat/worlds/` or `tools/rbac-oracle/`.
+`hack/compat-gen.sh` builds the Go oracle and writes generated test data
+to `target/rbac-compat/` and `target/labels-compat/`. That output is never
+committed; rerun it after changing a world under `tests/rbac_compat/worlds/`
+or `tests/labels_compat/worlds/`, or `tools/k8s-oracle/`.
 Without it, `rbac_compat` fails rather than skips. Known gaps are tracked in
 `tests/rbac_compat/baseline.json`; `UPDATE_BASELINE=1 cargo test --test
 rbac_compat` rewrites it.

@@ -1,0 +1,584 @@
+# Each selector owner selects only the kinds and scope its controller lists:
+# a Service selects Pods in its namespace, not the Deployment, ReplicaSet or
+# ConfigMap carrying the same labels, and a PodDisruptionBudget that selects
+# by absence (NotIn) does not pick up Nodes, PersistentVolumes or
+# ClusterRoles. The Pod in namespace "0" sits where the aggregation owner
+# keeps its entry index. Generated from the label selector review's
+# fixture (gen.rb 1 2), then left as written.
+
+apiVersion: v1
+kind: Node
+metadata:
+  name: node-1
+  labels:
+    kubernetes.io/hostname: node-1
+    disk: ssd
+---
+apiVersion: v1
+kind: Node
+metadata:
+  name: node-2
+  labels:
+    kubernetes.io/hostname: node-2
+    type: fast
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-fast
+  labels:
+    type: fast
+spec:
+  capacity:
+    storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-slow
+  labels:
+    type: slow
+spec:
+  capacity:
+    storage: 1Gi
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agg-admin
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      example.com/aggregate-to-admin: 'true'
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: src-role
+  labels:
+    example.com/aggregate-to-admin: 'true'
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - get
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: '0'
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: zero-pod
+  namespace: '0'
+  labels:
+    example.com/aggregate-to-admin: 'true'
+spec:
+  containers: []
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-a-0
+  labels:
+    team: a
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-0
+  namespace: ns-a-0
+  labels:
+    app: web
+    tier: frontend
+    canary: 'true'
+spec:
+  containers: []
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-1
+  namespace: ns-a-0
+  labels:
+    app: web
+    tier: frontend
+spec:
+  containers: []
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-rs
+  namespace: ns-a-0
+  labels:
+    app: web
+spec:
+  selector:
+    matchLabels:
+      app: web
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: ns-a-0
+  labels:
+    app: web
+spec:
+  selector:
+    matchLabels:
+      app: web
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: ns-a-0
+  labels:
+    app: web
+spec:
+  selector:
+    app: web
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-config
+  namespace: ns-a-0
+  labels:
+    app: web
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: db-0
+  namespace: ns-a-0
+  labels:
+    app: db
+    tier: backend
+    canary: 'true'
+spec:
+  containers: []
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: db-1
+  namespace: ns-a-0
+  labels:
+    app: db
+    tier: backend
+spec:
+  containers: []
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: db-rs
+  namespace: ns-a-0
+  labels:
+    app: db
+spec:
+  selector:
+    matchLabels:
+      app: db
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db
+  namespace: ns-a-0
+  labels:
+    app: db
+spec:
+  selector:
+    matchLabels:
+      app: db
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  namespace: ns-a-0
+  labels:
+    app: db
+spec:
+  selector:
+    app: db
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-config
+  namespace: ns-a-0
+  labels:
+    app: db
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nolabel
+  namespace: ns-a-0
+spec:
+  containers: []
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fastpod
+  namespace: ns-a-0
+  labels:
+    type: fast
+spec:
+  containers: []
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: empty-sel
+  namespace: ns-a-0
+spec:
+  selector: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: external
+  namespace: ns-a-0
+spec:
+  type: ExternalName
+  externalName: x.example.com
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-notin-db
+  namespace: ns-a-0
+spec:
+  selector:
+    matchExpressions:
+    - key: app
+      operator: NotIn
+      values:
+      - db
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-all
+  namespace: ns-a-0
+spec:
+  selector: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-twoin
+  namespace: ns-a-0
+spec:
+  selector:
+    matchExpressions:
+    - key: app
+      operator: In
+      values:
+      - web
+      - db
+    - key: app
+      operator: In
+      values:
+      - db
+      - cache
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: ns-a-0
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web
+  namespace: ns-a-0
+spec:
+  podSelector:
+    matchLabels:
+      app: web
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          team: b
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: claim
+  namespace: ns-a-0
+spec:
+  selector:
+    matchLabels:
+      type: fast
+  accessModes:
+  - ReadWriteOnce
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ns-b-0
+  labels:
+    team: b
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-0
+  namespace: ns-b-0
+  labels:
+    app: web
+    tier: frontend
+    canary: 'true'
+spec:
+  containers: []
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-1
+  namespace: ns-b-0
+  labels:
+    app: web
+    tier: frontend
+spec:
+  containers: []
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: web-rs
+  namespace: ns-b-0
+  labels:
+    app: web
+spec:
+  selector:
+    matchLabels:
+      app: web
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: ns-b-0
+  labels:
+    app: web
+spec:
+  selector:
+    matchLabels:
+      app: web
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: ns-b-0
+  labels:
+    app: web
+spec:
+  selector:
+    app: web
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-config
+  namespace: ns-b-0
+  labels:
+    app: web
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: db-0
+  namespace: ns-b-0
+  labels:
+    app: db
+    tier: backend
+    canary: 'true'
+spec:
+  containers: []
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: db-1
+  namespace: ns-b-0
+  labels:
+    app: db
+    tier: backend
+spec:
+  containers: []
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: db-rs
+  namespace: ns-b-0
+  labels:
+    app: db
+spec:
+  selector:
+    matchLabels:
+      app: db
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db
+  namespace: ns-b-0
+  labels:
+    app: db
+spec:
+  selector:
+    matchLabels:
+      app: db
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  namespace: ns-b-0
+  labels:
+    app: db
+spec:
+  selector:
+    app: db
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-config
+  namespace: ns-b-0
+  labels:
+    app: db
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nolabel
+  namespace: ns-b-0
+spec:
+  containers: []
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fastpod
+  namespace: ns-b-0
+  labels:
+    type: fast
+spec:
+  containers: []
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: empty-sel
+  namespace: ns-b-0
+spec:
+  selector: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: external
+  namespace: ns-b-0
+spec:
+  type: ExternalName
+  externalName: x.example.com
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-notin-db
+  namespace: ns-b-0
+spec:
+  selector:
+    matchExpressions:
+    - key: app
+      operator: NotIn
+      values:
+      - db
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-all
+  namespace: ns-b-0
+spec:
+  selector: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-twoin
+  namespace: ns-b-0
+spec:
+  selector:
+    matchExpressions:
+    - key: app
+      operator: In
+      values:
+      - web
+      - db
+    - key: app
+      operator: In
+      values:
+      - db
+      - cache
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: ns-b-0
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web
+  namespace: ns-b-0
+spec:
+  podSelector:
+    matchLabels:
+      app: web
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          team: b
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: claim
+  namespace: ns-b-0
+spec:
+  selector:
+    matchLabels:
+      type: fast
+  accessModes:
+  - ReadWriteOnce

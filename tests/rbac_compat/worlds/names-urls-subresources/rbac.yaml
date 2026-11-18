@@ -1,7 +1,7 @@
 # Matching edge cases in resourceNames, nonResourceURLs and resources, where
 # the obvious reading of a rule is not what the authorizer does. Each object
 # says which case it covers; TestNamesURLsSubresourcesDecisions in
-# tools/rbac-oracle pins the decisions.
+# tools/k8s-oracle pins the decisions.
 
 # resourceNames: [] is present but empty, and grants every name, the same
 # as leaving the field out.

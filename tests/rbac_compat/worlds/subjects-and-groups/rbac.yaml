@@ -1,6 +1,6 @@
 # Who a binding applies to. Users and groups are separate namespaces, and
 # service accounts get groups from their username alone, with no binding
-# naming them. TestSubjectsAndGroupsDecisions in tools/rbac-oracle pins the
+# naming them. TestSubjectsAndGroupsDecisions in tools/k8s-oracle pins the
 # decisions.
 
 apiVersion: rbac.authorization.k8s.io/v1

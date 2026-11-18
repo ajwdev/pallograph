@@ -1,0 +1,82 @@
+# Each matchExpressions entry is its own requirement and a selector needs
+# all of them (metav1.LabelSelectorAsSelector), so two In expressions on one
+# key select only the values both allow. NotIn and != also select objects
+# without the key; DoesNotExist selects only those. queries.ndjson runs the
+# same shapes through kubectl syntax (labels.Parse), like k8s::match.
+
+apiVersion: v1
+kind: Namespace
+metadata: {name: exprs}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: web, namespace: exprs, labels: {app: web, tier: frontend}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: db, namespace: exprs, labels: {app: db, tier: backend}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: cache, namespace: exprs, labels: {app: cache, tier: backend, canary: "true"}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: nolabel, namespace: exprs}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: web-config, namespace: exprs, labels: {app: web}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: two-in, namespace: exprs}
+spec:
+  selector:
+    matchExpressions:
+    - {key: app, operator: In, values: [web, db]}
+    - {key: app, operator: In, values: [db, cache]}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: in-and-label, namespace: exprs}
+spec:
+  selector:
+    matchLabels: {tier: backend}
+    matchExpressions:
+    - {key: app, operator: In, values: [web, cache]}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: two-notin, namespace: exprs}
+spec:
+  selector:
+    matchExpressions:
+    - {key: app, operator: NotIn, values: [web]}
+    - {key: app, operator: NotIn, values: [db]}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: exists, namespace: exprs}
+spec:
+  selector:
+    matchExpressions:
+    - {key: tier, operator: Exists}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: does-not-exist, namespace: exprs}
+spec:
+  selector:
+    matchExpressions:
+    - {key: canary, operator: DoesNotExist}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: exists-and-not, namespace: exprs}
+spec:
+  selector:
+    matchExpressions:
+    - {key: tier, operator: Exists}
+    - {key: canary, operator: DoesNotExist}
+    - {key: app, operator: NotIn, values: [db]}

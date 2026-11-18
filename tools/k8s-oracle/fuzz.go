@@ -239,7 +239,7 @@ func GenerateWorlds(dir string, seed uint64, count int) ([]string, error) {
 		}
 
 		var manifest bytes.Buffer
-		fmt.Fprintf(&manifest, "# Random world %d from rbac-oracle gen-worlds -seed %d.\n", index, seed)
+		fmt.Fprintf(&manifest, "# Random world %d from k8s-oracle rbac gen-worlds -seed %d.\n", index, seed)
 		for i, object := range fuzzWorld(random) {
 			document, err := marshalFuzzObject(object)
 			if err != nil {
