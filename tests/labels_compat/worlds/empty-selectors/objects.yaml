@@ -1,0 +1,109 @@
+# What a selector without requirements selects depends on its type. A
+# metav1.LabelSelector that is {} selects everything in scope and a nil one
+# nothing (LabelSelectorAsSelector): a policy/v1 PodDisruptionBudget, a
+# NetworkPolicy podSelector and an aggregation clusterRoleSelectors entry.
+# policy/v1beta1 PodDisruptionBudgets selected nothing with {}, and the API
+# server keeps that. A Service's selector is a plain map, stored without
+# an empty one, so {} selects no Pods.
+
+apiVersion: v1
+kind: Namespace
+metadata: {name: empty}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: web, namespace: empty, labels: {app: web}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: nolabel, namespace: empty}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: elsewhere}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: other, namespace: elsewhere, labels: {app: web}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: all, namespace: empty}
+spec:
+  selector: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: all-match-labels, namespace: empty}
+spec:
+  selector: {matchLabels: {}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: no-selector, namespace: empty}
+spec:
+  minAvailable: 1
+---
+apiVersion: policy/v1beta1
+kind: PodDisruptionBudget
+metadata: {name: beta-all, namespace: empty}
+spec:
+  selector: {}
+---
+apiVersion: policy/v1beta1
+kind: PodDisruptionBudget
+metadata: {name: beta-web, namespace: empty}
+spec:
+  selector: {matchLabels: {app: web}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: empty}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-web, namespace: empty}
+spec:
+  podSelector: {matchLabels: {app: web}}
+  ingress:
+  - from:
+    - namespaceSelector: {matchLabels: {team: b}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: empty-selector, namespace: empty}
+spec:
+  selector: {}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: no-selector, namespace: empty}
+spec:
+  type: ExternalName
+  externalName: x.example.com
+---
+apiVersion: v1
+kind: Service
+metadata: {name: key-named-matchlabels, namespace: empty}
+spec:
+  selector: {matchLabels: web}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: aggregate-everything}
+aggregationRule:
+  clusterRoleSelectors:
+  - {}
+  - matchLabels: {never: matches}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: plain, labels: {any: label}}
+rules: []
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: odd-label-key, namespace: empty, labels: {matchLabels: web}}

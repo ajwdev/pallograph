@@ -1,0 +1,110 @@
+# Workload controllers select what they own: a Deployment its ReplicaSets,
+# a ReplicaSet, ReplicationController or Job its Pods, and a StatefulSet
+# or DaemonSet its Pods and the ControllerRevisions holding its history.
+# None of them select each other, or a ConfigMap with the same labels.
+
+apiVersion: v1
+kind: Namespace
+metadata: {name: apps}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: web, namespace: apps, labels: {app: web}}
+spec:
+  selector: {matchLabels: {app: web}}
+  template:
+    metadata: {labels: {app: web}}
+    spec: {containers: [{name: web, image: web}]}
+---
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata: {name: web-5d8f, namespace: apps, labels: {app: web, pod-template-hash: 5d8f}}
+spec:
+  selector: {matchLabels: {app: web, pod-template-hash: 5d8f}}
+  template:
+    metadata: {labels: {app: web, pod-template-hash: 5d8f}}
+    spec: {containers: [{name: web, image: web}]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: web-5d8f-a, namespace: apps, labels: {app: web, pod-template-hash: 5d8f}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: web-old, namespace: apps, labels: {app: web, pod-template-hash: 1a2b}}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: db, namespace: apps, labels: {app: db}}
+spec:
+  serviceName: db
+  selector: {matchLabels: {app: db}}
+  template:
+    metadata: {labels: {app: db}}
+    spec: {containers: [{name: db, image: db}]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: db-0, namespace: apps, labels: {app: db}}
+---
+apiVersion: apps/v1
+kind: ControllerRevision
+metadata: {name: db-7c9d, namespace: apps, labels: {app: db}}
+revision: 1
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: agent, namespace: apps, labels: {app: agent}}
+spec:
+  selector: {matchLabels: {app: agent}}
+  template:
+    metadata: {labels: {app: agent}}
+    spec: {containers: [{name: agent, image: agent}]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: agent-x, namespace: apps, labels: {app: agent}}
+---
+apiVersion: apps/v1
+kind: ControllerRevision
+metadata: {name: agent-1f2e, namespace: apps, labels: {app: agent}}
+revision: 1
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: migrate, namespace: apps}
+spec:
+  manualSelector: true
+  selector: {matchLabels: {job: migrate}}
+  template:
+    metadata: {labels: {job: migrate}}
+    spec:
+      restartPolicy: Never
+      containers: [{name: migrate, image: migrate}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: migrate-q7, namespace: apps, labels: {job: migrate}}
+---
+apiVersion: v1
+kind: ReplicationController
+metadata: {name: legacy, namespace: apps}
+spec:
+  selector: {app: legacy}
+  template:
+    metadata: {labels: {app: legacy}}
+    spec: {containers: [{name: legacy, image: legacy}]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: legacy-a, namespace: apps, labels: {app: legacy}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: web-config, namespace: apps, labels: {app: web}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: web, namespace: apps}
+spec:
+  selector: {app: web}

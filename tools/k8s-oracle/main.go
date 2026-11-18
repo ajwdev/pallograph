@@ -4,6 +4,9 @@
 //   - rbac: authorization requests with the kube-apiserver RBAC
 //     authorizer, and impersonation and RBAC write questions with the API
 //     server code around it.
+//   - labels: which objects each label selector selects, with the
+//     apimachinery selector code and the scope each controller lists
+//     objects in.
 //
 // A world is a directory of manifests. Subcommands:
 //
@@ -11,6 +14,7 @@
 //	k8s-oracle rbac gen [-limit N] [-seed S] <world>...    writes <world>/requests.ndjson
 //	k8s-oracle rbac eval <world>...                        writes <world>/oracle.ndjson
 //	k8s-oracle rbac kind-verify [-context C] <world>...    checks the oracle against a live API server
+//	k8s-oracle labels eval <world>...                      writes <world>/selections.ndjson and query-results.ndjson
 package main
 
 import (
@@ -30,6 +34,8 @@ func main() {
 	switch os.Args[1] {
 	case "rbac":
 		err = runRBAC(os.Args[2], os.Args[3:])
+	case "labels":
+		err = runLabels(os.Args[2], os.Args[3:])
 	default:
 		usage()
 	}
@@ -58,7 +64,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage: k8s-oracle rbac gen-worlds -seed S -count N <dir>
        k8s-oracle rbac gen [-limit N] [-seed S] <world>...
        k8s-oracle rbac eval <world>...
-       k8s-oracle rbac kind-verify [-context C] [-sample N] <world>...`)
+       k8s-oracle rbac kind-verify [-context C] [-sample N] <world>...
+       k8s-oracle labels eval <world>...`)
 	os.Exit(2)
 }
 

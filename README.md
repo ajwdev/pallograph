@@ -286,6 +286,21 @@ for a cluster the controller has settled. Roles that aggregate a cycle role
 are still recomputed and get its stored rules. The
 `aggregation-cycle-own-rules` world pins these shapes.
 
+### Label selector oracle
+
+`k8s-oracle labels eval` gives, for each world under
+`tests/labels_compat/worlds/`, which objects each label selector selects
+and what each kubectl-style query in its `queries.ndjson` matches. It reads
+the objects the way the API server stores them (defaulted, and without
+empty maps), evaluates selectors with apimachinery
+(`metav1.LabelSelectorAsSelector`, `labels.SelectorFromSet`,
+`labels.Parse`), and evaluates each one against the kinds and scope its
+controller lists: a Service against Pods in its namespace, a Deployment
+against its ReplicaSets, a PersistentVolumeClaim against
+PersistentVolumes. That table is restated from the controllers, not
+imported. `hack/compat-gen.sh` writes the results to
+`target/labels-compat/`.
+
 ## Development
 
 CI runs inside the Nix shell, so run checks the same way:

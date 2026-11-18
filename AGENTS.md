@@ -78,7 +78,8 @@ Only the non-obvious parts:
 - `tools/k8s-oracle/` - Go program answering questions with upstream k8s
   code, as the oracle for the compatibility tests. `rbac` wraps RBAC
   authorization, the impersonation filters and the RBAC registry's
-  escalation checks (for `tests/rbac_compat.rs`).
+  escalation checks (for `tests/rbac_compat.rs`); `labels` evaluates label
+  selectors with apimachinery, over the worlds in `tests/labels_compat/`.
 - `notes/` is gitignored scratch space. Don't rely on it existing.
 
 ## Building and testing
@@ -97,8 +98,9 @@ The CI fmt job runs on `dtolnay/rust-toolchain@stable` rather than Nix (see
 `.github/workflows/ci.yml`), so rustfmt there can be newer than the pinned one.
 
 `hack/compat-gen.sh` builds the Go oracle and writes generated test data
-to `target/rbac-compat/`. That output is never committed; rerun it after
-changing a world under `tests/rbac_compat/worlds/` or `tools/k8s-oracle/`.
+to `target/rbac-compat/` and `target/labels-compat/`. That output is never
+committed; rerun it after changing a world under `tests/rbac_compat/worlds/`
+or `tests/labels_compat/worlds/`, or `tools/k8s-oracle/`.
 Without it, `rbac_compat` fails rather than skips. Known gaps are tracked in
 `tests/rbac_compat/baseline.json`; `UPDATE_BASELINE=1 cargo test --test
 rbac_compat` rewrites it.
