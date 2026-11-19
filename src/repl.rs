@@ -17,6 +17,7 @@ use crate::api::{
     At, Core, DeltaSummary, Derivation, Fact, KubeObject, LocalCore, ProvenanceTree, ReachesQuery,
     RelationInfo, Rows,
 };
+use crate::edb::watch::WatchStatus;
 use crate::edb::{FactSource, K8sManifestsSource, ShellSource};
 use crate::engine::{ApplySummary, EvalStore, RelationDoc};
 use crate::load;
@@ -25,7 +26,6 @@ use crate::rbac::diff::AccessDiff;
 use crate::smt;
 use crate::snapshot::FrozenState;
 use crate::source::{parse_ground_tuple, split_two_atoms};
-use crate::watch::WatchStatus;
 
 struct ReplHelper {
     path_completer: FilenameCompleter,

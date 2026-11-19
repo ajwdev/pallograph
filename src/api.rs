@@ -20,7 +20,7 @@ use tracing::debug;
 
 use crate::dd::session::{LazyProvenance, NegatedFact, ProofNode, ProofTree};
 use crate::dd::value::Row;
-use crate::delta::diff_object_sides;
+use crate::edb::delta::diff_object_sides;
 use crate::edb::{ObjectFacts, ObjectKey, expression_facts, single_object_facts};
 use crate::engine::{ApplySummary, Change, Engine, EvalStore, RelationDoc};
 use crate::query::{
