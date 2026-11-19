@@ -39,74 +39,219 @@ struct ReplHelper {
     relations: Vec<String>,
 }
 
-/// Completable command paths: root verbs, subsystem namespaces, and their
-/// subcommands. Kept in step with the dispatcher by hand; see `print_help`.
-fn command_completions() -> &'static [&'static str] {
-    &[
-        // Root verbs.
-        "show",
-        "why",
-        "query",
-        "explain",
-        "define",
-        "source",
-        "load",
-        "snapshot",
-        "rollback",
-        "diff",
-        "diff-relation",
-        "use",
-        "format",
-        "pretty",
-        "smtlib",
-        "alias",
-        "unalias",
-        "help",
-        "quit",
-        // Subsystem namespaces (a bare `rbac` completes to `rbac::`).
-        "rbac::",
-        "sched::",
-        "k8s::",
-        // Subsystem subcommands.
-        "rbac::access",
-        "rbac::reaches",
-        "rbac::cluster-admin",
-        "rbac::isolation",
-        "rbac::diff",
-        "sched::node-selector",
-        "sched::anti-affinity",
-        "sched::karpenter",
-        "k8s::load",
-        "k8s::match",
-        "k8s::match-all",
-        "k8s::apply-delta",
-    ]
+/// One REPL command path and the metadata the completer, the usage hints, and
+/// the detailed-help topics all read, so those three cannot drift from each
+/// other. The prose in `print_help` is maintained separately; this is the
+/// machine-read list.
+struct CommandSpec {
+    /// The path without a leading `::` (e.g. `diff`, `rbac::reaches`).
+    path: &'static str,
+    /// One-line usage shown when the command is invoked with no arguments (so
+    /// a bare `diff` prints how to use it). `None` for commands that take none
+    /// and for the `rbac::`/`sched::` checks, which parse their own arguments.
+    usage: Option<&'static str>,
+    /// Whether `help <path>` prints a detailed manpage (see
+    /// `print_command_help`).
+    manpage: bool,
 }
 
-/// Usage text for commands that take arguments, shown when one is invoked with
-/// no arguments (so a bare `diff` prints how to use it instead of "unknown
-/// command"). Subsystem rbac::/sched:: commands print their own usage via
-/// `rbac_command` / `sched_command`, so they are not listed here.
-fn command_usage(head: &str) -> Option<&'static str> {
-    Some(match head {
-        "why" => "why <pred>(<args>...)",
-        "query" => "query <body>   (or ?- <body>)",
-        "explain" => "explain <body>   (plan a query without running it)",
-        "define" => "define <rule>.",
-        "source" => "source <src>",
-        "load" => "load <relation> <source>   (source is a file path or ! <cmd>)",
-        "snapshot" => "snapshot <name>",
-        "diff" => "diff <name>   or   diff <name1> <name2>",
-        "diff-relation" => "diff-relation <name> [name2] <relation>",
-        "smtlib" => "smtlib <relation> [relation ...]",
-        "k8s::load" => "k8s::load <src>   (a dir, .json file, or ! <kubectl args>)",
-        "k8s::match" => "k8s::match <Kind> <namespace> <selector>",
-        "k8s::match-all" => "k8s::match-all <namespace> <selector>",
-        "k8s::apply-delta" => {
-            "k8s::apply-delta <base> <head>   (a dir, .json file, or - for an empty side)"
+/// Every command path: root verbs first (in display order), then the subsystem
+/// subcommands grouped by namespace. `command_completions` derives the
+/// namespace prefixes (`rbac::`, ...) from the `::` paths, so a new subcommand
+/// needs only a row here.
+const COMMANDS: &[CommandSpec] = &[
+    // Root verbs.
+    CommandSpec {
+        path: "show",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "why",
+        usage: Some("why <pred>(<args>...)"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "query",
+        usage: Some("query <body>   (or ?- <body>)"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "explain",
+        usage: Some("explain <body>   (plan a query without running it)"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "define",
+        usage: Some("define <rule>."),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "source",
+        usage: Some("source <src>"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "load",
+        usage: Some("load <relation> <source>   (source is a file path or ! <cmd>)"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "snapshot",
+        usage: Some("snapshot <name>"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "rollback",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "diff",
+        usage: Some("diff <name>   or   diff <name1> <name2>"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "diff-relation",
+        usage: Some("diff-relation <name> [name2] <relation>"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "use",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "format",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "pretty",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "smtlib",
+        usage: Some("smtlib <relation> [relation ...]"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "alias",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "unalias",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "help",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "quit",
+        usage: None,
+        manpage: false,
+    },
+    // rbac:: subsystem (checks parse their own arguments, so no usage here).
+    CommandSpec {
+        path: "rbac::access",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "rbac::reaches",
+        usage: None,
+        manpage: true,
+    },
+    CommandSpec {
+        path: "rbac::cluster-admin",
+        usage: None,
+        manpage: true,
+    },
+    CommandSpec {
+        path: "rbac::isolation",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "rbac::diff",
+        usage: None,
+        manpage: true,
+    },
+    // sched:: subsystem.
+    CommandSpec {
+        path: "sched::node-selector",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "sched::anti-affinity",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "sched::karpenter",
+        usage: None,
+        manpage: false,
+    },
+    // k8s:: subsystem.
+    CommandSpec {
+        path: "k8s::load",
+        usage: Some("k8s::load <src>   (a dir, .json file, or ! <kubectl args>)"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "k8s::match",
+        usage: Some("k8s::match <Kind> <namespace> <selector>"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "k8s::match-all",
+        usage: Some("k8s::match-all <namespace> <selector>"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "k8s::apply-delta",
+        usage: Some("k8s::apply-delta <base> <head>   (a dir, .json file, or - for an empty side)"),
+        manpage: false,
+    },
+];
+
+/// Completable command paths derived from [`COMMANDS`]: root verbs, then the
+/// subsystem namespaces (so a bare `rbac` completes to `rbac::`), then the
+/// subsystem subcommands. Order is load-bearing for the completion tests.
+fn command_completions() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = COMMANDS
+        .iter()
+        .map(|c| c.path)
+        .filter(|p| !p.contains("::"))
+        .collect();
+    // Subsystem namespaces, in first-appearance order among the `::` paths.
+    let mut namespaces: Vec<&'static str> = Vec::new();
+    for path in COMMANDS.iter().map(|c| c.path) {
+        if let Some(index) = path.find("::") {
+            let namespace = &path[..index + 2];
+            if !namespaces.contains(&namespace) {
+                namespaces.push(namespace);
+            }
         }
-        _ => return None,
-    })
+    }
+    out.extend(namespaces);
+    out.extend(COMMANDS.iter().map(|c| c.path).filter(|p| p.contains("::")));
+    out
+}
+
+/// Usage text for a command invoked with no arguments, or `None` when it takes
+/// none. Read from [`COMMANDS`].
+fn command_usage(head: &str) -> Option<&'static str> {
+    COMMANDS
+        .iter()
+        .find(|c| c.path == head)
+        .and_then(|c| c.usage)
 }
 
 fn completion_pair(s: String) -> Pair {
@@ -117,9 +262,14 @@ fn completion_pair(s: String) -> Pair {
 }
 
 /// The commands `help <command>` documents in detail (those `print_command_help`
-/// has a manpage for), offered as completions for its argument.
-fn help_topics() -> &'static [&'static str] {
-    &["rbac::reaches", "rbac::cluster-admin", "rbac::diff"]
+/// has a manpage for), offered as completions for its argument. Derived from
+/// the `manpage` flag in [`COMMANDS`].
+fn help_topics() -> Vec<&'static str> {
+    COMMANDS
+        .iter()
+        .filter(|c| c.manpage)
+        .map(|c| c.path)
+        .collect()
 }
 
 /// What to complete for the text before the cursor. The file cases need
@@ -3484,6 +3634,30 @@ mod completion_tests {
             CompletionPlan::Words(_, w) => w,
             other => panic!("expected Words, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn command_table_backs_the_derived_lists() {
+        // Completions cover every table path plus the three namespace
+        // prefixes, so nothing added to COMMANDS is left uncompletable.
+        let completions = command_completions();
+        for spec in COMMANDS {
+            assert!(
+                completions.contains(&spec.path),
+                "{} missing from completions",
+                spec.path
+            );
+        }
+        for namespace in ["rbac::", "sched::", "k8s::"] {
+            assert!(completions.contains(&namespace), "{namespace} missing");
+        }
+        // Detailed-help topics are exactly the manpage-flagged commands.
+        let flagged: Vec<&str> = COMMANDS
+            .iter()
+            .filter(|c| c.manpage)
+            .map(|c| c.path)
+            .collect();
+        assert_eq!(help_topics(), flagged);
     }
 
     #[test]
