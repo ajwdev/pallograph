@@ -2240,25 +2240,27 @@ fn writer_technique_lines(paths: &[&rbac::AccessPath], verbose: bool) -> SelfGra
     let count = |n: usize| paint_dim(&n.to_string());
     let more = paint_dim("(--verbose)");
     // Paths matching a (mechanism, creates_binding, creates_role) shape.
-    let pick =
-        |mechanism: &str, creates_binding: bool, creates_role: bool| -> Vec<&rbac::AccessPath> {
-            paths
-                .iter()
-                .copied()
-                .filter(|p| {
-                    p.write_action().map(|(_, m)| m) == Some(mechanism)
-                        && p.creates_binding() == creates_binding
-                        && p.creates_role() == creates_role
-                })
-                .collect()
-        };
+    let pick = |mechanism: rbac::WriteMechanism,
+                creates_binding: bool,
+                creates_role: bool|
+     -> Vec<&rbac::AccessPath> {
+        paths
+            .iter()
+            .copied()
+            .filter(|p| {
+                p.write_action().map(|(_, m)| m) == Some(mechanism)
+                    && p.creates_binding() == creates_binding
+                    && p.creates_role() == creates_role
+            })
+            .collect()
+    };
     let mut bind = Vec::new();
     let mut escalate = Vec::new();
 
     // A. Create a new role with any rules and bind it (escalate): full access.
-    let create_role = pick("escalate", true, true);
+    let create_role = pick(rbac::WriteMechanism::Escalate, true, true);
     let has_create_role = !create_role.is_empty();
-    let mut seen: Vec<(&str, String, &str)> = Vec::new();
+    let mut seen: Vec<(rbac::BindingKind, String, rbac::RoleKind)> = Vec::new();
     for p in &create_role {
         let shape = (p.binding_kind, p.binding_namespace.clone(), p.role_kind);
         if seen.contains(&shape) {
@@ -2273,8 +2275,9 @@ fn writer_technique_lines(paths: &[&rbac::AccessPath], verbose: bool) -> SelfGra
     }
 
     // B. Bind an existing role that already grants it, via a new binding.
-    let mut bind_new: BTreeMap<(&str, String, &str), Vec<&str>> = BTreeMap::new();
-    for p in pick("bind", true, false) {
+    let mut bind_new: BTreeMap<(rbac::BindingKind, String, rbac::RoleKind), Vec<&str>> =
+        BTreeMap::new();
+    for p in pick(rbac::WriteMechanism::Bind, true, false) {
         bind_new
             .entry((p.binding_kind, p.binding_namespace.clone(), p.role_kind))
             .or_default()
@@ -2299,8 +2302,9 @@ fn writer_technique_lines(paths: &[&rbac::AccessPath], verbose: bool) -> SelfGra
     }
 
     // C. Add itself as a subject to an existing binding that already grants it.
-    let mut add_existing: BTreeMap<(&str, String), BTreeMap<String, Vec<&str>>> = BTreeMap::new();
-    for p in pick("bind", false, false) {
+    let mut add_existing: BTreeMap<(rbac::BindingKind, String), BTreeMap<String, Vec<&str>>> =
+        BTreeMap::new();
+    for p in pick(rbac::WriteMechanism::Bind, false, false) {
         add_existing
             .entry((p.binding_kind, p.binding_namespace.clone()))
             .or_default()
@@ -2330,8 +2334,9 @@ fn writer_technique_lines(paths: &[&rbac::AccessPath], verbose: bool) -> SelfGra
 
     // D. Bind an existing role via a new binding using escalate (can also
     //    rewrite it). Subsumed by A when A is present.
-    let mut escalate_new: BTreeMap<(&str, String, &str), Vec<&str>> = BTreeMap::new();
-    for p in pick("escalate", true, false) {
+    let mut escalate_new: BTreeMap<(rbac::BindingKind, String, rbac::RoleKind), Vec<&str>> =
+        BTreeMap::new();
+    for p in pick(rbac::WriteMechanism::Escalate, true, false) {
         escalate_new
             .entry((p.binding_kind, p.binding_namespace.clone(), p.role_kind))
             .or_default()
@@ -2359,8 +2364,8 @@ fn writer_technique_lines(paths: &[&rbac::AccessPath], verbose: bool) -> SelfGra
     }
 
     // E. Rewrite an existing role it is already bound to (escalate in place).
-    let mut rewrite: BTreeMap<(String, &str), Vec<&str>> = BTreeMap::new();
-    for p in pick("escalate", false, false) {
+    let mut rewrite: BTreeMap<(String, rbac::RoleKind), Vec<&str>> = BTreeMap::new();
+    for p in pick(rbac::WriteMechanism::Escalate, false, false) {
         rewrite
             .entry((p.binding_namespace.clone(), p.role_kind))
             .or_default()
@@ -3748,9 +3753,9 @@ mod query_helper_tests {
 #[cfg(test)]
 mod binding_format_tests {
     use super::fmt_binding;
-    use crate::k8s::rbac::AccessPath;
+    use crate::k8s::rbac::{AccessPath, BindingKind, RoleKind};
 
-    fn path(binding_kind: &'static str, ns: &str, role_kind: &'static str) -> AccessPath {
+    fn path(binding_kind: BindingKind, ns: &str, role_kind: RoleKind) -> AccessPath {
         AccessPath {
             binding_kind,
             binding_namespace: ns.into(),
@@ -3763,7 +3768,7 @@ mod binding_format_tests {
 
     #[test]
     fn cluster_scoped_binding_has_no_leading_slash() {
-        let p = path("ClusterRoleBinding", "", "ClusterRole");
+        let p = path(BindingKind::ClusterRoleBinding, "", RoleKind::ClusterRole);
         assert_eq!(
             fmt_binding(&p),
             "ClusterRoleBinding \"b\" → ClusterRole \"r\""
@@ -3772,7 +3777,7 @@ mod binding_format_tests {
 
     #[test]
     fn namespaced_binding_is_prefixed_with_its_namespace() {
-        let p = path("RoleBinding", "kube-system", "Role");
+        let p = path(BindingKind::RoleBinding, "kube-system", RoleKind::Role);
         assert_eq!(
             fmt_binding(&p),
             "RoleBinding \"kube-system/b\" → Role \"r\""
@@ -3783,16 +3788,16 @@ mod binding_format_tests {
 #[cfg(test)]
 mod write_summary_tests {
     use super::writer_technique_lines;
-    use crate::k8s::rbac::{AccessPath, PathKind, Subject};
+    use crate::k8s::rbac::{AccessPath, BindingKind, PathKind, RoleKind, Subject};
 
     /// Build a cluster-scoped write path. `binding`/`role` of "(new)" mark a
     /// minted object, as `collect_rbac_write_paths` emits them.
     fn write(binding: &str, role: &str, mechanism: &str) -> AccessPath {
         AccessPath {
-            binding_kind: "ClusterRoleBinding",
+            binding_kind: BindingKind::ClusterRoleBinding,
             binding_namespace: String::new(),
             binding_name: binding.into(),
-            role_kind: "ClusterRole",
+            role_kind: RoleKind::ClusterRole,
             role_name: role.into(),
             hops: vec![(Subject::username("w"), mechanism.into())],
         }
@@ -3801,10 +3806,10 @@ mod write_summary_tests {
     #[test]
     fn kind_follows_the_terminal_hop() {
         let direct = AccessPath {
-            binding_kind: "ClusterRoleBinding",
+            binding_kind: BindingKind::ClusterRoleBinding,
             binding_namespace: String::new(),
             binding_name: "b".into(),
-            role_kind: "ClusterRole",
+            role_kind: RoleKind::ClusterRole,
             role_name: "cluster-admin".into(),
             hops: vec![],
         };

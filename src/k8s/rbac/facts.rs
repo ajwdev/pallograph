@@ -31,6 +31,8 @@ use std::sync::OnceLock;
 
 use mangle_common::Value;
 
+use crate::k8s::rbac::{RoleKind, WriteMechanism};
+
 use super::PermissionEntry;
 
 /// Binding subject kinds, the `/user`, `/group` and `/serviceaccount` name
@@ -188,8 +190,15 @@ impl fmt::Display for SubjectDisplay<'_> {
     }
 }
 
-/// (namespace, apigroup, resource, verb) of one grant, ResourceName dropped.
-pub type Permission = (String, String, String, String);
+/// One grant, ResourceName dropped: a resource permission scoped to a
+/// namespace (empty for cluster-wide).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Permission {
+    pub api_group: String,
+    pub resource: String,
+    pub namespace: String,
+    pub verb: String,
+}
 
 /// A permission entry's namespace covers a queried one when it is cluster-wide
 /// (""), equal, or "*" and the query names a namespace. "*" is every
@@ -210,29 +219,29 @@ pub fn value_covers(entry: &str, query: &str) -> bool {
 
 /// `granted` covers `query` in every field.
 pub fn grant_covers(granted: &Permission, query: &Permission) -> bool {
-    ns_covers(&granted.0, &query.0)
-        && value_covers(&granted.1, &query.1)
-        && value_covers(&granted.2, &query.2)
-        && value_covers(&granted.3, &query.3)
+    ns_covers(&granted.namespace, &query.namespace)
+        && value_covers(&granted.api_group, &query.api_group)
+        && value_covers(&granted.resource, &query.resource)
+        && value_covers(&granted.verb, &query.verb)
 }
 
 /// A Role is keyed by ("Role", namespace, name); a ClusterRole by
 /// ("ClusterRole", "", name).
-pub type RoleKey = (&'static str, String, String);
+pub type RoleKey = (RoleKind, String, String);
 
 /// A role a binding subject can grant itself by writing RBAC objects
 /// (`rbac_write_binding` in rules/rbac_write.mg).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RbacWrite {
-    /// "bind" or "escalate", the verb that lets the write through.
-    pub mechanism: String,
+    /// The verb that lets the write through.
+    pub mechanism: WriteMechanism,
     /// Where the role applies: "" cluster-wide (a ClusterRoleBinding), a
     /// namespace, or "*" for a RoleBinding in every namespace.
     pub namespace: String,
     /// The existing binding used, or empty for a new one.
     pub binding: String,
     /// "Role" or "ClusterRole".
-    pub role_kind: &'static str,
+    pub role_kind: RoleKind,
     /// The role, or empty for a new one.
     pub role: String,
 }
@@ -241,28 +250,26 @@ impl RbacWrite {
     /// The permissions this write grants: every permission for escalate,
     /// else the role's, in `namespace`.
     pub fn permissions(&self, role_rules: &RoleRules) -> Vec<Permission> {
-        if self.mechanism == "escalate" {
-            return vec![(
-                self.namespace.clone(),
-                "*".to_string(),
-                "*".to_string(),
-                "*".to_string(),
-            )];
+        if self.mechanism == WriteMechanism::Escalate {
+            return vec![Permission {
+                namespace: self.namespace.clone(),
+                api_group: "*".to_string(),
+                resource: "*".to_string(),
+                verb: "*".to_string(),
+            }];
         }
-        let role_namespace = if self.role_kind == "Role" {
+        let role_namespace = if self.role_kind == RoleKind::Role {
             self.namespace.clone()
         } else {
             String::new()
         };
         role_rules
             .permissions_of(&(self.role_kind, role_namespace, self.role.clone()))
-            .map(|(api_group, resource, verb)| {
-                (
-                    self.namespace.clone(),
-                    api_group.clone(),
-                    resource.clone(),
-                    verb.clone(),
-                )
+            .map(|(api_group, resource, verb)| Permission {
+                namespace: self.namespace.clone(),
+                api_group: api_group.clone(),
+                resource: resource.clone(),
+                verb: verb.clone(),
             })
             .collect()
     }
@@ -332,19 +339,25 @@ pub fn parse_rbac_write_binding(relation: &str, rows: &[Vec<Value>]) -> Vec<(Wri
         .into_iter()
         .filter_map(
             |(writer, [mechanism, namespace, binding, role_kind, role])| {
-                let role_kind = match role_kind.as_str() {
-                    "Role" => "Role",
-                    "ClusterRole" => "ClusterRole",
-                    _ => {
-                        unexpected_row(
-                            relation,
-                            &[
-                                Value::String(writer.subject.name.clone()),
-                                Value::String(role_kind),
-                            ],
-                        );
-                        return None;
-                    }
+                let Some(mechanism) = WriteMechanism::from_label(&mechanism) else {
+                    unexpected_row(
+                        relation,
+                        &[
+                            Value::String(writer.subject.name.clone()),
+                            Value::String(mechanism),
+                        ],
+                    );
+                    return None;
+                };
+                let Some(role_kind) = RoleKind::from_name(&role_kind) else {
+                    unexpected_row(
+                        relation,
+                        &[
+                            Value::String(writer.subject.name.clone()),
+                            Value::String(role_kind),
+                        ],
+                    );
+                    return None;
                 };
                 Some((
                     writer,
@@ -398,7 +411,7 @@ impl RoleRules {
         for row in scan("role_rule") {
             match row.as_slice() {
                 [Value::String(namespace), Value::String(role), rule] => {
-                    add(("Role", namespace.clone(), role.clone()), rule)
+                    add((RoleKind::Role, namespace.clone(), role.clone()), rule)
                 }
                 _ => unexpected_row("role_rule", &row),
             }
@@ -406,7 +419,7 @@ impl RoleRules {
         for row in scan("clusterrole_rule") {
             match row.as_slice() {
                 [Value::String(role), rule] => {
-                    add(("ClusterRole", String::new(), role.clone()), rule)
+                    add((RoleKind::ClusterRole, String::new(), role.clone()), rule)
                 }
                 _ => unexpected_row("clusterrole_rule", &row),
             }
@@ -461,12 +474,12 @@ pub fn parse_direct_perm(rows: &[Vec<Value>]) -> Vec<(Subject, Permission)> {
                 ] => (|| {
                     Some((
                         Subject::new(SubjectKind::from_value(kind)?, string(name)?.clone()),
-                        (
-                            string(namespace)?.clone(),
-                            string(api_group)?.clone(),
-                            string(resource)?.clone(),
-                            string(verb)?.clone(),
-                        ),
+                        Permission {
+                            namespace: string(namespace)?.clone(),
+                            api_group: string(api_group)?.clone(),
+                            resource: string(resource)?.clone(),
+                            verb: string(verb)?.clone(),
+                        },
                     ))
                 })(),
                 _ => None,
@@ -1027,15 +1040,26 @@ fn login_subjects(username: &str) -> Vec<Subject> {
 }
 
 fn entry(principal: &Subject, permission: &Permission) -> PermissionEntry {
-    let (namespace, api_group, resource, verb) = permission.clone();
-    (principal.clone(), namespace, api_group, resource, verb)
+    let Permission {
+        namespace,
+        api_group,
+        resource,
+        verb,
+    } = permission.clone();
+    PermissionEntry {
+        principal: principal.clone(),
+        namespace,
+        api_group,
+        resource,
+        verb,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use mangle_common::Value;
 
-    use super::{PermissionTables, Subject, SubjectKind, parse_direct_perm};
+    use super::{Permission, PermissionTables, Subject, SubjectKind, parse_direct_perm};
 
     #[test]
     fn direct_perm_rows_parse_with_kind_and_any_name() {
@@ -1065,12 +1089,12 @@ mod tests {
             );
             assert_eq!(
                 permission,
-                (
-                    "demo".to_string(),
-                    String::new(),
-                    "secrets".to_string(),
-                    "get".to_string()
-                )
+                Permission {
+                    namespace: "demo".to_string(),
+                    api_group: String::new(),
+                    resource: "secrets".to_string(),
+                    verb: "get".to_string(),
+                }
             );
         }
     }
@@ -1191,7 +1215,8 @@ mod tests {
     fn impersonating_a_user_does_not_bring_its_groups() {
         let tables = impersonation_tables();
         let resources = |grants: Vec<&super::Permission>| -> Vec<String> {
-            let mut resources: Vec<String> = grants.into_iter().map(|p| p.2.clone()).collect();
+            let mut resources: Vec<String> =
+                grants.into_iter().map(|p| p.resource.clone()).collect();
             resources.sort();
             resources
         };
@@ -1205,7 +1230,7 @@ mod tests {
             ["configmaps", "selfsubjectreviews"]
         );
 
-        let reads_secrets = |p: &super::Permission| p.2 == "secrets";
+        let reads_secrets = |p: &super::Permission| p.resource == "secrets";
         let principals = tables.principals_with_effective(reads_secrets);
         assert!(
             !principals.contains(&Subject::username("imp")),
@@ -1221,7 +1246,7 @@ mod tests {
     #[test]
     fn group_grants_are_joined_on_query() {
         let tables = impersonation_tables();
-        let principals = tables.principals_with_direct(|p| p.2 == "secrets");
+        let principals = tables.principals_with_direct(|p| p.resource == "secrets");
         assert_eq!(
             principals.into_iter().collect::<Vec<_>>(),
             [

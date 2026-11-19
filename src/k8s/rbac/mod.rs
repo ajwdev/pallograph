@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use mangle_common::Value;
+use serde::Serialize;
 
 use crate::engine::EvalStore;
 
@@ -24,15 +25,143 @@ use facts::{
 };
 pub use facts::{PermissionTables, Subject, SubjectKind};
 
-/// (principal, namespace, apigroup, resource, verb).
-pub type PermissionEntry = (Subject, String, String, String, String);
+/// One grant a principal holds: a resource permission scoped to a namespace
+/// (empty for cluster-wide).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PermissionEntry {
+    pub api_group: String,
+    pub resource: String,
+    pub principal: Subject,
+    pub namespace: String,
+    pub verb: String,
+}
+
+/// Namespace or cluster scoped rolebinding
+#[derive(Clone, Copy, Hash, Ord, PartialEq, PartialOrd, Serialize, Eq, Debug)]
+pub enum BindingKind {
+    RoleBinding,
+    ClusterRoleBinding,
+}
+
+impl std::fmt::Display for BindingKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BindingKind::RoleBinding => write!(f, "RoleBinding"),
+            BindingKind::ClusterRoleBinding => write!(f, "ClusterRoleBinding"),
+        }
+    }
+}
+
+/// Namespace or cluster scoped role
+#[derive(Clone, Copy, Hash, Ord, PartialEq, PartialOrd, Serialize, Eq, Debug)]
+pub enum RoleKind {
+    Role,
+    ClusterRole,
+}
+
+impl std::fmt::Display for RoleKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RoleKind::Role => write!(f, "Role"),
+            RoleKind::ClusterRole => write!(f, "ClusterRole"),
+        }
+    }
+}
+
+impl RoleKind {
+    /// The `roleRef.kind` string from a binding, or `None` for anything the
+    /// API server would reject.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Role" => Some(Self::Role),
+            "ClusterRole" => Some(Self::ClusterRole),
+            _ => None,
+        }
+    }
+}
+
+/// How one identity is assumed in a single escalation hop. `PodExec`,
+/// `PodCreate` and `Token` apply only to ServiceAccounts (a pod running as
+/// it, or its token); a principal of any kind can be reached by
+/// impersonation. The labels are the vocabulary of the `subject_*_sa` and
+/// `gained_escalation_hop` relations in rules/rbac_write.mg.
+#[derive(Clone, Copy, Hash, Ord, PartialEq, PartialOrd, Eq, Debug)]
+pub enum ReachMechanism {
+    PodExec,
+    PodCreate,
+    Token,
+    Impersonate,
+}
+
+impl ReachMechanism {
+    /// The label the rules use and the reports show.
+    pub fn label(self) -> &'static str {
+        match self {
+            ReachMechanism::PodExec => "pod-exec",
+            ReachMechanism::PodCreate => "pod-create",
+            ReachMechanism::Token => "token",
+            ReachMechanism::Impersonate => "impersonate",
+        }
+    }
+
+    /// A mechanism label the rules emit, or `None` for anything else.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "pod-exec" => Some(Self::PodExec),
+            "pod-create" => Some(Self::PodCreate),
+            "token" => Some(Self::Token),
+            "impersonate" => Some(Self::Impersonate),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ReachMechanism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// The RBAC-write verb class that lets a principal grant itself a role:
+/// `bind` an existing role, or `escalate` to a role with more permissions
+/// than it already holds. From `rbac_verb_class` in rules/rbac_write.mg.
+#[derive(Clone, Copy, Hash, Ord, PartialEq, PartialOrd, Eq, Debug)]
+pub enum WriteMechanism {
+    Bind,
+    Escalate,
+}
+
+impl WriteMechanism {
+    /// The verb as the rules and reports spell it.
+    pub fn label(self) -> &'static str {
+        match self {
+            WriteMechanism::Bind => "bind",
+            WriteMechanism::Escalate => "escalate",
+        }
+    }
+
+    /// A write verb the rules emit, or `None` for anything else.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "bind" => Some(Self::Bind),
+            "escalate" => Some(Self::Escalate),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for WriteMechanism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
 
 #[derive(Clone)]
 pub struct AccessPath {
-    pub binding_kind: &'static str, // "RoleBinding" | "ClusterRoleBinding"
-    pub binding_namespace: String,  // "" for ClusterRoleBinding
+    pub binding_kind: BindingKind,
+    pub binding_namespace: String, // "" for ClusterRoleBinding
     pub binding_name: String,
-    pub role_kind: &'static str, // "Role" | "ClusterRole"
+    pub role_kind: RoleKind,
     pub role_name: String,
     // Escalation chain leading to this binding.
     // Each element is (identity, mechanism_used_to_reach_it).
@@ -58,10 +187,11 @@ pub enum PathKind {
 
 impl AccessPath {
     /// The last hop is a terminal RBAC-write step, pushed by
-    /// `collect_rbac_write_paths` with mechanism `bind` or `escalate`. Reach
-    /// mechanisms never equal those, so the last hop classifies the path.
+    /// `collect_rbac_write_paths` with a `WriteMechanism` label. Reach
+    /// mechanism labels never parse as one, so the last hop classifies the
+    /// path.
     fn ends_in_write(&self) -> bool {
-        matches!(self.hops.last(), Some((_, mechanism)) if mechanism == "bind" || mechanism == "escalate")
+        self.write_action().is_some()
     }
 
     /// Which tier this path belongs to.
@@ -108,13 +238,10 @@ impl AccessPath {
         }
     }
 
-    /// For a write path, the writer and the terminal mechanism (`bind` or
-    /// `escalate`) it uses.
-    pub fn write_action(&self) -> Option<(&Subject, &str)> {
-        self.ends_in_write()
-            .then(|| self.hops.last())
-            .flatten()
-            .map(|(subject, mechanism)| (subject, mechanism.as_str()))
+    /// For a write path, the writer and the terminal write mechanism it uses.
+    pub fn write_action(&self) -> Option<(&Subject, WriteMechanism)> {
+        let (subject, mechanism) = self.hops.last()?;
+        Some((subject, WriteMechanism::from_label(mechanism)?))
     }
 }
 
@@ -142,11 +269,13 @@ fn write_step_label(write: &RbacWrite) -> String {
     } else {
         write.role.as_str()
     };
+
     let scope = match write.namespace.as_str() {
         "" => String::new(),
         "*" => " in every namespace".to_string(),
         namespace => format!(" in {namespace}"),
     };
+
     format!("{} {} {role}{scope}", write.mechanism, write.role_kind)
 }
 
@@ -160,11 +289,12 @@ fn write_path(write: &RbacWrite, hops: Vec<(Subject, String)>) -> AccessPath {
             name.to_string()
         }
     };
+
     AccessPath {
         binding_kind: if write.namespace.is_empty() {
-            "ClusterRoleBinding"
+            BindingKind::ClusterRoleBinding
         } else {
-            "RoleBinding"
+            BindingKind::RoleBinding
         },
         binding_namespace: write.namespace.clone(),
         binding_name: or_new(&write.binding),
@@ -177,11 +307,11 @@ fn write_path(write: &RbacWrite, hops: Vec<(Subject, String)>) -> AccessPath {
 /// Relations naming the ServiceAccounts one binding subject's grants reach
 /// by one mechanism, each `(Name, Kind, Namespace, ServiceAccount)`, with the
 /// mechanism label.
-const SERVICE_ACCOUNT_MECHANISMS: [(&str, &str); 4] = [
-    ("subject_exec_reachable_sa", "pod-exec"),
-    ("subject_token_accessible_sa", "token"),
-    ("subject_pod_creatable_sa", "pod-create"),
-    ("subject_impersonatable_sa", "impersonate"),
+const SERVICE_ACCOUNT_MECHANISMS: [(&str, ReachMechanism); 4] = [
+    ("subject_exec_reachable_sa", ReachMechanism::PodExec),
+    ("subject_token_accessible_sa", ReachMechanism::Token),
+    ("subject_pod_creatable_sa", ReachMechanism::PodCreate),
+    ("subject_impersonatable_sa", ReachMechanism::Impersonate),
 ];
 
 /// Closed-world RBAC access model derived from Mangle facts.
@@ -203,13 +333,13 @@ pub struct RbacAccessModel {
     /// `gained_escalation_hop`: the identities each binding subject can
     /// assume in one hop through a role it can grant itself by writing RBAC
     /// objects, with the mechanisms.
-    gained_hops: HashMap<Writer, BTreeMap<String, BTreeSet<String>>>,
+    gained_hops: HashMap<Writer, BTreeMap<String, BTreeSet<ReachMechanism>>>,
     /// `rbac_write_binding_direct`: the writes each writer can make in one
     /// request, which explain a path best.
     rbac_writes_direct: HashMap<Writer, HashSet<RbacWrite>>,
     /// Per mechanism label, the (namespace, ServiceAccount) pairs each binding
     /// subject's grants reach.
-    service_account_mechanisms: Vec<(&'static str, HashMap<Subject, HashSet<(String, String)>>)>,
+    service_account_mechanisms: Vec<(ReachMechanism, HashMap<Subject, HashSet<(String, String)>>)>,
     /// `subject_impersonatable_group`: the groups each binding subject's
     /// grants can impersonate. Sorted.
     subject_groups: HashMap<Subject, BTreeSet<String>>,
@@ -248,10 +378,18 @@ impl RbacAccessModel {
         {
             subject_hops.entry(subject).or_default().insert(target);
         }
-        let mut gained_hops: HashMap<Writer, BTreeMap<String, BTreeSet<String>>> = HashMap::new();
+        let mut gained_hops: HashMap<Writer, BTreeMap<String, BTreeSet<ReachMechanism>>> =
+            HashMap::new();
         for (writer, [target, mechanism]) in
             facts::parse_writer_rows::<2>("gained_escalation_hop", &scan("gained_escalation_hop"))
         {
+            let Some(mechanism) = ReachMechanism::from_label(&mechanism) else {
+                facts::unexpected_row(
+                    "gained_escalation_hop",
+                    &[Value::String(target), Value::String(mechanism)],
+                );
+                continue;
+            };
             gained_hops
                 .entry(writer)
                 .or_default()
@@ -360,15 +498,13 @@ impl RbacAccessModel {
     ) -> Vec<Violation> {
         let expected: HashSet<&str> = expected.iter().copied().collect();
         self.tables
-            .principals_with_direct(
-                |(entry_namespace, entry_api_group, entry_resource, entry_verb)| {
-                    ns_covers(entry_namespace, namespace)
-                        && (namespace.is_empty()
-                            || resource_scope::can_apply_in_namespace(entry_api_group, resource))
-                        && value_covers(entry_resource, resource)
-                        && value_covers(entry_verb, verb)
-                },
-            )
+            .principals_with_direct(|grant| {
+                ns_covers(&grant.namespace, namespace)
+                    && (namespace.is_empty()
+                        || resource_scope::can_apply_in_namespace(&grant.api_group, resource))
+                    && value_covers(&grant.resource, resource)
+                    && value_covers(&grant.verb, verb)
+            })
             .into_iter()
             .filter(|principal| self.is_reported(principal, &expected))
             .map(|principal| {
@@ -400,15 +536,16 @@ impl RbacAccessModel {
         for (subject, permissions) in &self.tables.grants {
             let Some(example) = permissions
                 .iter()
-                .filter(|(entry_namespace, api_group, resource, _)| {
-                    ns_covers(entry_namespace, namespace)
-                        && resource_scope::can_apply_in_namespace(api_group, resource)
+                .filter(|grant| {
+                    ns_covers(&grant.namespace, namespace)
+                        && resource_scope::can_apply_in_namespace(&grant.api_group, &grant.resource)
                 })
-                .map(|(_, _, resource, verb)| (resource.as_str(), verb.as_str()))
+                .map(|grant| (grant.resource.as_str(), grant.verb.as_str()))
                 .min()
             else {
                 continue;
             };
+
             for principal in self.tables.holders(subject) {
                 if !self.is_reported(&principal, &allowed) {
                     continue;
@@ -660,20 +797,20 @@ impl RbacAccessModel {
                     // permissions.
                     let first_step = writes.iter().find(|write| {
                         is_direct(write)
-                            && write.permissions(&self.tables.role_rules).iter().any(
-                                |(_, api_group, _, _)| {
-                                    value_covers(api_group, "rbac.authorization.k8s.io")
-                                },
-                            )
+                            && write
+                                .permissions(&self.tables.role_rules)
+                                .iter()
+                                .any(|p| value_covers(&p.api_group, "rbac.authorization.k8s.io"))
                     });
                     (covering, first_step)
                 };
+
             for write in shown {
                 let mut chain = hops.to_vec();
                 if let Some(step) = first_step {
                     chain.push((writer.subject.clone(), write_step_label(step)));
                 }
-                chain.push((writer.subject.clone(), write.mechanism.clone()));
+                chain.push((writer.subject.clone(), write.mechanism.to_string()));
                 out.push(write_path(write, chain));
             }
         }
@@ -748,6 +885,7 @@ impl RbacAccessModel {
                 )
                 .flatten()
                 .collect();
+
             next.extend(
                 groups
                     .into_iter()
@@ -778,14 +916,16 @@ impl RbacAccessModel {
                 .is_some_and(|targets| targets.contains(&identity.name))
         });
         if !direct {
-            let gained: BTreeSet<&String> = writers
+            let gained: BTreeSet<ReachMechanism> = writers
                 .iter()
                 .filter_map(|writer| self.gained_hops.get(writer))
                 .filter_map(|targets| targets.get(&identity.name))
                 .flatten()
+                .copied()
                 .collect();
             if !gained.is_empty() {
-                let labels: Vec<&str> = gained.iter().map(|label| label.as_str()).collect();
+                let mut labels: Vec<&str> = gained.iter().map(|m| m.label()).collect();
+                labels.sort_unstable();
                 return format!("{} after RBAC write", labels.join(", "));
             }
         }
@@ -807,7 +947,7 @@ impl RbacAccessModel {
                                 .is_some_and(|pairs| pairs.contains(&service_account))
                         })
                     })
-                    .map(|(label, _)| *label)
+                    .map(|(mechanism, _)| mechanism.label())
                     .collect()
             })
             .unwrap_or_default();
@@ -850,7 +990,7 @@ impl RbacAccessModel {
         query_resource: &str,
         query_verb: &str,
     ) -> bool {
-        let key = ("ClusterRole", String::new(), role_name.to_string());
+        let key = (RoleKind::ClusterRole, String::new(), role_name.to_string());
         self.role_key_matches(&key, query_api_group, query_resource, query_verb)
     }
 
@@ -862,7 +1002,11 @@ impl RbacAccessModel {
         query_resource: &str,
         query_verb: &str,
     ) -> bool {
-        let key = ("Role", role_namespace.to_string(), role_name.to_string());
+        let key = (
+            RoleKind::Role,
+            role_namespace.to_string(),
+            role_name.to_string(),
+        );
         self.role_key_matches(&key, query_api_group, query_resource, query_verb)
     }
 
@@ -878,7 +1022,7 @@ impl RbacAccessModel {
         perm_filter: Option<(&str, &str, &str, &str)>,
         out: &mut Vec<AccessPath>,
     ) {
-        let mut found: BTreeSet<(&str, &str, &'static str, &str)> = BTreeSet::new();
+        let mut found: BTreeSet<(&str, &str, RoleKind, &str)> = BTreeSet::new();
         for subject in subjects {
             for (binding_namespace, binding) in
                 self.subject_bindings.get(subject).into_iter().flatten()
@@ -896,14 +1040,12 @@ impl RbacAccessModel {
                     .into_iter()
                     .flatten();
                 for (role_kind, role_name) in roles {
-                    let role_kind = match role_kind.as_str() {
-                        "Role" => "Role",
-                        "ClusterRole" => "ClusterRole",
-                        // The API server rejects any other roleRef kind.
-                        _ => continue,
+                    // The API server rejects any other roleRef kind.
+                    let Some(role_kind) = RoleKind::from_name(role_kind) else {
+                        continue;
                     };
                     if let Some((_, query_api_group, query_resource, query_verb)) = perm_filter {
-                        let matches = if role_kind == "Role" {
+                        let matches = if role_kind == RoleKind::Role {
                             self.role_matches(
                                 binding_namespace,
                                 role_name,
@@ -931,9 +1073,9 @@ impl RbacAccessModel {
         for (binding_namespace, binding, role_kind, role_name) in found {
             out.push(AccessPath {
                 binding_kind: if binding_namespace.is_empty() {
-                    "ClusterRoleBinding"
+                    BindingKind::ClusterRoleBinding
                 } else {
-                    "RoleBinding"
+                    BindingKind::RoleBinding
                 },
                 binding_namespace: binding_namespace.to_string(),
                 binding_name: binding.to_string(),
@@ -997,7 +1139,13 @@ fn permission<'a>(
 /// namespace for a cluster-scoped resource (see `resource_scope`) is covered
 /// by nothing: no such request exists.
 fn permission_covers(granted: &Permission, query: PermissionPattern<'_>) -> bool {
-    let (namespace, api_group, resource, verb) = granted;
+    let Permission {
+        namespace,
+        api_group,
+        resource,
+        verb,
+    } = granted;
+
     ns_covers(namespace, query.namespace)
         && (query.namespace.is_empty()
             || resource_scope::can_apply_in_namespace(query.apigroup, query.resource))
@@ -1013,7 +1161,7 @@ mod tests {
     use mangle_common::Value;
     use mangle_interpreter::MemStore;
 
-    use super::{RbacAccessModel, Subject, SubjectKind};
+    use super::{Permission, RbacAccessModel, RoleKind, Subject, SubjectKind};
     use crate::edb;
     use crate::engine::{Engine, InterpreterBackend};
 
@@ -1086,7 +1234,7 @@ mod tests {
                 v.principal
             );
             for p in &v.paths {
-                let grants = if p.role_kind == "Role" {
+                let grants = if p.role_kind == RoleKind::Role {
                     model.role_matches(&p.binding_namespace, &p.role_name, "*", "*", "*")
                 } else {
                     model.clusterrole_matches(&p.role_name, "*", "*", "*")
@@ -1459,7 +1607,7 @@ mod tests {
                 .role_rules
                 .rules
                 .keys()
-                .any(|(kind, ..)| *kind == "Role"),
+                .any(|(kind, ..)| *kind == RoleKind::Role),
             "role_rule joined with policy_rule_perm"
         );
         assert!(
@@ -1468,7 +1616,7 @@ mod tests {
                 .role_rules
                 .rules
                 .keys()
-                .any(|(kind, ..)| *kind == "ClusterRole"),
+                .any(|(kind, ..)| *kind == RoleKind::ClusterRole),
             "clusterrole_rule joined with policy_rule_perm"
         );
         assert!(
@@ -1492,7 +1640,15 @@ mod tests {
             model
                 .tables
                 .direct_grants(&Subject::username("admin@example.com"))
-                .any(|granted| granted == &(String::new(), "*".into(), "*".into(), "*".into())),
+                .any(|granted| {
+                    *granted
+                        == Permission {
+                            namespace: String::new(),
+                            api_group: "*".into(),
+                            resource: "*".into(),
+                            verb: "*".into(),
+                        }
+                }),
             "admin@example.com cluster-admin grant missing"
         );
     }
