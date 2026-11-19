@@ -162,299 +162,287 @@ fn err(message: &str) -> Result<Command, ParseError> {
 
 /// Parse one preprocessed input line into a [`Command`]. The line is expected
 /// to start with `::` or a sigil (`? ! + - ~`); see the module docs for what
-/// the loop strips first. The match order mirrors the dispatcher so that a
-/// prefix like `rbac::diff` is recognized before the `rbac::` catch-all.
+/// the loop strips first.
+///
+/// The shape is: handle the sigil forms, which glue their argument to the
+/// sigil; then the `rbac::`/`sched::` subsystems, which take any subcommand
+/// (so they match on the namespace prefix); then split what remains into a
+/// head word and an argument and match on the head. `argument` is `None` when
+/// the head stands alone, which lets a command whose argument is required
+/// (e.g. `query`) fall through to a usage hint.
 pub fn parse_command(line: &str) -> Result<Command, ParseError> {
-    // Queries keep both spellings; `?-` is the shorthand.
-    if let Some(body) = line
-        .strip_prefix("::query ")
-        .or_else(|| line.strip_prefix("?- "))
-    {
+    // Sigil forms carry their argument glued to the sigil, except the `?- `
+    // query shorthand. The handler parses the fact atoms; `+`/`-` drop a
+    // trailing `.` and `~` keeps both atoms together.
+    if let Some(body) = line.strip_prefix("?- ") {
         return Ok(Command::Query(body.to_string()));
     }
-
-    if let Some(fact) = line.strip_prefix("::why ") {
-        return Ok(Command::Why(fact.to_string()));
+    if let Some(atoms) = line.strip_prefix('~') {
+        return Ok(Command::ReplaceFact(atoms.trim().to_string()));
     }
-
-    if line == "::use" || line.starts_with("::use ") {
-        let rest = line.strip_prefix("::use").unwrap_or("").trim();
-        if rest.is_empty() {
-            return Ok(Command::Use {
-                snapshot: None,
-                one_shot: None,
-            });
-        }
-        let (name, one_shot) = match rest.split_once(char::is_whitespace) {
-            Some((name, command)) => (name.to_string(), Some(command.trim().to_string())),
-            None => (rest.to_string(), None),
-        };
-        return Ok(Command::Use {
-            snapshot: Some(name),
-            one_shot,
-        });
-    }
-
-    if let Some(name) = line.strip_prefix("::snapshot ") {
-        return Ok(Command::Snapshot(name.trim().to_string()));
-    }
-
-    // `diff` and `diff-relation` share argument shapes; the relation (last
-    // token) is present only for the latter.
-    let diff_args = line
-        .strip_prefix("::diff ")
-        .map(|rest| (rest, false))
-        .or_else(|| {
-            line.strip_prefix("::diff-relation ")
-                .map(|rest| (rest, true))
-        });
-    if let Some((rest, one_relation)) = diff_args {
-        let mut parts: Vec<&str> = rest.split_whitespace().collect();
-        let relation = if one_relation {
-            parts.pop().map(str::to_string)
-        } else {
-            None
-        };
-        return match parts.as_slice() {
-            [name] => Ok(Command::Diff {
-                first: name.to_string(),
-                second: None,
-                relation,
-            }),
-            [first, second] => Ok(Command::Diff {
-                first: first.to_string(),
-                second: Some(second.to_string()),
-                relation,
-            }),
-            _ if one_relation => err(
-                "Usage: diff-relation <name> <relation>  or  diff-relation <name1> <name2> <relation>",
-            ),
-            _ => err("Usage: diff <name>  or  diff <name1> <name2>"),
-        };
-    }
-
-    if line == "::show" || line.starts_with("::show ") {
-        let tokens = line.strip_prefix("::show").unwrap_or("").split_whitespace();
-        // `--all`/`*` reveals undocumented intermediate relations; the rest are
-        // explicit relation names.
-        let mut all = false;
-        let mut names = Vec::new();
-        for token in tokens {
-            if token == "--all" || token == "*" {
-                all = true;
-            } else {
-                names.push(token.to_string());
-            }
-        }
-        return Ok(Command::Show { names, all });
-    }
-
-    if let Some(rule) = line.strip_prefix("::define ") {
-        return Ok(Command::Define(rule.to_string()));
-    }
-
-    // Fact mutators. The handler parses the atom; `+`/`-` drop a trailing `.`
-    // as the loop did, `~` keeps both atoms together.
-    if let Some(rest) = line.strip_prefix('~') {
-        return Ok(Command::ReplaceFact(rest.trim().to_string()));
-    }
-    if let Some(inner) = line.strip_prefix('+') {
+    if let Some(atom) = line.strip_prefix('+') {
         return Ok(Command::AssertFact(
-            inner.trim_end_matches('.').trim().to_string(),
+            atom.trim_end_matches('.').trim().to_string(),
         ));
     }
-    if let Some(inner) = line.strip_prefix('-') {
+    if let Some(atom) = line.strip_prefix('-') {
         return Ok(Command::RetractFact(
-            inner.trim_end_matches('.').trim().to_string(),
+            atom.trim_end_matches('.').trim().to_string(),
         ));
     }
-
-    if let Some(src) = line.strip_prefix("::source ") {
-        return Ok(Command::Source(src.trim().to_string()));
-    }
-
-    if let Some(rest) = line.strip_prefix("::k8s::load ") {
-        return Ok(Command::K8sLoad(rest.trim().to_string()));
-    }
-    if let Some(rest) = line.strip_prefix("::k8s::apply-delta ") {
-        return Ok(Command::K8sApplyDelta(rest.trim().to_string()));
-    }
-
-    if let Some(rest) = line.strip_prefix("::load ") {
-        let rest = rest.trim();
-        return match rest.split_once(char::is_whitespace) {
-            Some((relation, source)) => Ok(Command::Load {
-                relation: relation.to_string(),
-                source: source.trim().to_string(),
-            }),
-            None => err("Usage: load <relation> <source>  (source is a file path or ! <cmd>)"),
-        };
-    }
-
-    // `k8s::match <Kind> <namespace> <selector>` scopes to one Kind;
-    // `k8s::match-all <namespace> <selector>` matches any Kind.
-    let match_args = line
-        .strip_prefix("::k8s::match ")
-        .map(|rest| (rest, true))
-        .or_else(|| {
-            line.strip_prefix("::k8s::match-all ")
-                .map(|rest| (rest, false))
-        });
-    if let Some((rest, one_kind)) = match_args {
-        let fields = if one_kind { 3 } else { 2 };
-        let parts: Vec<&str> = rest.trim().splitn(fields, char::is_whitespace).collect();
-        let (kind, namespace, selector) = match (one_kind, parts.as_slice()) {
-            (true, [kind, namespace, selector]) => (Some(kind.to_string()), *namespace, *selector),
-            (false, [namespace, selector]) => (None, *namespace, *selector),
-            (true, _) => {
-                return err(
-                    "Usage: k8s::match <Kind> <namespace> <selector>  (namespace \"\" for cluster-scoped)",
-                );
-            }
-            (false, _) => return err("Usage: k8s::match-all <namespace> <selector>"),
-        };
-        // The cluster-scoped namespace is typed as ""; the REPL does not
-        // otherwise strip quotes from arguments.
-        return Ok(Command::K8sMatch {
-            kind,
-            namespace: namespace.trim_matches('"').to_string(),
-            selector: selector.to_string(),
-        });
-    }
-
-    // `rbac::diff` must be recognized before the `rbac::` catch-all below.
-    if line == "::rbac::diff" {
-        return err("Usage: rbac::diff <snap> [snap2] [--hide-escalation-lost]");
-    }
-    if let Some(rest) = line.strip_prefix("::rbac::diff ") {
-        let tokens: Vec<&str> = rest.split_whitespace().collect();
-        let hide_escalation_lost = tokens.contains(&"--hide-escalation-lost");
-        let parts: Vec<&str> = tokens
-            .iter()
-            .filter(|t| **t != "--hide-escalation-lost")
-            .copied()
-            .collect();
-        return match parts.as_slice() {
-            [name] => Ok(Command::RbacDiff {
-                first: name.to_string(),
-                second: None,
-                hide_escalation_lost,
-            }),
-            [first, second] => Ok(Command::RbacDiff {
-                first: first.to_string(),
-                second: Some(second.to_string()),
-                hide_escalation_lost,
-            }),
-            _ => err("Usage: rbac::diff <snap> [snap2] [--hide-escalation-lost]"),
-        };
-    }
-    if let Some(rest) = line.strip_prefix("::rbac::") {
-        return Ok(Command::Rbac(rest.trim().to_string()));
-    }
-    if let Some(rest) = line.strip_prefix("::sched::") {
-        return Ok(Command::Sched(rest.trim().to_string()));
-    }
-
-    if let Some(query) = line.strip_prefix("::explain ") {
-        return Ok(Command::Explain(query.to_string()));
-    }
-
-    if let Some(rest) = line.strip_prefix("::smtlib ") {
-        let relations: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
-        if relations.is_empty() {
-            return err("Usage: smtlib <relation> [relation ...]");
-        }
-        return Ok(Command::Smtlib(relations));
-    }
-
-    if line == "::rollback" || line.starts_with("::rollback ") {
-        let name = line.strip_prefix("::rollback").unwrap_or("").trim();
-        if name.is_empty() {
-            return err("Usage: rollback <name>");
-        }
-        return Ok(Command::Rollback(name.to_string()));
-    }
-
     if let Some(cmd) = line.strip_prefix('!') {
         return Ok(Command::Shell(cmd.trim().to_string()));
     }
 
-    if line == "::quit" || line == "::exit" || line == "::q" {
-        return Ok(Command::Quit);
+    // Everything else is a `::`-qualified command; the loop canonicalizes a
+    // bare command to this form before calling us.
+    let path = line.strip_prefix("::").unwrap_or(line);
+
+    // The `rbac::` and `sched::` subsystems hand any subcommand to their own
+    // parser, so they match on the namespace prefix. `rbac::diff` has
+    // structured arguments of its own, so it is recognized first.
+    if path == "rbac::diff" {
+        return err("Usage: rbac::diff <snap> [snap2] [--hide-escalation-lost]");
+    }
+    if let Some(args) = path.strip_prefix("rbac::diff ") {
+        return parse_rbac_diff(args);
+    }
+    if let Some(rest) = path.strip_prefix("rbac::") {
+        return Ok(Command::Rbac(rest.trim().to_string()));
+    }
+    if let Some(rest) = path.strip_prefix("sched::") {
+        return Ok(Command::Sched(rest.trim().to_string()));
     }
 
-    if line == "::help" || line.starts_with("::help ") {
-        let topic = line.strip_prefix("::help").unwrap_or("").trim();
-        return Ok(Command::Help(
-            (!topic.is_empty()).then(|| topic.to_string()),
-        ));
-    }
+    let (head, argument) = match path.split_once(' ') {
+        Some((head, argument)) => (head, Some(argument)),
+        None => (path, None),
+    };
 
-    if line == "::alias" || line.starts_with("::alias ") {
-        let rest = line.strip_prefix("::alias").unwrap_or("").trim();
-        let alias = if rest.is_empty() {
-            AliasCommand::List
-        } else if let Some((name, body)) = rest.split_once(char::is_whitespace) {
-            let body = body.trim();
-            if body.is_empty() {
-                return err("Usage: alias <name> <command...>");
-            }
-            AliasCommand::Set {
-                name: name.to_string(),
-                body: body.to_string(),
-            }
+    Ok(match (head, argument) {
+        // Arguments the engine parses, passed through verbatim.
+        ("query", Some(body)) => Command::Query(body.to_string()),
+        ("why", Some(fact)) => Command::Why(fact.to_string()),
+        ("explain", Some(body)) => Command::Explain(body.to_string()),
+        ("define", Some(rule)) => Command::Define(rule.to_string()),
+        ("source", Some(src)) => Command::Source(src.trim().to_string()),
+        ("snapshot", Some(name)) => Command::Snapshot(name.trim().to_string()),
+
+        // Arguments parsed into structured fields.
+        ("use", _) => parse_use(argument),
+        ("show", _) => parse_show(argument),
+        ("diff", Some(args)) => parse_diff(args, false)?,
+        ("diff-relation", Some(args)) => parse_diff(args, true)?,
+        ("load", Some(args)) => parse_load(args)?,
+        ("smtlib", Some(args)) => parse_smtlib(args)?,
+        ("k8s::load", Some(spec)) => Command::K8sLoad(spec.trim().to_string()),
+        ("k8s::apply-delta", Some(spec)) => Command::K8sApplyDelta(spec.trim().to_string()),
+        ("k8s::match", Some(args)) => parse_k8s_match(args, true)?,
+        ("k8s::match-all", Some(args)) => parse_k8s_match(args, false)?,
+
+        // Commands with a single required name.
+        ("rollback", _) => match argument.map(str::trim).filter(|a| !a.is_empty()) {
+            Some(name) => Command::Rollback(name.to_string()),
+            None => return err("Usage: rollback <name>"),
+        },
+        ("unalias", _) => match argument.map(str::trim).filter(|a| !a.is_empty()) {
+            Some(name) => Command::Unalias(name.to_string()),
+            None => return err("Usage: unalias <name>"),
+        },
+
+        // Session commands.
+        ("alias", _) => parse_alias(argument)?,
+        ("format", _) => parse_format(argument)?,
+        ("help", _) => Command::Help(
+            argument
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(String::from),
+        ),
+
+        // Commands that take no argument.
+        ("quit" | "exit" | "q", None) => Command::Quit,
+        ("pretty", None) => Command::PrettyToggle,
+        ("rbac", None) => Command::SubsystemHelp(Subsystem::Rbac),
+        ("sched", None) => Command::SubsystemHelp(Subsystem::Sched),
+        ("k8s", None) => Command::SubsystemHelp(Subsystem::K8s),
+
+        // No built-in matched (or a known command used with no argument, e.g.
+        // a bare `diff`). Hand back the path for the dispatcher to report, and
+        // for a future extension registry to claim.
+        _ => Command::Unknown(path.to_string()),
+    })
+}
+
+/// `use [<snapshot> [<command>]]`: no snapshot returns to live state; a
+/// trailing command runs once with the snapshot in use.
+fn parse_use(argument: Option<&str>) -> Command {
+    let rest = argument.unwrap_or("").trim();
+    if rest.is_empty() {
+        return Command::Use {
+            snapshot: None,
+            one_shot: None,
+        };
+    }
+    let (name, one_shot) = match rest.split_once(char::is_whitespace) {
+        Some((name, command)) => (name.to_string(), Some(command.trim().to_string())),
+        None => (rest.to_string(), None),
+    };
+    Command::Use {
+        snapshot: Some(name),
+        one_shot,
+    }
+}
+
+/// `show [--all | *] [<relation>...]`.
+fn parse_show(argument: Option<&str>) -> Command {
+    // `--all`/`*` reveals undocumented intermediate relations; the rest are
+    // explicit relation names.
+    let mut all = false;
+    let mut names = Vec::new();
+    for token in argument.unwrap_or("").split_whitespace() {
+        if token == "--all" || token == "*" {
+            all = true;
         } else {
-            AliasCommand::Show(rest.to_string())
-        };
-        return Ok(Command::Alias(alias));
-    }
-
-    if line == "::unalias" || line.starts_with("::unalias ") {
-        let name = line.strip_prefix("::unalias").unwrap_or("").trim();
-        if name.is_empty() {
-            return err("Usage: unalias <name>");
+            names.push(token.to_string());
         }
-        return Ok(Command::Unalias(name.to_string()));
     }
+    Command::Show { names, all }
+}
 
-    if line == "::pretty" {
-        return Ok(Command::PrettyToggle);
+/// `diff <a> [<b>]`, or `diff-relation <a> [<b>] <relation>` when
+/// `one_relation`. A single name diffs against whatever is in use; the
+/// relation, present only for `diff-relation`, is the last token.
+fn parse_diff(args: &str, one_relation: bool) -> Result<Command, ParseError> {
+    let mut parts: Vec<&str> = args.split_whitespace().collect();
+    let relation = if one_relation {
+        parts.pop().map(str::to_string)
+    } else {
+        None
+    };
+    match parts.as_slice() {
+        [name] => Ok(Command::Diff {
+            first: name.to_string(),
+            second: None,
+            relation,
+        }),
+        [first, second] => Ok(Command::Diff {
+            first: first.to_string(),
+            second: Some(second.to_string()),
+            relation,
+        }),
+        _ if one_relation => err(
+            "Usage: diff-relation <name> <relation>  or  diff-relation <name1> <name2> <relation>",
+        ),
+        _ => err("Usage: diff <name>  or  diff <name1> <name2>"),
     }
+}
 
-    if line == "::format" || line.starts_with("::format ") {
-        let arg = line.strip_prefix("::format").unwrap_or("").trim();
-        let format = match arg {
-            "default" => Some(OutputFormat::Plain),
-            "compact" => Some(OutputFormat::Compact),
-            "pretty" => Some(OutputFormat::Pretty),
-            "table" => Some(OutputFormat::Table),
-            "ndjson" => Some(OutputFormat::Ndjson),
-            "" => None, // no arg: just report the current format
-            other => {
-                return err(&format!(
-                    "Unknown format '{other}'. Use: default | compact | pretty | table | ndjson."
-                ));
-            }
-        };
-        return Ok(Command::Format(format));
+/// `load <relation> <source>`.
+fn parse_load(args: &str) -> Result<Command, ParseError> {
+    match args.trim().split_once(char::is_whitespace) {
+        Some((relation, source)) => Ok(Command::Load {
+            relation: relation.to_string(),
+            source: source.trim().to_string(),
+        }),
+        None => err("Usage: load <relation> <source>  (source is a file path or ! <cmd>)"),
     }
+}
 
-    // Bare subsystem namespaces list their subcommands.
-    if line == "::rbac" {
-        return Ok(Command::SubsystemHelp(Subsystem::Rbac));
+/// `smtlib <relation> [<relation>...]`.
+fn parse_smtlib(args: &str) -> Result<Command, ParseError> {
+    let relations: Vec<String> = args.split_whitespace().map(str::to_string).collect();
+    if relations.is_empty() {
+        return err("Usage: smtlib <relation> [relation ...]");
     }
-    if line == "::sched" {
-        return Ok(Command::SubsystemHelp(Subsystem::Sched));
-    }
-    if line == "::k8s" {
-        return Ok(Command::SubsystemHelp(Subsystem::K8s));
-    }
+    Ok(Command::Smtlib(relations))
+}
 
-    // No built-in matched. Hand back the path after `::` for the dispatcher to
-    // report (and, later, for an extension registry to claim).
-    Ok(Command::Unknown(
-        line.strip_prefix("::").unwrap_or(line).to_string(),
-    ))
+/// `k8s::match <Kind> <namespace> <selector>` (one kind) or
+/// `k8s::match-all <namespace> <selector>` (any kind).
+fn parse_k8s_match(args: &str, one_kind: bool) -> Result<Command, ParseError> {
+    let fields = if one_kind { 3 } else { 2 };
+    let parts: Vec<&str> = args.trim().splitn(fields, char::is_whitespace).collect();
+    let (kind, namespace, selector) = match (one_kind, parts.as_slice()) {
+        (true, [kind, namespace, selector]) => (Some(kind.to_string()), *namespace, *selector),
+        (false, [namespace, selector]) => (None, *namespace, *selector),
+        (true, _) => {
+            return err(
+                "Usage: k8s::match <Kind> <namespace> <selector>  (namespace \"\" for cluster-scoped)",
+            );
+        }
+        (false, _) => return err("Usage: k8s::match-all <namespace> <selector>"),
+    };
+    // The cluster-scoped namespace is typed as ""; the REPL does not otherwise
+    // strip quotes from arguments.
+    Ok(Command::K8sMatch {
+        kind,
+        namespace: namespace.trim_matches('"').to_string(),
+        selector: selector.to_string(),
+    })
+}
+
+/// `rbac::diff <snap> [<snap2>] [--hide-escalation-lost]`.
+fn parse_rbac_diff(args: &str) -> Result<Command, ParseError> {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    let hide_escalation_lost = tokens.contains(&"--hide-escalation-lost");
+    let parts: Vec<&str> = tokens
+        .iter()
+        .filter(|t| **t != "--hide-escalation-lost")
+        .copied()
+        .collect();
+    match parts.as_slice() {
+        [name] => Ok(Command::RbacDiff {
+            first: name.to_string(),
+            second: None,
+            hide_escalation_lost,
+        }),
+        [first, second] => Ok(Command::RbacDiff {
+            first: first.to_string(),
+            second: Some(second.to_string()),
+            hide_escalation_lost,
+        }),
+        _ => err("Usage: rbac::diff <snap> [snap2] [--hide-escalation-lost]"),
+    }
+}
+
+/// `alias`, `alias <name>`, or `alias <name> <command...>`.
+fn parse_alias(argument: Option<&str>) -> Result<Command, ParseError> {
+    let rest = argument.unwrap_or("").trim();
+    let alias = if rest.is_empty() {
+        AliasCommand::List
+    } else if let Some((name, body)) = rest.split_once(char::is_whitespace) {
+        let body = body.trim();
+        if body.is_empty() {
+            return err("Usage: alias <name> <command...>");
+        }
+        AliasCommand::Set {
+            name: name.to_string(),
+            body: body.to_string(),
+        }
+    } else {
+        AliasCommand::Show(rest.to_string())
+    };
+    Ok(Command::Alias(alias))
+}
+
+/// `format [default|compact|pretty|table|ndjson]`; no argument reports the
+/// current format (`None`).
+fn parse_format(argument: Option<&str>) -> Result<Command, ParseError> {
+    let format = match argument.unwrap_or("").trim() {
+        "default" => Some(OutputFormat::Plain),
+        "compact" => Some(OutputFormat::Compact),
+        "pretty" => Some(OutputFormat::Pretty),
+        "table" => Some(OutputFormat::Table),
+        "ndjson" => Some(OutputFormat::Ndjson),
+        "" => None,
+        other => {
+            return err(&format!(
+                "Unknown format '{other}'. Use: default | compact | pretty | table | ndjson."
+            ));
+        }
+    };
+    Ok(Command::Format(format))
 }
 
 #[cfg(test)]
