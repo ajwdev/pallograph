@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use super::facts::{ns_covers, value_covers};
+use super::facts::{Permission, ns_covers, value_covers};
 use super::{PermissionEntry, PermissionTables, Subject};
 
 pub struct CanDiff {
@@ -78,7 +78,10 @@ fn diff_witnesses(
 
     let mut by_principal: HashMap<&Subject, Vec<&PermissionEntry>> = HashMap::new();
     for entry in have_entries.difference(not_have_entries) {
-        by_principal.entry(&entry.0).or_default().push(entry);
+        by_principal
+            .entry(&entry.principal)
+            .or_default()
+            .push(entry);
     }
 
     let mut witnesses = Vec::new();
@@ -86,12 +89,12 @@ fn diff_witnesses(
         let held = not_have.held_grants(principal, effective);
         let gained: Vec<&PermissionEntry> = entries
             .into_iter()
-            .filter(|(_, namespace, api_group, resource, verb)| {
+            .filter(|entry| {
                 !held.iter().any(|granted| {
-                    ns_covers(&granted.0, namespace)
-                        && value_covers(&granted.1, api_group)
-                        && value_covers(&granted.2, resource)
-                        && value_covers(&granted.3, verb)
+                    ns_covers(&granted.namespace, &entry.namespace)
+                        && value_covers(&granted.api_group, &entry.api_group)
+                        && value_covers(&granted.resource, &entry.resource)
+                        && value_covers(&granted.verb, &entry.verb)
                 })
             })
             .collect();
@@ -99,12 +102,12 @@ fn diff_witnesses(
         // every narrower grant it gains, once per namespace.
         let keys: HashSet<(&str, &str, &str, &str)> = gained
             .iter()
-            .map(|(_, ns, group, resource, verb)| {
+            .map(|entry| {
                 (
-                    ns.as_str(),
-                    group.as_str(),
-                    resource.as_str(),
-                    verb.as_str(),
+                    entry.namespace.as_str(),
+                    entry.api_group.as_str(),
+                    entry.resource.as_str(),
+                    entry.verb.as_str(),
                 )
             })
             .collect();
@@ -122,7 +125,12 @@ fn diff_witnesses(
 /// only ever widens a field to `*` (or a namespace to `*` or cluster-wide),
 /// so checking those generalizations is enough.
 fn covered_by_broader(keys: &HashSet<(&str, &str, &str, &str)>, entry: &PermissionEntry) -> bool {
-    let (_, ns, group, resource, verb) = entry;
+    let (ns, group, resource, verb) = (
+        &entry.namespace,
+        &entry.api_group,
+        &entry.resource,
+        &entry.verb,
+    );
     let mut namespaces = vec![ns.as_str()];
     if !ns.is_empty() {
         namespaces.push("");
@@ -166,12 +174,12 @@ fn widen(value: &str) -> Vec<&str> {
 fn can_diff_witnesses(have: &PermissionTables, not_have: &PermissionTables) -> Vec<CanDiff> {
     diff_witnesses(have, not_have, false)
         .into_iter()
-        .map(|(principal, namespace, apigroup, resource, verb)| CanDiff {
-            principal,
-            namespace,
-            apigroup,
-            resource,
-            verb,
+        .map(|entry| CanDiff {
+            principal: entry.principal,
+            namespace: entry.namespace,
+            apigroup: entry.api_group,
+            resource: entry.resource,
+            verb: entry.verb,
         })
         .collect()
 }
@@ -229,12 +237,12 @@ pub fn access_diff(before: &PermissionTables, after: &PermissionTables) -> Acces
         diffs
             .into_iter()
             .map(|diff| {
-                let permission = (
-                    diff.namespace.clone(),
-                    diff.apigroup.clone(),
-                    diff.resource.clone(),
-                    diff.verb.clone(),
-                );
+                let permission = Permission {
+                    namespace: diff.namespace.clone(),
+                    api_group: diff.apigroup.clone(),
+                    resource: diff.resource.clone(),
+                    verb: diff.verb.clone(),
+                };
                 let via = tables.escalation_via(&diff.principal, &permission);
                 EffectiveChange { diff, via }
             })
@@ -316,12 +324,12 @@ fn per_principal_verdicts(
 fn eff_diff_witnesses(have: &PermissionTables, not_have: &PermissionTables) -> Vec<EffDiff> {
     diff_witnesses(have, not_have, true)
         .into_iter()
-        .map(|(principal, namespace, apigroup, resource, verb)| EffDiff {
-            principal,
-            namespace,
-            apigroup,
-            resource,
-            verb,
+        .map(|entry| EffDiff {
+            principal: entry.principal,
+            namespace: entry.namespace,
+            apigroup: entry.api_group,
+            resource: entry.resource,
+            verb: entry.verb,
         })
         .collect()
 }
@@ -336,7 +344,7 @@ mod tests {
     use super::*;
     use crate::edb;
     use crate::engine::{Engine, EvalStore, InterpreterBackend};
-    use crate::rbac::Subject;
+    use crate::k8s::rbac::Subject;
 
     /// A `direct_perm` row granting a User subject, for any object name.
     fn user_grant(user: &str, ns: &str, apigroup: &str, resource: &str, verb: &str) -> Vec<Value> {
@@ -567,12 +575,12 @@ mod tests {
 
         // The principal may do verb on resource in namespace "default".
         let can = |principal: &Subject, resource: &str, verb: &str| -> bool {
-            let query = (
-                "default".to_string(),
-                String::new(),
-                resource.to_string(),
-                verb.to_string(),
-            );
+            let query = Permission {
+                namespace: "default".to_string(),
+                api_group: String::new(),
+                resource: resource.to_string(),
+                verb: verb.to_string(),
+            };
             after.covers(principal, &query, false)
         };
         let user = Subject::username("twin");

@@ -13,7 +13,7 @@ use tracing::{debug, info};
 use pallograph::api::LocalCore;
 use pallograph::engine::{self, Backend, DdBackend, Engine, InterpreterBackend};
 use pallograph::repl::OutputFormat;
-use pallograph::{config, edb, load, repl, telemetry, watch};
+use pallograph::{config, edb, load, repl, telemetry};
 
 #[derive(clap::ValueEnum, Clone, PartialEq)]
 enum BackendKind {
@@ -338,7 +338,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     let watch = match watch_client {
         Some(client) => {
             info!(target: telemetry::WATCH, "waiting for the initial list...");
-            Some(watch::start(client, Arc::clone(&engine)).await?)
+            Some(edb::watch::start(client, Arc::clone(&engine)).await?)
         }
         None if cli.watch => anyhow::bail!("--watch needs a k8s datasource"),
         None => None,

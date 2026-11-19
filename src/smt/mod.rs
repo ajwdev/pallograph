@@ -9,8 +9,6 @@ use z3::ast::{Ast, Dynamic, Int};
 use z3::{FuncDecl, Solver, Sort};
 
 use crate::engine::EvalStore;
-use crate::rbac::PermissionTables;
-pub mod rbac_model;
 pub mod scheduling;
 
 /// Encodes Mangle ground facts as Z3 assertions and exposes the solver for
@@ -20,10 +18,6 @@ pub struct SmtEncoder<'ctx> {
     pub solver: Solver<'ctx>,
     pub decls: HashMap<String, FuncDecl<'ctx>>,
     pub facts: HashMap<String, Vec<Vec<Value>>>,
-    /// The RBAC tables loaded by `load_rbac_tables`, under the empty key.
-    /// `rbac::diff` now compares `PermissionTables` directly (see
-    /// `rbac::diff`), so this is only read by the `profile_smt_access` bin.
-    pub permission_tables: HashMap<String, PermissionTables>,
 }
 
 impl<'ctx> SmtEncoder<'ctx> {
@@ -33,7 +27,6 @@ impl<'ctx> SmtEncoder<'ctx> {
             solver: Solver::new(ctx),
             decls: HashMap::new(),
             facts: HashMap::new(),
-            permission_tables: HashMap::new(),
         }
     }
 

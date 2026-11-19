@@ -8,7 +8,6 @@
 //! ```text
 //! cargo build --profile profiling --bin profile_smt_access
 //! samply record target/profiling/profile_smt_access --scenario cluster-admin --iters 1000
-//! samply record target/profiling/profile_smt_access --scenario load-permission-tables --iters 100
 //! ```
 
 use std::hint::black_box;
@@ -18,8 +17,7 @@ use clap::{Parser, ValueEnum};
 use pallograph::engine::{
     Backend, EvalStore, InterpreterBackend, load_bench_fixtures, load_medium_bench_fixtures,
 };
-use pallograph::rbac::RbacAccessModel;
-use pallograph::smt::SmtEncoder;
+use pallograph::k8s::rbac::RbacAccessModel;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Fixture {
@@ -31,8 +29,6 @@ enum Fixture {
 enum Scenario {
     /// Build the RBAC access model used by cluster-admin/access checks.
     LoadAccessModel,
-    /// Build the permission tables `rbac::diff` compares, for one snapshot.
-    LoadPermissionTables,
     /// Enumerate principals with a direct cluster-admin grant.
     DirectClusterAdmin,
     /// Enumerate escalation-aware cluster-admin reachability.
@@ -75,12 +71,6 @@ fn access_model(store: &EvalStore, include_builtins: bool) -> RbacAccessModel {
     model
 }
 
-fn permission_tables<'ctx>(ctx: &'ctx z3::Context, store: &EvalStore) -> SmtEncoder<'ctx> {
-    let mut enc = SmtEncoder::new(ctx);
-    enc.load_rbac_tables(store);
-    enc
-}
-
 fn main() {
     let args = Args::parse();
     let store = load_store(args.fixture);
@@ -93,18 +83,6 @@ fn main() {
             for _ in 0..args.iters {
                 let model = access_model(&store, args.include_builtins);
                 total += black_box(model.grant_count());
-            }
-        }
-        Scenario::LoadPermissionTables => {
-            for _ in 0..args.iters {
-                let cfg = z3::Config::new();
-                let ctx = z3::Context::new(&cfg);
-                let enc = permission_tables(&ctx, &store);
-                total += black_box(
-                    enc.permission_tables
-                        .get("")
-                        .map_or(0, |tables| tables.grant_count()),
-                );
             }
         }
         Scenario::DirectClusterAdmin => {

@@ -47,7 +47,7 @@ use std::path::PathBuf;
 
 const VOCAB: &str = include_str!("../../hack/anonymize/public-vocab.txt");
 const API_RESOURCES: &str = include_str!("../../fixtures/testdata/small/api-resources.txt");
-const BUILTINS: &str = include_str!("../builtins.txt");
+const BUILTINS: &str = include_str!("../k8s/builtins.txt");
 
 /// Names the rules and SMT code compare against literally.
 const KEEP_NAMES: &[&str] = &[

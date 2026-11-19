@@ -1,10 +1,14 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+pub(crate) mod delta;
+mod load;
+pub mod watch;
+
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use futures::stream::{self, StreamExt, TryStreamExt};
 use kube::api::{ApiResource, DynamicObject, ListParams};
 use kube::core::ObjectMeta;
@@ -13,8 +17,6 @@ use kube::{Api, Client, ResourceExt};
 use mangle_common::{Store, Value};
 use mangle_interpreter::MemStore;
 use serde_json::Value as Json;
-
-use serde::Deserialize;
 use tracing::{debug, info};
 
 use crate::telemetry;
@@ -23,6 +25,8 @@ use crate::value::{data_to_json, json_to_value};
 // TODO: consider switching to concrete k8s-openapi types (Pod, ServiceAccount, etc.)
 // for the cluster path once the loading pipeline is stable. DynamicObject avoids the
 // typed→JSON→Mangle roundtrip but loses compile-time schema validation.
+
+const LAST_APPLIED_ANNOTATION: &str = "kubectl.kubernetes.io/last-applied-configuration";
 
 // Resources to list from the cluster. Fields: (group, version, kind, plural).
 const CLUSTER_RESOURCES: &[(&str, &str, &str, &str)] = &[
@@ -51,8 +55,6 @@ const CLUSTER_RESOURCES: &[(&str, &str, &str, &str)] = &[
     ("karpenter.sh", "v1", "NodePool", "nodepools"),
 ];
 
-// ---- fact source abstraction ----
-
 pub trait FactSource {
     fn k8s_objects(&mut self) -> Result<Vec<(DynamicObject, Option<(String, String)>)>>;
 }
@@ -72,10 +74,10 @@ impl FactSource for K8sManifestsSource {
     fn k8s_objects(&mut self) -> Result<Vec<(DynamicObject, Option<(String, String)>)>> {
         let mut objects = Vec::new();
         for pattern in &self.paths {
-            let expanded = expand_pattern(pattern);
+            let expanded = expand_pattern(pattern)?;
             let mut matched = false;
+
             for path in expanded {
-                let path = path?;
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 if !matches!(ext, "json" | "yaml" | "yml") {
                     continue;
@@ -84,23 +86,24 @@ impl FactSource for K8sManifestsSource {
                 let bytes =
                     std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
                 let parsed = match ext {
-                    "json" => parse_k8s_json(&bytes),
-                    _ => parse_k8s_yaml(&bytes),
+                    "json" => load::parse_k8s_json(&bytes),
+                    _ => load::parse_k8s_yaml(&bytes),
                 }
                 .with_context(|| format!("parsing {}", path.display()))?;
                 objects.extend(parsed);
             }
+
             if !matched {
                 anyhow::bail!("no .json, .yaml or .yml files match {pattern:?}");
             }
         }
+
         Ok(objects)
     }
 }
 
-fn expand_pattern(pattern: &str) -> Box<dyn Iterator<Item = Result<std::path::PathBuf>>> {
+fn expand_pattern(pattern: &str) -> Result<Vec<std::path::PathBuf>> {
     let path = std::path::Path::new(pattern);
-    // Plain directory — expand recursively to all files.
     let glob_pattern = if path.is_dir() && !pattern.contains('*') {
         format!("{pattern}/**/*")
     } else {
@@ -110,16 +113,16 @@ fn expand_pattern(pattern: &str) -> Box<dyn Iterator<Item = Result<std::path::Pa
         require_literal_separator: false,
         ..Default::default()
     };
-    match glob::glob_with(&glob_pattern, opts) {
-        Ok(paths) => Box::new(paths.filter_map(|e| match e {
+
+    let paths = glob::glob_with(&glob_pattern, opts)
+        .with_context(|| format!("invalid glob pattern {pattern:?}"))?;
+    paths
+        .filter_map(|e| match e {
             Ok(p) if p.is_file() => Some(Ok(p)),
             Ok(_) => None,
-            Err(e) => Some(Err(anyhow::anyhow!(e))),
-        })),
-        Err(e) => Box::new(std::iter::once(Err(anyhow::anyhow!(
-            "invalid glob pattern {pattern:?}: {e}"
-        )))),
-    }
+            Err(e) => Some(Err(anyhow!(e))),
+        })
+        .collect()
 }
 
 /// The resources to read from a cluster, from [`CLUSTER_RESOURCES`].
@@ -240,51 +243,9 @@ impl FactSource for ShellSource {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("command exited non-zero: {}", stderr.trim());
         }
-        parse_k8s_json(&output.stdout)
-    }
-}
 
-/// Parse YAML bytes into DynamicObjects.
-/// Handles multi-document YAML (--- separators) and List unwrapping.
-fn parse_k8s_yaml(bytes: &[u8]) -> Result<Vec<(DynamicObject, Option<(String, String)>)>> {
-    let text = std::str::from_utf8(bytes).context("invalid UTF-8")?;
-    let mut objects = Vec::new();
-    for document in serde_yaml::Deserializer::from_str(text) {
-        let value = serde_yaml::Value::deserialize(document).context("parsing document")?;
-        if let Some(items) = value.get("items").and_then(|i| i.as_sequence()) {
-            for item in items {
-                let obj: DynamicObject =
-                    serde_yaml::from_value(item.clone()).context("parsing DynamicObject")?;
-                objects.push((obj, None));
-            }
-        } else {
-            let obj: DynamicObject =
-                serde_yaml::from_value(value).context("parsing DynamicObject")?;
-            objects.push((obj, None));
-        }
+        load::parse_k8s_json(&output.stdout)
     }
-    Ok(objects)
-}
-
-/// Parse JSON bytes into DynamicObjects.
-/// Handles List unwrapping and concatenated top-level objects (streaming).
-fn parse_k8s_json(bytes: &[u8]) -> Result<Vec<(DynamicObject, Option<(String, String)>)>> {
-    let mut objects = Vec::new();
-    for result in serde_json::Deserializer::from_slice(bytes).into_iter::<serde_json::Value>() {
-        let value = result.context("parsing JSON")?;
-        if let Some(items) = value.get("items").and_then(|i| i.as_array()) {
-            for item in items {
-                let obj: DynamicObject =
-                    serde_json::from_value(item.clone()).context("parsing DynamicObject")?;
-                objects.push((obj, None));
-            }
-        } else {
-            let obj: DynamicObject =
-                serde_json::from_value(value).context("parsing DynamicObject")?;
-            objects.push((obj, None));
-        }
-    }
-    Ok(objects)
 }
 
 pub fn populate(store: &mut MemStore, source: &mut dyn FactSource) -> Result<()> {
@@ -331,7 +292,7 @@ impl ObjectKey {
         }
     }
 
-    /// The key of a `k8s/5` tuple, or None if it is not shaped like one.
+    // The key of a `k8s/5` tuple, or None if it is not shaped like one.
     pub fn of_k8s_tuple(tuple: &[Value]) -> Option<Self> {
         match tuple {
             [
@@ -387,7 +348,7 @@ pub fn regenerate_facts(tuple: &[Value]) -> Vec<Fact> {
 pub(crate) fn emitted_facts(obj: &DynamicObject, type_hint: Option<(&str, &str)>) -> Vec<Fact> {
     let mut store = MemStore::new();
     add_object(&mut store, obj, type_hint);
-    drain_store(store)
+    collect_store_facts(store)
 }
 
 /// A k8s object run through the projection pipeline: its key and every fact
@@ -441,8 +402,8 @@ pub fn object_key(obj: &DynamicObject, type_hint: Option<(&str, &str)>) -> Objec
     )
 }
 
-/// Drain all facts from a MemStore into a Vec for later replay.
-pub fn drain_store(store: MemStore) -> Vec<Fact> {
+/// Collect all facts from a MemStore into a Vec for later replay.
+pub fn collect_store_facts(store: MemStore) -> Vec<Fact> {
     let mut out = Vec::new();
     for rel in store.relation_names() {
         let rel: String = rel;
@@ -466,9 +427,6 @@ fn resolve_type<'a>(
             .unwrap_or_default()
     })
 }
-
-/// Written by `kubectl apply`: a copy of the applied manifest.
-const LAST_APPLIED_ANNOTATION: &str = "kubectl.kubernetes.io/last-applied-configuration";
 
 fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str, &str)>) {
     let (api_version, kind) = resolve_type(obj, type_hint);
@@ -1916,7 +1874,7 @@ mod tests {
     #[test]
     fn json_single_object() {
         let input = r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"pod-a"}}"#;
-        let result = parse_k8s_json(input.as_bytes()).unwrap();
+        let result = load::parse_k8s_json(input.as_bytes()).unwrap();
         assert_eq!(kinds(&result), vec!["Pod"]);
     }
 
@@ -1927,7 +1885,7 @@ mod tests {
             {"apiVersion":"v1","kind":"Pod","metadata":{"name":"pod-b"}}
             {"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"sa-a"}}
         "#;
-        let result = parse_k8s_json(input.as_bytes()).unwrap();
+        let result = load::parse_k8s_json(input.as_bytes()).unwrap();
         assert_eq!(kinds(&result), vec!["Pod", "Pod", "ServiceAccount"]);
     }
 
@@ -1941,14 +1899,14 @@ mod tests {
                 {"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"sa-a"}}
             ]
         }"#;
-        let result = parse_k8s_json(input.as_bytes()).unwrap();
+        let result = load::parse_k8s_json(input.as_bytes()).unwrap();
         assert_eq!(kinds(&result), vec!["Pod", "ServiceAccount"]);
     }
 
     #[test]
     fn yaml_single_document() {
         let input = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: pod-a\n";
-        let result = parse_k8s_yaml(input.as_bytes()).unwrap();
+        let result = load::parse_k8s_yaml(input.as_bytes()).unwrap();
         assert_eq!(kinds(&result), vec!["Pod"]);
     }
 
@@ -1971,7 +1929,7 @@ metadata:
   name: cr-a
 rules: []
 ";
-        let result = parse_k8s_yaml(input.as_bytes()).unwrap();
+        let result = load::parse_k8s_yaml(input.as_bytes()).unwrap();
         assert_eq!(kinds(&result), vec!["Pod", "ServiceAccount", "ClusterRole"]);
     }
 
@@ -1990,7 +1948,7 @@ items:
     metadata:
       name: sa-a
 ";
-        let result = parse_k8s_yaml(input.as_bytes()).unwrap();
+        let result = load::parse_k8s_yaml(input.as_bytes()).unwrap();
         assert_eq!(kinds(&result), vec!["Pod", "ServiceAccount"]);
     }
 }

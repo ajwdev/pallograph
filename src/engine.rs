@@ -1096,7 +1096,7 @@ impl Engine {
         backend: Box<dyn Backend>,
     ) -> Result<Self> {
         Self::from_objects(
-            crate::edb::drain_store(edb_store),
+            crate::edb::collect_store_facts(edb_store),
             objects,
             rule_sources,
             backend,
@@ -1678,7 +1678,7 @@ mod tests {
             vec!["fixtures/testdata/small".to_string()],
         )
         .context("load testdata")?;
-        let edb = crate::edb::drain_store(edb_store);
+        let edb = crate::edb::collect_store_facts(edb_store);
 
         let rule_files = glob::glob("rules/*.mg")
             .context("glob rules")?
