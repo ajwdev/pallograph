@@ -377,9 +377,6 @@ Important groups in that target:
 
 - `small_smt_access/load_access_model`: build the finite RBAC access model from
   a pre-evaluated store.
-- `small_smt_access/load_permission_tables`: build the permission tables
-  `rbac::diff` compares, for one snapshot. Named `assert_rbac_axioms_z3`
-  before it stopped loading anything into Z3.
 - `small_smt_access/load_access_model_and_cluster_admin` and
   `small_smt_access/load_access_model_and_namespace_isolation`: include access
   model construction plus the query while excluding initial datasource/backend
@@ -408,8 +405,7 @@ samply record target/profiling/profile_smt_access --scenario cluster-admin --ite
 samply record target/profiling/profile_smt_access --scenario namespace-isolation --iters 1000
 ```
 
-Other scenarios include `load-access-model`, `load-permission-tables`, and
-`direct-cluster-admin`.
+Other scenarios include `load-access-model` and `direct-cluster-admin`.
 
 The `profiling` Cargo profile is the release profile plus debug symbols, so
 samply can symbolize stacks. Release builds stay lean. To profile the main

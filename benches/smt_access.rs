@@ -22,7 +22,6 @@ use pallograph::engine::{
     load_medium_bench_fixtures,
 };
 use pallograph::k8s::rbac::RbacAccessModel;
-use pallograph::smt::SmtEncoder;
 
 #[derive(Clone, Copy)]
 enum AccessBackend {
@@ -67,15 +66,6 @@ fn access_model(store: &pallograph::engine::EvalStore) -> RbacAccessModel {
     RbacAccessModel::from_store(store)
 }
 
-fn permission_tables<'ctx>(
-    ctx: &'ctx z3::Context,
-    store: &pallograph::engine::EvalStore,
-) -> SmtEncoder<'ctx> {
-    let mut enc = SmtEncoder::new(ctx);
-    enc.load_rbac_tables(store);
-    enc
-}
-
 fn bench_store(c: &mut Criterion, name: &str, store: pallograph::engine::EvalStore) {
     let mut group = c.benchmark_group(name);
     group.sample_size(20);
@@ -84,17 +74,6 @@ fn bench_store(c: &mut Criterion, name: &str, store: pallograph::engine::EvalSto
 
     group.bench_function("load_access_model", |b| {
         b.iter(|| black_box(access_model(&store)))
-    });
-
-    group.bench_function("load_permission_tables", |b| {
-        b.iter_batched(
-            z3::Config::new,
-            |cfg| {
-                let ctx = z3::Context::new(&cfg);
-                black_box(permission_tables(&ctx, &store));
-            },
-            BatchSize::SmallInput,
-        )
     });
 
     group.bench_function("load_access_model_and_cluster_admin", |b| {
