@@ -51,4 +51,10 @@ jobs:
           restore-keys: go-${{ runner.os }}-
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: hack/compat-gen.sh
+      # The oracle's own tests pin its answers to hand-checked Kubernetes
+      # behaviour, so a change that bends it fails here instead of quietly
+      # moving what the compatibility tests compare against.
+      - run: test -z "$(gofmt -l tools/k8s-oracle)"
+      - run: go -C tools/k8s-oracle vet ./...
+      - run: go -C tools/k8s-oracle test ./...
       - run: cargo test --all-targets --locked
