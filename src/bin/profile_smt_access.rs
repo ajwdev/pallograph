@@ -18,7 +18,7 @@ use clap::{Parser, ValueEnum};
 use pallograph::engine::{
     Backend, EvalStore, InterpreterBackend, load_bench_fixtures, load_medium_bench_fixtures,
 };
-use pallograph::rbac::RbacAccessModel;
+use pallograph::k8s::rbac::RbacAccessModel;
 use pallograph::smt::SmtEncoder;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

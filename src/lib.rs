@@ -10,16 +10,14 @@
 #![allow(clippy::type_complexity)]
 
 pub mod api;
-pub(crate) mod builtins;
 pub mod config;
 pub(crate) mod dd;
 pub mod edb;
 pub mod engine;
+pub mod k8s;
 pub mod load;
 pub(crate) mod query;
-pub mod rbac;
 pub mod repl;
-pub(crate) mod selector;
 pub mod smt;
 pub mod snapshot;
 pub(crate) mod source;

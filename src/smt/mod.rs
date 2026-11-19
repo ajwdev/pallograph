@@ -9,7 +9,7 @@ use z3::ast::{Ast, Dynamic, Int};
 use z3::{FuncDecl, Solver, Sort};
 
 use crate::engine::EvalStore;
-use crate::rbac::PermissionTables;
+use crate::k8s::rbac::PermissionTables;
 pub mod rbac_model;
 pub mod scheduling;
 

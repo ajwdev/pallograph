@@ -336,7 +336,7 @@ mod tests {
     use super::*;
     use crate::edb;
     use crate::engine::{Engine, EvalStore, InterpreterBackend};
-    use crate::rbac::Subject;
+    use crate::k8s::rbac::Subject;
 
     /// A `direct_perm` row granting a User subject, for any object name.
     fn user_grant(user: &str, ns: &str, apigroup: &str, resource: &str, verb: &str) -> Vec<Value> {

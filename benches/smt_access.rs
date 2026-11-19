@@ -21,7 +21,7 @@ use pallograph::engine::{
     Backend, DdBackend, EvalStore, InterpreterBackend, load_bench_fixtures,
     load_medium_bench_fixtures,
 };
-use pallograph::rbac::RbacAccessModel;
+use pallograph::k8s::rbac::RbacAccessModel;
 use pallograph::smt::SmtEncoder;
 
 #[derive(Clone, Copy)]

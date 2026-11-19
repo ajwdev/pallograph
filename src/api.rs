@@ -23,13 +23,13 @@ use crate::dd::value::Row;
 use crate::edb::delta::diff_object_sides;
 use crate::edb::{ObjectFacts, ObjectKey, expression_facts, single_object_facts};
 use crate::engine::{ApplySummary, Change, Engine, EvalStore, RelationDoc};
+use crate::k8s::rbac::diff::{AccessDiff, access_diff};
+use crate::k8s::rbac::{PermissionTables, RbacAccessModel, Violation};
+use crate::k8s::selector::parse_selector;
 use crate::query::{
     self, body_relations, count_top_level_args, extract_vars, single_atom, split_atom,
     split_projection, suggest,
 };
-use crate::rbac::diff::{AccessDiff, access_diff};
-use crate::rbac::{PermissionTables, RbacAccessModel, Violation};
-use crate::selector::parse_selector;
 use crate::smt::SmtEncoder;
 use crate::smt::scheduling::{self, CoverageGap, PlacementResult, UnschedulablePod};
 use crate::snapshot::{Diff, FrozenState};

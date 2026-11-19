@@ -20,9 +20,9 @@ use crate::api::{
 use crate::edb::watch::WatchStatus;
 use crate::edb::{FactSource, K8sManifestsSource, ShellSource};
 use crate::engine::{ApplySummary, EvalStore, RelationDoc};
+use crate::k8s::rbac;
+use crate::k8s::rbac::diff::AccessDiff;
 use crate::load;
-use crate::rbac;
-use crate::rbac::diff::AccessDiff;
 use crate::smt;
 use crate::snapshot::FrozenState;
 use crate::source::{parse_ground_tuple, split_two_atoms};
@@ -3748,7 +3748,7 @@ mod query_helper_tests {
 #[cfg(test)]
 mod binding_format_tests {
     use super::fmt_binding;
-    use crate::rbac::AccessPath;
+    use crate::k8s::rbac::AccessPath;
 
     fn path(binding_kind: &'static str, ns: &str, role_kind: &'static str) -> AccessPath {
         AccessPath {
@@ -3783,7 +3783,7 @@ mod binding_format_tests {
 #[cfg(test)]
 mod write_summary_tests {
     use super::writer_technique_lines;
-    use crate::rbac::{AccessPath, PathKind, Subject};
+    use crate::k8s::rbac::{AccessPath, PathKind, Subject};
 
     /// Build a cluster-scoped write path. `binding`/`role` of "(new)" mark a
     /// minted object, as `collect_rbac_write_paths` emits them.

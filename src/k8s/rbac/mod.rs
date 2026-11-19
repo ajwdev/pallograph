@@ -324,7 +324,7 @@ impl RbacAccessModel {
     /// principal unless `include_builtins` is set.
     fn is_reported(&self, principal: &Subject, expected: &HashSet<&str>) -> bool {
         !expected.contains(principal.name.as_str())
-            && (self.include_builtins || !crate::builtins::is_builtin(&principal.name))
+            && (self.include_builtins || !crate::k8s::builtins::is_builtin(&principal.name))
     }
 
     /// The identities and groups `principal` controls: `controls_identity`

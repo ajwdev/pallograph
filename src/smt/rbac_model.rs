@@ -20,7 +20,7 @@
 
 use super::SmtEncoder;
 use crate::engine::EvalStore;
-use crate::rbac::PermissionTables;
+use crate::k8s::rbac::PermissionTables;
 
 impl<'ctx> SmtEncoder<'ctx> {
     /// Index the Mangle RBAC relations in `PermissionTables`, under the
