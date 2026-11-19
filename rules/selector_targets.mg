@@ -50,7 +50,6 @@ selector_target_kind("policy/v1beta1", "PodDisruptionBudget", "v1", "Pod", /same
 selector_target_kind("networking.k8s.io/v1", "NetworkPolicy", "v1", "Pod", /same_namespace).
 selector_target_kind("v1", "PersistentVolumeClaim", "v1", "PersistentVolume", /cluster).
 
-# The synthetic owner edb.rs emits for each ClusterRole
-# aggregationRule.clusterRoleSelectors entry (see rbac_roles.mg).
-selector_target_kind("pallograph.dev/agg", "ClusterRoleAggregation",
+# A ClusterRole's aggregationRule.clusterRoleSelectors (see rbac_roles.mg).
+selector_target_kind("rbac.authorization.k8s.io/v1", "ClusterRole",
                      "rbac.authorization.k8s.io/v1", "ClusterRole", /cluster).

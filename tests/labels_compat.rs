@@ -29,6 +29,10 @@ use serde_json::Value as Json;
 /// An object as (apiVersion, kind, namespace, name).
 type ObjectRef = [String; 4];
 
+/// A selector: the object that owns it, and which of its selectors it is
+/// (the field path, e.g. spec.selector).
+type SelectorRef = (ObjectRef, String);
+
 /// Where hack/compat-gen.sh writes the oracle output:
 /// `<target>/labels-compat/worlds`, `<target>/tmp` being
 /// `CARGO_TARGET_TMPDIR`.
@@ -97,11 +101,14 @@ fn json_ref(object: &Json) -> ObjectRef {
         .map(|field| object[field].as_str().unwrap_or_default().to_string())
 }
 
-fn value_ref(row: &[Value]) -> Result<ObjectRef> {
-    let text = |value: &Value| match value {
+fn text(value: &Value) -> Result<String> {
+    match value {
         Value::String(text) => Ok(text.clone()),
         other => bail!("expected a string, got {other:?}"),
-    };
+    }
+}
+
+fn value_ref(row: &[Value]) -> Result<ObjectRef> {
     Ok([
         text(&row[0])?,
         text(&row[1])?,
@@ -137,25 +144,40 @@ fn check_world(world: &Path, backend: Box<dyn Backend>) -> Result<Vec<String>> {
         }
     };
 
-    // selector_matches, owner by owner, so a difference names its owner.
-    let mut got: BTreeSet<(ObjectRef, ObjectRef)> = BTreeSet::new();
+    // selector_matches, selector by selector (an owner and which of its
+    // selectors), so a difference names the selector.
+    let mut got: BTreeSet<(SelectorRef, ObjectRef)> = BTreeSet::new();
     for row in live.scan("selector_matches") {
-        got.insert((value_ref(&row[0..4])?, value_ref(&row[4..8])?));
+        let selector = (value_ref(&row[0..4])?, text(&row[4])?);
+        got.insert((selector, value_ref(&row[5..9])?));
     }
-    let mut want: BTreeSet<(ObjectRef, ObjectRef)> = BTreeSet::new();
+    let mut want: BTreeSet<(SelectorRef, ObjectRef)> = BTreeSet::new();
     for row in read_ndjson(&world.join("selections.ndjson"))? {
-        want.insert((json_ref(&row["owner"]), json_ref(&row["object"])));
+        let selector = (
+            json_ref(&row["owner"]),
+            row["selector"].as_str().unwrap_or_default().to_string(),
+        );
+        want.insert((selector, json_ref(&row["object"])));
     }
-    let owners: BTreeSet<&ObjectRef> = got.iter().chain(&want).map(|(owner, _)| owner).collect();
-    for owner in owners {
-        let objects = |pairs: &BTreeSet<(ObjectRef, ObjectRef)>| {
+    let selectors: BTreeSet<&SelectorRef> = got
+        .iter()
+        .chain(&want)
+        .map(|(selector, _)| selector)
+        .collect();
+    for selector in selectors {
+        let objects = |pairs: &BTreeSet<(SelectorRef, ObjectRef)>| {
             pairs
                 .iter()
-                .filter(|(o, _)| o == owner)
+                .filter(|(s, _)| s == selector)
                 .map(|(_, object)| object.clone())
                 .collect()
         };
-        compare(&owner.join("/"), objects(&got), objects(&want));
+        let (owner, field) = selector;
+        compare(
+            &format!("{} {field}", owner.join("/")),
+            objects(&got),
+            objects(&want),
+        );
     }
 
     // k8s::match and k8s::match-all, through Core like the REPL.
@@ -238,7 +260,7 @@ fn any_kind_example_matches_every_kind() -> Result<()> {
     let kinds = |rows: &[Vec<Value>]| -> Result<BTreeSet<String>> {
         rows.iter()
             .filter(|row| web_service(row))
-            .map(|row| Ok(value_ref(&row[4..8])?[1].clone()))
+            .map(|row| Ok(value_ref(&row[5..9])?[1].clone()))
             .collect()
     };
 

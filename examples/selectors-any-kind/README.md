@@ -18,13 +18,14 @@ that question in its own relation, leaving `selector_matches` alone.
 
 - [`any-kind.mg`](any-kind.mg) - adds a candidate pair for every selector
   and every object in its namespace, whatever the kinds, and defines
-  `selector_matches_any_kind/8` as every pair whose requirements hold. The
+  `selector_matches_any_kind/9` as every pair whose requirements hold. The
   built-in matcher in `rules/labels.mg` does the checking.
 
 `selector_matches_any_kind` includes the owner itself when its own labels
 satisfy its selector (a Deployment labelled `app=web` selecting `app=web`),
 and keeps the built-in cluster-scoped targets (a PersistentVolumeClaim's
-PersistentVolumes).
+PersistentVolumes). A cluster-scoped owner, such as a ClusterRole's
+aggregation selectors, is paired with every cluster-scoped object.
 
 ## Use it
 
@@ -32,7 +33,7 @@ Load it at startup with `--rules`, or at runtime with `source`:
 
 ```
 pallograph --rules examples/selectors-any-kind/any-kind.mg ...
-?- selector_matches_any_kind("v1", "Service", "apps", "web", A, K, N, M)
+?- selector_matches_any_kind("v1", "Service", "apps", "web", S, A, K, N, M)
 ```
 
 ## Graph edges
@@ -44,7 +45,7 @@ alongside `any-kind.mg`:
 ```
 graph_edge(SrcApiVersion, SrcKind, SrcNamespace, SrcName,
            DstApiVersion, DstKind, DstNamespace, DstName) :-
-    selector_matches_any_kind(SrcApiVersion, SrcKind, SrcNamespace, SrcName,
+    selector_matches_any_kind(SrcApiVersion, SrcKind, SrcNamespace, SrcName, _,
                               DstApiVersion, DstKind, DstNamespace, DstName).
 ```
 

@@ -2,8 +2,8 @@
 # a Service selects Pods in its namespace, not the Deployment, ReplicaSet or
 # ConfigMap carrying the same labels, and a PodDisruptionBudget that selects
 # by absence (NotIn) does not pick up Nodes, PersistentVolumes or
-# ClusterRoles. The Pod in namespace "0" sits where the aggregation owner
-# keeps its entry index. Generated from the label selector review's
+# ClusterRoles. A Pod in a namespace named "0", labelled to match a
+# ClusterRole aggregation selector, is not aggregated. Generated from the label selector review's
 # fixture (gen.rb 1 2), then left as written.
 
 apiVersion: v1

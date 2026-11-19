@@ -542,21 +542,18 @@ fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str
 
 // ---- aggregation selector extraction ----
 
-/// Emit the requirements from one aggregation selector entry as standard selector
-/// EDB facts (selector_match_label, selector_expr_in, etc.) under a synthetic owner:
+/// Emit the requirements from each aggregation selector entry as standard selector
+/// EDB facts (selector_match_label, selector_expr_in, etc.), owned by the
+/// ClusterRole, with Selector "aggregationRule.clusterRoleSelectors[i]":
 ///
-///   (ApiVersion="pallograph.dev/agg", Kind="ClusterRoleAggregation",
-///    Namespace=<index>, Name=<aggregator ClusterRole name>)
+///   ("rbac.authorization.k8s.io/v1", "ClusterRole", "", <name>,
+///    "aggregationRule.clusterRoleSelectors[<i>]")
 ///
-/// Using the index in the Namespace slot gives each clusterRoleSelectors[i] its own
-/// owner, so requirements within a single selector are AND'd (all must hold) while
-/// separate selectors are OR'd (independent owners) — matching K8s semantics.
-///
-/// selector_targets.mg gives this owner cluster-scoped ClusterRoles as its
-/// targets, so labels.mg pairs these selectors with every ClusterRole, and
-/// never with an object in a namespace that happens to be named like an
-/// index. The aggregation rule in rbac_roles.mg reads the source ClusterRole
-/// from the matches.
+/// Each entry is its own selector, so requirements within one entry are ANDed
+/// (all must hold) while separate entries are ORed, as in Kubernetes.
+/// selector_targets.mg pairs these selectors with every ClusterRole, and the
+/// aggregation rule in rbac_roles.mg reads the source ClusterRole from the
+/// matches.
 ///
 /// An empty selector (`{}` or `{matchLabels: {}}`) matches every ClusterRole in
 /// Kubernetes, so such an entry gets a `selector_selects_all` fact. Only a
@@ -571,30 +568,32 @@ fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Js
     let Some(selectors) = selectors else { return };
 
     for (i, selector) in selectors.iter().enumerate() {
-        let owner = vec![
-            Value::String("pallograph.dev/agg".into()),
-            Value::String("ClusterRoleAggregation".into()),
-            Value::String(i.to_string()),
+        let selector_key = vec![
+            Value::String("rbac.authorization.k8s.io/v1".into()),
+            Value::String("ClusterRole".into()),
+            Value::String(String::new()),
             Value::String(name.to_string()),
+            Value::String(format!("aggregationRule.clusterRoleSelectors[{i}]")),
         ];
-        let description = format!("ClusterRole {name} clusterRoleSelectors[{i}]");
+        let description = format!("ClusterRole {name} aggregationRule.clusterRoleSelectors[{i}]");
         // clusterRoleSelectors is a list of LabelSelector values, not
         // pointers, so a null entry decodes as {} and selects everything too.
         if emit_selector_requirements(
             store,
-            owner.clone(),
+            selector_key.clone(),
             selector,
             SelectorShape::LabelSelector,
             &description,
         ) == SelectorFacts::Empty
         {
-            store.add_fact("selector_selects_all", owner);
+            store.add_fact("selector_selects_all", selector_key);
         }
     }
 }
 
 /// Build the EDB fact tuples for one selector requirement (a kube `Expression`)
-/// under `owner` (a 4-element [ApiVersion, Kind, Namespace, Name] slice),
+/// under `selector_key` (the owner and which of its selectors:
+/// [ApiVersion, Kind, Namespace, Name, Selector]),
 /// returning them rather than writing to a store so the caller can add them to a
 /// MemStore (load path) or assert/retract them on an Engine (REPL `::match`).
 ///
@@ -609,12 +608,12 @@ fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Js
 /// `index` is the expression's position in its selector, which tells two In
 /// expressions on one key apart.
 pub fn expression_facts(
-    owner: &[Value],
+    selector_key: &[Value],
     index: usize,
     expr: &Expression,
 ) -> Vec<(&'static str, Vec<Value>)> {
     let fact = |rel: &'static str, extra: &[&str]| {
-        let mut args = owner.to_vec();
+        let mut args = selector_key.to_vec();
         args.extend(extra.iter().map(|e| Value::String((*e).to_string())));
         (rel, args)
     };
@@ -662,15 +661,17 @@ enum SelectorShape {
 
 /// Emit selector requirements (matchLabels and matchExpressions) as EDB facts.
 ///
-/// The `owner` slice must be exactly four Values:
-///   [ApiVersion, Kind, Namespace, Name]
-/// which identifies the object that "owns" this selector (i.e. the object whose
-/// spec.selector or aggregation clusterRoleSelector this is).
+/// The `selector_key` slice must be exactly five Values:
+///   [ApiVersion, Kind, Namespace, Name, Selector]
+/// the object that owns this selector, and which of its selectors it is: the
+/// path of the field it was read from, written as Kubernetes writes field
+/// paths (apimachinery field.Path): spec.selector,
+/// aggregationRule.clusterRoleSelectors[1].
 ///
-/// Emits: selector_match_label/6, selector_expr_in/7, selector_expr_notin/6,
-///        selector_expr_exists/5, selector_expr_notexists/5.
+/// Emits: selector_match_label/7, selector_expr_in/8, selector_expr_notin/7,
+///        selector_expr_exists/6, selector_expr_notexists/6.
 ///
-/// These feed the selector_matches/8 engine in labels.mg, which implements
+/// These feed the selector_matches/9 engine in labels.mg, which implements
 /// AND semantics (all requirements within one selector must hold) via the
 /// *_unsatisfied negation pattern.
 ///
@@ -682,12 +683,12 @@ enum SelectorShape {
 /// naming `description` is printed, and the selector matches nothing.
 fn emit_selector_requirements(
     store: &mut MemStore,
-    owner: Vec<Value>,
+    selector_key: Vec<Value>,
     selector: &Json,
     shape: SelectorShape,
     description: &str,
 ) -> SelectorFacts {
-    match selector_requirement_facts(&owner, selector, shape) {
+    match selector_requirement_facts(&selector_key, selector, shape) {
         Ok(facts) if facts.is_empty() => SelectorFacts::Empty,
         Ok(facts) => {
             for (relation, args) in facts {
@@ -705,12 +706,12 @@ fn emit_selector_requirements(
 /// The facts for every requirement of `selector`, or why one of them cannot
 /// be encoded.
 fn selector_requirement_facts(
-    owner: &[Value],
+    selector_key: &[Value],
     selector: &Json,
     shape: SelectorShape,
 ) -> Result<Vec<(&'static str, Vec<Value>)>, String> {
     let fact = |relation: &'static str, extra: &[&str]| {
-        let mut args = owner.to_vec();
+        let mut args = selector_key.to_vec();
         args.extend(extra.iter().map(|e| Value::String((*e).to_string())));
         (relation, args)
     };
@@ -847,11 +848,13 @@ fn extract_labels_and_selectors(
     } else {
         format!("{kind} {namespace}/{name} spec.{field}")
     };
-    if emit_selector_requirements(store, owner.clone(), selector, shape, &description)
+    let mut selector_key = owner;
+    selector_key.push(Value::String(format!("spec.{field}")));
+    if emit_selector_requirements(store, selector_key.clone(), selector, shape, &description)
         == SelectorFacts::Empty
         && empty_selects_all
     {
-        store.add_fact("selector_selects_all", owner);
+        store.add_fact("selector_selects_all", selector_key);
     }
 }
 
@@ -1709,7 +1712,7 @@ mod tests {
     }
 
     /// The selector facts loading `object` emits, as (relation, the columns
-    /// after the owner).
+    /// after the owner, starting with Selector).
     fn selector_facts(object: serde_json::Value) -> BTreeSet<(String, Vec<String>)> {
         let object: DynamicObject = serde_json::from_value(object).unwrap();
         let mut store = MemStore::new();
@@ -1739,7 +1742,11 @@ mod tests {
     // resource. A NetworkPolicy without a podSelector is {}.
     #[test]
     fn empty_selector_selects_all_by_kind() {
-        let selects_all = BTreeSet::from([("selector_selects_all".to_string(), vec![])]);
+        let selects_all = |field: &str| {
+            BTreeSet::from([("selector_selects_all".to_string(), vec![field.to_string()])])
+        };
+        let spec_selector = selects_all("spec.selector");
+        let spec_pod_selector = selects_all("spec.podSelector");
         let object = |api_version: &str, kind: &str, spec: serde_json::Value| {
             json!({
                 "apiVersion": api_version,
@@ -1753,13 +1760,13 @@ mod tests {
                 "policy/v1",
                 "PodDisruptionBudget",
                 json!({"selector": {}}),
-                &selects_all,
+                &spec_selector,
             ),
             (
                 "policy/v1",
                 "PodDisruptionBudget",
                 json!({"selector": {"matchLabels": {}}}),
-                &selects_all,
+                &spec_selector,
             ),
             (
                 "policy/v1",
@@ -1777,13 +1784,13 @@ mod tests {
                 "networking.k8s.io/v1",
                 "NetworkPolicy",
                 json!({"podSelector": {}}),
-                &selects_all,
+                &spec_pod_selector,
             ),
             (
                 "networking.k8s.io/v1",
                 "NetworkPolicy",
                 json!({}),
-                &selects_all,
+                &spec_pod_selector,
             ),
             ("v1", "Service", json!({"selector": {}}), &BTreeSet::new()),
             (
@@ -1830,10 +1837,10 @@ mod tests {
         assert_eq!(
             facts,
             BTreeSet::from([
-                row("selector_expr_in", &["0", "app", "web"]),
-                row("selector_expr_in", &["0", "app", "db"]),
-                row("selector_expr_notin", &["tier", "x"]),
-                row("selector_expr_in", &["2", "app", "db"]),
+                row("selector_expr_in", &["spec.selector", "0", "app", "web"]),
+                row("selector_expr_in", &["spec.selector", "0", "app", "db"]),
+                row("selector_expr_notin", &["spec.selector", "tier", "x"]),
+                row("selector_expr_in", &["spec.selector", "2", "app", "db"]),
             ])
         );
     }
@@ -1852,7 +1859,11 @@ mod tests {
             facts,
             BTreeSet::from([(
                 "selector_match_label".to_string(),
-                vec!["matchLabels".to_string(), "web".to_string()]
+                vec![
+                    "spec.selector".to_string(),
+                    "matchLabels".to_string(),
+                    "web".to_string()
+                ]
             )])
         );
     }
@@ -1861,11 +1872,11 @@ mod tests {
     // is marked empty.
     #[test]
     fn selector_encoding_outcomes() {
-        let owner = vec![Value::String("o".into()); 4];
+        let selector_key = vec![Value::String("o".into()); 5];
         let outcome = |selector: serde_json::Value| {
             emit_selector_requirements(
                 &mut MemStore::new(),
-                owner.clone(),
+                selector_key.clone(),
                 &selector,
                 SelectorShape::LabelSelector,
                 "test",

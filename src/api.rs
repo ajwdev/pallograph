@@ -1132,16 +1132,17 @@ impl Core for LocalCore {
         let expressions = parse_selector(selector).map_err(MatchError::Selector)?;
         // The selector's facts, owned by a query object no real object can
         // collide with; `labels.mg` matches them like any selector.
-        let owner = vec![
+        let selector_key = vec![
             Value::String("pallograph.dev/query".to_string()),
             Value::String("Match".to_string()),
             Value::String(namespace.to_string()),
+            Value::String("query".to_string()),
             Value::String("query".to_string()),
         ];
         let facts: Vec<(String, Vec<Value>)> = expressions
             .iter()
             .enumerate()
-            .flat_map(|(index, expression)| expression_facts(&owner, index, expression))
+            .flat_map(|(index, expression)| expression_facts(&selector_key, index, expression))
             .map(|(relation, args)| (relation.to_string(), args))
             .collect();
 
@@ -1161,16 +1162,16 @@ impl Core for LocalCore {
             .map_err(MatchError::Evaluation)?;
 
         // selector_matches columns: 0 SelApiVersion, 1 SelKind, 2
-        // SelNamespace, 3 SelName, 4 ObjApiVersion, 5 ObjKind, 6
-        // ObjNamespace, 7 ObjName. labels.mg pairs the query owner only
+        // SelNamespace, 3 SelName, 4 Selector, 5 ObjApiVersion, 6 ObjKind,
+        // 7 ObjNamespace, 8 ObjName. labels.mg pairs the query owner only
         // with objects in its namespace, like `kubectl -n`.
         let kind = kind.map(|kind| Value::String(kind.to_string()));
         let mut rows: Vec<Vec<Value>> = store
             .scan("selector_matches")
             .iter()
-            .filter(|row| row.len() == 8 && row[0..4] == owner[..])
-            .filter(|row| kind.as_ref().is_none_or(|kind| row[5] == *kind))
-            .map(|row| row[4..8].to_vec())
+            .filter(|row| row.len() == 9 && row[0..5] == selector_key[..])
+            .filter(|row| kind.as_ref().is_none_or(|kind| row[6] == *kind))
+            .map(|row| row[5..9].to_vec())
             .collect();
         rows.sort();
         Ok(Rows {
