@@ -27,6 +27,8 @@ use crate::smt;
 use crate::snapshot::FrozenState;
 use crate::source::{parse_ground_tuple, split_two_atoms};
 
+pub mod command;
+
 struct ReplHelper {
     path_completer: FilenameCompleter,
     /// Alias names, refreshed before each prompt (see `Input::set_completions`).
@@ -301,7 +303,7 @@ fn print_relation_detail(relation: &RelationInfo) {
 /// `rel(a, b, ...)` tuples and `Pretty` indents nested values. `Table` prints
 /// an aligned table with a header row. `Ndjson` emits one JSON object per
 /// tuple on its own line, for piping into `jq`, DuckDB, etc.
-#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum OutputFormat {
     #[default]
     #[value(name = "default")]
