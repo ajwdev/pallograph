@@ -311,6 +311,9 @@ CI runs inside the Nix shell, so run checks the same way:
 nix develop .#ci -c cargo fmt --check
 nix develop .#ci -c cargo clippy --all-targets --locked -- -D warnings
 nix develop .#ci -c hack/compat-gen.sh   # needed before rbac_compat tests
+nix develop .#ci -c sh -c 'test -z "$(gofmt -l tools/k8s-oracle)"'
+nix develop .#ci -c go -C tools/k8s-oracle vet ./...
+nix develop .#ci -c go -C tools/k8s-oracle test ./...
 nix develop .#ci -c cargo test --all-targets --locked
 ```
 
