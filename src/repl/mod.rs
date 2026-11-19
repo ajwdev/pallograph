@@ -27,6 +27,10 @@ use crate::smt;
 use crate::snapshot::FrozenState;
 use crate::source::{parse_ground_tuple, split_two_atoms};
 
+pub mod command;
+
+use command::{AliasCommand, Command};
+
 struct ReplHelper {
     path_completer: FilenameCompleter,
     /// Alias names, refreshed before each prompt (see `Input::set_completions`).
@@ -35,74 +39,219 @@ struct ReplHelper {
     relations: Vec<String>,
 }
 
-/// Completable command paths: root verbs, subsystem namespaces, and their
-/// subcommands. Kept in step with the dispatcher by hand; see `print_help`.
-fn command_completions() -> &'static [&'static str] {
-    &[
-        // Root verbs.
-        "show",
-        "why",
-        "query",
-        "explain",
-        "define",
-        "source",
-        "load",
-        "snapshot",
-        "rollback",
-        "diff",
-        "diff-relation",
-        "use",
-        "format",
-        "pretty",
-        "smtlib",
-        "alias",
-        "unalias",
-        "help",
-        "quit",
-        // Subsystem namespaces (a bare `rbac` completes to `rbac::`).
-        "rbac::",
-        "sched::",
-        "k8s::",
-        // Subsystem subcommands.
-        "rbac::access",
-        "rbac::reaches",
-        "rbac::cluster-admin",
-        "rbac::isolation",
-        "rbac::diff",
-        "sched::node-selector",
-        "sched::anti-affinity",
-        "sched::karpenter",
-        "k8s::load",
-        "k8s::match",
-        "k8s::match-all",
-        "k8s::apply-delta",
-    ]
+/// One REPL command path and the metadata the completer, the usage hints, and
+/// the detailed-help topics all read, so those three cannot drift from each
+/// other. The prose in `print_help` is maintained separately; this is the
+/// machine-read list.
+struct CommandSpec {
+    /// The path without a leading `::` (e.g. `diff`, `rbac::reaches`).
+    path: &'static str,
+    /// One-line usage shown when the command is invoked with no arguments (so
+    /// a bare `diff` prints how to use it). `None` for commands that take none
+    /// and for the `rbac::`/`sched::` checks, which parse their own arguments.
+    usage: Option<&'static str>,
+    /// Whether `help <path>` prints a detailed manpage (see
+    /// `print_command_help`).
+    manpage: bool,
 }
 
-/// Usage text for commands that take arguments, shown when one is invoked with
-/// no arguments (so a bare `diff` prints how to use it instead of "unknown
-/// command"). Subsystem rbac::/sched:: commands print their own usage via
-/// `rbac_command` / `sched_command`, so they are not listed here.
-fn command_usage(head: &str) -> Option<&'static str> {
-    Some(match head {
-        "why" => "why <pred>(<args>...)",
-        "query" => "query <body>   (or ?- <body>)",
-        "explain" => "explain <body>   (plan a query without running it)",
-        "define" => "define <rule>.",
-        "source" => "source <src>",
-        "load" => "load <relation> <source>   (source is a file path or ! <cmd>)",
-        "snapshot" => "snapshot <name>",
-        "diff" => "diff <name>   or   diff <name1> <name2>",
-        "diff-relation" => "diff-relation <name> [name2] <relation>",
-        "smtlib" => "smtlib <relation> [relation ...]",
-        "k8s::load" => "k8s::load <src>   (a dir, .json file, or ! <kubectl args>)",
-        "k8s::match" => "k8s::match <Kind> <namespace> <selector>",
-        "k8s::match-all" => "k8s::match-all <namespace> <selector>",
-        "k8s::apply-delta" => {
-            "k8s::apply-delta <base> <head>   (a dir, .json file, or - for an empty side)"
+/// Every command path: root verbs first (in display order), then the subsystem
+/// subcommands grouped by namespace. `command_completions` derives the
+/// namespace prefixes (`rbac::`, ...) from the `::` paths, so a new subcommand
+/// needs only a row here.
+const COMMANDS: &[CommandSpec] = &[
+    // Root verbs.
+    CommandSpec {
+        path: "show",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "why",
+        usage: Some("why <pred>(<args>...)"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "query",
+        usage: Some("query <body>   (or ?- <body>)"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "explain",
+        usage: Some("explain <body>   (plan a query without running it)"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "define",
+        usage: Some("define <rule>."),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "source",
+        usage: Some("source <src>"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "load",
+        usage: Some("load <relation> <source>   (source is a file path or ! <cmd>)"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "snapshot",
+        usage: Some("snapshot <name>"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "rollback",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "diff",
+        usage: Some("diff <name>   or   diff <name1> <name2>"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "diff-relation",
+        usage: Some("diff-relation <name> [name2] <relation>"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "use",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "format",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "pretty",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "smtlib",
+        usage: Some("smtlib <relation> [relation ...]"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "alias",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "unalias",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "help",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "quit",
+        usage: None,
+        manpage: false,
+    },
+    // rbac:: subsystem (checks parse their own arguments, so no usage here).
+    CommandSpec {
+        path: "rbac::access",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "rbac::reaches",
+        usage: None,
+        manpage: true,
+    },
+    CommandSpec {
+        path: "rbac::cluster-admin",
+        usage: None,
+        manpage: true,
+    },
+    CommandSpec {
+        path: "rbac::isolation",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "rbac::diff",
+        usage: None,
+        manpage: true,
+    },
+    // sched:: subsystem.
+    CommandSpec {
+        path: "sched::node-selector",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "sched::anti-affinity",
+        usage: None,
+        manpage: false,
+    },
+    CommandSpec {
+        path: "sched::karpenter",
+        usage: None,
+        manpage: false,
+    },
+    // k8s:: subsystem.
+    CommandSpec {
+        path: "k8s::load",
+        usage: Some("k8s::load <src>   (a dir, .json file, or ! <kubectl args>)"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "k8s::match",
+        usage: Some("k8s::match <Kind> <namespace> <selector>"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "k8s::match-all",
+        usage: Some("k8s::match-all <namespace> <selector>"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "k8s::apply-delta",
+        usage: Some("k8s::apply-delta <base> <head>   (a dir, .json file, or - for an empty side)"),
+        manpage: false,
+    },
+];
+
+/// Completable command paths derived from [`COMMANDS`]: root verbs, then the
+/// subsystem namespaces (so a bare `rbac` completes to `rbac::`), then the
+/// subsystem subcommands. Order is load-bearing for the completion tests.
+fn command_completions() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = COMMANDS
+        .iter()
+        .map(|c| c.path)
+        .filter(|p| !p.contains("::"))
+        .collect();
+    // Subsystem namespaces, in first-appearance order among the `::` paths.
+    let mut namespaces: Vec<&'static str> = Vec::new();
+    for path in COMMANDS.iter().map(|c| c.path) {
+        if let Some(index) = path.find("::") {
+            let namespace = &path[..index + 2];
+            if !namespaces.contains(&namespace) {
+                namespaces.push(namespace);
+            }
         }
-        _ => return None,
-    })
+    }
+    out.extend(namespaces);
+    out.extend(COMMANDS.iter().map(|c| c.path).filter(|p| p.contains("::")));
+    out
+}
+
+/// Usage text for a command invoked with no arguments, or `None` when it takes
+/// none. Read from [`COMMANDS`].
+fn command_usage(head: &str) -> Option<&'static str> {
+    COMMANDS
+        .iter()
+        .find(|c| c.path == head)
+        .and_then(|c| c.usage)
 }
 
 fn completion_pair(s: String) -> Pair {
@@ -113,9 +262,14 @@ fn completion_pair(s: String) -> Pair {
 }
 
 /// The commands `help <command>` documents in detail (those `print_command_help`
-/// has a manpage for), offered as completions for its argument.
-fn help_topics() -> &'static [&'static str] {
-    &["rbac::reaches", "rbac::cluster-admin", "rbac::diff"]
+/// has a manpage for), offered as completions for its argument. Derived from
+/// the `manpage` flag in [`COMMANDS`].
+fn help_topics() -> Vec<&'static str> {
+    COMMANDS
+        .iter()
+        .filter(|c| c.manpage)
+        .map(|c| c.path)
+        .collect()
 }
 
 /// What to complete for the text before the cursor. The file cases need
@@ -301,7 +455,7 @@ fn print_relation_detail(relation: &RelationInfo) {
 /// `rel(a, b, ...)` tuples and `Pretty` indents nested values. `Table` prints
 /// an aligned table with a header row. `Ndjson` emits one JSON object per
 /// tuple on its own line, for piping into `jq`, DuckDB, etc.
-#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum OutputFormat {
     #[default]
     #[value(name = "default")]
@@ -933,6 +1087,559 @@ pub fn run_script(
     session(core, format, rc, watch, Input::Script(reader))
 }
 
+/// A `use <name> <command>` one-shot queues `<command>` and this sentinel onto
+/// the front of `pending`, so the command runs with `<name>` in use and the
+/// sentinel then restores whatever was in use before. The null byte keeps it
+/// out of reach of anything a person could type.
+const USE_RESTORE_PREFIX: &str = "\0use-restore:";
+
+/// Whether to keep reading after a command or leave the REPL (`quit`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    Continue,
+    Quit,
+}
+
+/// The REPL's mutable session state and the core it drives. `session` owns the
+/// read/queue loop and the startup sentinels; it hands each parsed [`Command`]
+/// to [`Repl::run`], which dispatches to one handler method per command.
+/// Handlers go through `Core` for anything the rules must agree with, so the
+/// same handlers could drive a remote client.
+struct Repl<'a> {
+    core: &'a LocalCore,
+    /// A cluster watcher, when one owns the live state; `rollback` refuses
+    /// while it is present.
+    watch: Option<&'a WatchStatus>,
+    /// Output format for result rows; `format` and `pretty` change it.
+    format: OutputFormat,
+    /// User-defined command aliases, expanded on a bare command's first token;
+    /// a `::`-qualified command bypasses them.
+    aliases: BTreeMap<String, String>,
+    /// `None` = live state; `Some(name)` = `use <name>` points read-only
+    /// commands at that frozen snapshot.
+    in_use: Option<String>,
+    /// Lines queued to run before the next prompt: rc startup lines, the parts
+    /// of a pasted multi-line command, and `use` one-shot sentinels. The
+    /// `bool` is whether the line belongs in rustyline history.
+    pending: std::collections::VecDeque<(String, bool)>,
+    /// A command printed an error (sets the error exit status, stops a script).
+    command_failed: bool,
+    /// A check or diff reported findings (sets the findings exit status).
+    had_failure: bool,
+}
+
+impl<'a> Repl<'a> {
+    fn new(core: &'a LocalCore, watch: Option<&'a WatchStatus>, format: OutputFormat) -> Self {
+        Self {
+            core,
+            watch,
+            format,
+            aliases: BTreeMap::new(),
+            in_use: None,
+            pending: std::collections::VecDeque::new(),
+            command_failed: false,
+            had_failure: false,
+        }
+    }
+
+    /// Print a command's error and mark the line as failed.
+    fn command_error(&mut self, message: impl std::fmt::Display) {
+        eprintln!("{message}");
+        self.command_failed = true;
+    }
+
+    /// Refuse a state-changing command while a snapshot is in use, returning
+    /// `true` (and marking the line failed) when it refused.
+    fn refuse_if_in_use(&mut self) -> bool {
+        refuse_if_in_use(&self.in_use, &mut self.command_failed)
+    }
+
+    /// Where reads go: the snapshot `use` points at, or the live state.
+    fn at(&self) -> At {
+        current_at(&self.in_use)
+    }
+
+    /// Dispatch one parsed command to its handler.
+    fn run(&mut self, command: Command) -> Flow {
+        match command {
+            Command::Query(body) => self.query(&body),
+            Command::Why(fact) => self.why(&fact),
+            Command::Use { snapshot, one_shot } => self.use_snapshot(snapshot, one_shot),
+            Command::Snapshot(name) => self.snapshot(&name),
+            Command::Diff {
+                first,
+                second,
+                relation,
+            } => self.diff(first, second, relation),
+            Command::Show { names, all } => self.show(names, all),
+            Command::Define(rule) => self.define(&rule),
+            Command::AssertFact(atom) => self.assert_fact(&atom),
+            Command::RetractFact(atom) => self.retract_fact(&atom),
+            Command::ReplaceFact(atoms) => self.replace_fact(&atoms),
+            Command::Source(src) => self.source(&src),
+            Command::Load { relation, source } => self.load(&relation, &source),
+            Command::K8sLoad(spec) => self.k8s_load(&spec),
+            Command::K8sApplyDelta(spec) => self.k8s_apply_delta(&spec),
+            Command::K8sMatch {
+                kind,
+                namespace,
+                selector,
+            } => self.k8s_match(kind, &namespace, &selector),
+            Command::RbacDiff {
+                first,
+                second,
+                hide_escalation_lost,
+            } => self.rbac_diff(first, second, hide_escalation_lost),
+            Command::Rbac(rest) => self.rbac(&rest),
+            Command::Sched(rest) => self.sched(&rest),
+            Command::Explain(body) => self.explain(&body),
+            Command::Smtlib(relations) => self.smtlib(&relations),
+            Command::Rollback(name) => self.rollback(&name),
+            Command::Shell(cmd) => self.shell(&cmd),
+            Command::Quit => return Flow::Quit,
+            Command::Help(topic) => match topic {
+                Some(topic) => print_command_help(&topic),
+                None => print_help(),
+            },
+            Command::Alias(alias) => self.alias(alias),
+            Command::Unalias(name) => self.unalias(&name),
+            Command::PrettyToggle => self.pretty_toggle(),
+            Command::Format(format) => self.set_format(format),
+            Command::SubsystemHelp(subsystem) => print_subsystem_help(subsystem.as_str()),
+            Command::Unknown(path) => self.unknown(&path),
+        }
+        Flow::Continue
+    }
+
+    fn query(&mut self, body: &str) {
+        let at = self.at();
+        match self.core.query(&at, body) {
+            Ok(rows) => print_rows(self.format, &rows),
+            Err(e) => self.command_error(e),
+        }
+    }
+
+    fn why(&mut self, fact: &str) {
+        let at = self.at();
+        match self.core.provenance(&at, fact) {
+            Ok(trees) if trees.is_empty() => {
+                eprintln!("No matching facts for '{}'.", fact.trim());
+            }
+            Ok(trees) => trees.iter().for_each(print_provenance),
+            Err(e) => self.command_error(e),
+        }
+    }
+
+    fn use_snapshot(&mut self, snapshot: Option<String>, one_shot: Option<String>) {
+        let Some(name) = snapshot else {
+            self.in_use = None;
+            eprintln!("Using live state.");
+            return;
+        };
+        if !self.core.has_snapshot(&name) {
+            self.command_error(format!("No snapshot named '{name}'."));
+            return;
+        }
+        match one_shot {
+            None => {
+                eprintln!("Using snapshot '{name}'.");
+                self.in_use = Some(name);
+            }
+            Some(command) => {
+                // Queue the command to run with `name` in use, then a sentinel
+                // to restore whatever was in use before, since the sentinel is
+                // just the next queued line.
+                let prev = self.in_use.clone().unwrap_or_default();
+                self.pending
+                    .push_front((format!("{USE_RESTORE_PREFIX}{prev}"), false));
+                self.pending.push_front((command, false));
+                self.in_use = Some(name);
+            }
+        }
+    }
+
+    fn snapshot(&mut self, name: &str) {
+        if self.refuse_if_in_use() {
+            return;
+        }
+        match self.core.snapshot(name) {
+            Ok(info) => eprintln!(
+                "Saved snapshot '{}' ({} relations, {} facts).",
+                info.name, info.relations, info.facts
+            ),
+            Err(e) => self.command_error(e),
+        }
+    }
+
+    fn diff(&mut self, first: String, second: Option<String>, relation: Option<String>) {
+        let (before, after) = match second {
+            Some(second) => (At::Snapshot(first), At::Snapshot(second)),
+            None => (At::Snapshot(first), self.at()),
+        };
+        match self.core.diff(&before, &after, relation.as_deref()) {
+            Ok(diff) => print!("{diff}"),
+            Err(e) => self.command_error(e),
+        }
+    }
+
+    fn show(&mut self, names: Vec<String>, all: bool) {
+        let at = self.at();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        match self.core.relations(&at, &name_refs) {
+            Ok(relations) if names.is_empty() => print_relation_list(&relations, all),
+            // Detail view: a psql \d-style block per requested relation.
+            Ok(relations) => relations.iter().for_each(print_relation_detail),
+            Err(e) => self.command_error(e),
+        }
+    }
+
+    fn define(&mut self, rule: &str) {
+        if self.refuse_if_in_use() {
+            return;
+        }
+        match self.core.define(rule) {
+            Ok(()) => eprintln!("Rule added and evaluated."),
+            Err(e) => self.command_error(e),
+        }
+    }
+
+    fn assert_fact(&mut self, atom: &str) {
+        if self.refuse_if_in_use() {
+            return;
+        }
+        match parse_fact(atom) {
+            Ok(fact) => match self.core.assert_fact(fact) {
+                Ok(true) => eprintln!("Asserted."),
+                Ok(false) => eprintln!("Fact already exists."),
+                Err(e) => self.command_error(e),
+            },
+            Err(e) => self.command_error(format!("Parse error: {e}")),
+        }
+    }
+
+    fn retract_fact(&mut self, atom: &str) {
+        if self.refuse_if_in_use() {
+            return;
+        }
+        match parse_fact(atom) {
+            Ok(fact) => match self.core.retract_fact(&fact) {
+                Ok(true) => eprintln!("Retracted."),
+                Ok(false) => eprintln!("No matching fact found."),
+                Err(e) => self.command_error(e),
+            },
+            Err(e) => self.command_error(format!("Parse error: {e}")),
+        }
+    }
+
+    fn replace_fact(&mut self, atoms: &str) {
+        if self.refuse_if_in_use() {
+            return;
+        }
+        let Some((old_atom, new_atom)) = split_two_atoms(atoms) else {
+            self.command_error("Usage: ~pred(old_args). pred(new_args).");
+            return;
+        };
+        let parsed =
+            parse_fact(old_atom).and_then(|old| parse_fact(new_atom).map(|new| (old, new)));
+        match parsed {
+            Ok((old, new)) => match self.core.replace_fact(&old, new) {
+                Ok(true) => eprintln!("Replaced."),
+                Ok(false) => eprintln!("Warning: old fact not found; new fact inserted."),
+                Err(e) => self.command_error(e),
+            },
+            Err(e) => self.command_error(format!("Parse error: {e}")),
+        }
+    }
+
+    fn source(&mut self, src: &str) {
+        if self.refuse_if_in_use() {
+            return;
+        }
+        match load::read_source(src) {
+            Ok(bytes) => match std::str::from_utf8(&bytes) {
+                Ok(text) => match self.core.source(text) {
+                    Ok(()) => eprintln!("Sourced and evaluated."),
+                    Err(e) => self.command_error(e),
+                },
+                Err(e) => self.command_error(format!("Source error: not valid UTF-8: {e}")),
+            },
+            Err(e) => self.command_error(format!("Source error: {e:#}")),
+        }
+    }
+
+    fn load(&mut self, relation: &str, source: &str) {
+        if self.refuse_if_in_use() {
+            return;
+        }
+        match load::read_tuples(source) {
+            Ok(rows) => match self.core.load_facts(relation, rows) {
+                Ok(n) => eprintln!("Inserted {n} fact(s) into {relation} and evaluated."),
+                Err(e) => self.command_error(e),
+            },
+            Err(e) => self.command_error(format!("Load error: {e:#}")),
+        }
+    }
+
+    fn k8s_load(&mut self, spec: &str) {
+        if self.refuse_if_in_use() {
+            return;
+        }
+        let objects = match spec.strip_prefix('!') {
+            Some(command) => ShellSource {
+                command: command.trim().to_string(),
+            }
+            .k8s_objects(),
+            None => K8sManifestsSource {
+                paths: vec![spec.to_string()],
+            }
+            .k8s_objects(),
+        };
+        match objects {
+            Ok(objects) => match self.core.load_objects(objects) {
+                Ok(summary) => eprintln!(
+                    "Loaded {} object(s) ({} replaced) and evaluated.",
+                    summary.added + summary.updated,
+                    summary.updated
+                ),
+                Err(e) => self.command_error(e),
+            },
+            Err(e) => self.command_error(format!("Load error: {e:#}")),
+        }
+    }
+
+    fn k8s_apply_delta(&mut self, spec: &str) {
+        if self.refuse_if_in_use() {
+            return;
+        }
+        let args: Vec<&str> = spec.split_whitespace().collect();
+        let [base_arg, head_arg] = args.as_slice() else {
+            self.command_error(
+                "Usage: k8s::apply-delta <base> <head> (a dir, .json file, or - for an empty side)",
+            );
+            return;
+        };
+        let sides =
+            load_delta_side(base_arg).and_then(|base| Ok((base, load_delta_side(head_arg)?)));
+        match sides {
+            Ok((base, head)) => match self.core.apply_delta(base, head) {
+                Ok(delta) => {
+                    eprintln!(
+                        "Applied delta: +{} ~{} -{} ({} unchanged, {} removed but not live) and evaluated.",
+                        delta.added,
+                        delta.updated,
+                        delta.removed,
+                        delta.unchanged,
+                        delta.removed_absent
+                    );
+                    if self.format == OutputFormat::Ndjson {
+                        println!("{}", delta_json(&delta));
+                    }
+                }
+                Err(e) => self.command_error(e),
+            },
+            Err(e) => self.command_error(format!("Delta error: {e:#}")),
+        }
+    }
+
+    fn k8s_match(&mut self, kind: Option<String>, namespace: &str, selector: &str) {
+        let at = self.at();
+        match self
+            .core
+            .match_selector(&at, kind.as_deref(), namespace, selector)
+        {
+            Ok(rows) => print_matches(self.format, &rows),
+            Err(e) => self.command_error(e),
+        }
+    }
+
+    fn rbac_diff(&mut self, first: String, second: Option<String>, hide_escalation_lost: bool) {
+        // One snapshot diffs against whatever is in use, and the header names
+        // it instead of "current".
+        let (before, after, before_label, after_label) = match second {
+            None => {
+                let after_label = self.in_use.clone().unwrap_or_else(|| "current".to_string());
+                (At::Snapshot(first.clone()), self.at(), first, after_label)
+            }
+            Some(second) => (
+                At::Snapshot(first.clone()),
+                At::Snapshot(second.clone()),
+                first,
+                second,
+            ),
+        };
+        match self.core.rbac_diff(&before, &after) {
+            Ok(diff) => {
+                let clean = if self.format == OutputFormat::Ndjson {
+                    // JSON names only snapshots; the live state is "" (snapshot
+                    // names are never empty), not the text header's "current".
+                    let after_name = match &after {
+                        At::Live => "",
+                        At::Snapshot(name) => name.as_str(),
+                    };
+                    print_access_diff_ndjson(&diff, &before_label, after_name)
+                } else {
+                    print_access_diff(&diff, &before_label, &after_label, hide_escalation_lost)
+                };
+                if !clean {
+                    self.had_failure = true;
+                }
+            }
+            Err(e) => self.command_error(e),
+        }
+    }
+
+    fn rbac(&mut self, rest: &str) {
+        let at = self.at();
+        match rbac_command(rest, self.core, &at, self.format) {
+            CheckResult::Pass => {}
+            CheckResult::Fail => self.had_failure = true,
+            CheckResult::Error => self.command_failed = true,
+        }
+    }
+
+    fn sched(&mut self, rest: &str) {
+        let at = self.at();
+        match sched_command(rest, self.core, &at, self.format) {
+            CheckResult::Pass => {}
+            CheckResult::Fail => self.had_failure = true,
+            CheckResult::Error => self.command_failed = true,
+        }
+    }
+
+    fn explain(&mut self, body: &str) {
+        let at = self.at();
+        match self.core.explain(&at, body) {
+            Ok(plan) => print!("{plan}"),
+            Err(e) => self.command_error(e),
+        }
+    }
+
+    fn smtlib(&mut self, relations: &[String]) {
+        let at = self.at();
+        let relation_refs: Vec<&str> = relations.iter().map(String::as_str).collect();
+        match self.core.smtlib(&at, &relation_refs) {
+            Ok(smtlib) => println!("{smtlib}"),
+            Err(e) => self.command_error(e),
+        }
+    }
+
+    fn rollback(&mut self, name: &str) {
+        if self.refuse_if_in_use() {
+            return;
+        }
+        if self.watch.is_some() {
+            // A rollback swaps the whole EDB behind the watcher's back, so
+            // objects deleted since the snapshot would come back.
+            self.command_error(
+                "rollback is unavailable while watching a cluster: the watcher owns the live state.",
+            );
+            return;
+        }
+        match self.core.rollback(name) {
+            Ok(()) => eprintln!("Rolled back to snapshot '{name}'."),
+            Err(e) => self.command_error(e),
+        }
+    }
+
+    fn shell(&mut self, cmd: &str) {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+        let shell_name = std::path::Path::new(&shell)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("sh")
+            .to_string();
+        let status = if shell_name == "zsh" {
+            std::process::Command::new(&shell)
+                .args(["-i", "-o", "nomonitor", "-c", cmd])
+                .status()
+        } else {
+            std::process::Command::new(&shell)
+                .args(["-ic", cmd])
+                .status()
+        };
+        match status {
+            Ok(status) if !status.success() => {
+                self.command_error(format!("Shell command failed: {status}"))
+            }
+            Ok(_) => {}
+            Err(e) => self.command_error(format!("Shell error: {e}")),
+        }
+    }
+
+    fn alias(&mut self, alias: AliasCommand) {
+        match alias {
+            AliasCommand::List => {
+                if self.aliases.is_empty() {
+                    println!("No aliases defined.");
+                } else {
+                    for (name, body) in &self.aliases {
+                        println!("  {name} = {body}");
+                    }
+                }
+            }
+            AliasCommand::Show(name) => match self.aliases.get(&name) {
+                Some(body) => println!("  {name} = {body}"),
+                None => self.command_error(format!("No alias named '{name}'.")),
+            },
+            AliasCommand::Set { name, body } => {
+                self.aliases.insert(name, body);
+            }
+        }
+    }
+
+    fn unalias(&mut self, name: &str) {
+        if self.aliases.remove(name).is_none() {
+            self.command_error(format!("No alias named '{name}'."));
+        }
+    }
+
+    fn pretty_toggle(&mut self) {
+        // Shortcut: toggle between default and pretty display.
+        self.format = if self.format == OutputFormat::Pretty {
+            OutputFormat::Plain
+        } else {
+            OutputFormat::Pretty
+        };
+        eprintln!("Output format: {}.", self.format.label());
+    }
+
+    fn set_format(&mut self, format: Option<OutputFormat>) {
+        // No argument just reports the current format.
+        if let Some(format) = format {
+            self.format = format;
+        }
+        eprintln!("Output format: {}.", self.format.label());
+    }
+
+    /// A `::`-path no built-in claimed. If its first token names a command that
+    /// takes arguments, it was invoked with none, so show that command's
+    /// usage; otherwise it is genuinely unknown. (This is the seam where an
+    /// extension registry would get to claim the path first.)
+    fn unknown(&mut self, path: &str) {
+        // The k8s object commands have their own handlers, so a leftover
+        // `k8s::` path here is an unknown or argument-less k8s subcommand.
+        if let Some(rest) = path.strip_prefix("k8s::") {
+            let head = format!("k8s::{}", rest.split_whitespace().next().unwrap_or(""));
+            if let Some(usage) = command_usage(&head) {
+                self.command_error(format!("Usage: {usage}"));
+            } else {
+                self.command_error(
+                    "Unknown k8s command. Available: k8s::load, k8s::match, k8s::match-all, k8s::apply-delta.",
+                );
+            }
+            return;
+        }
+        let head = path.split_whitespace().next().unwrap_or(path);
+        if let Some(usage) = command_usage(head) {
+            self.command_error(format!("Usage: {usage}"));
+        } else {
+            self.command_error(format!(
+                "Unknown command: {path}. Type `help` for commands, or `?- {path}` to run it as a query."
+            ));
+        }
+    }
+}
+
 fn session(
     core: &LocalCore,
     format: OutputFormat,
@@ -942,35 +1649,7 @@ fn session(
 ) -> Result<SessionStatus> {
     // A script stops at its first failed line; the REPL carries on.
     let stop_on_error = matches!(input, Input::Script(_));
-    let mut command_failed = false;
-    // Print a command's error and mark the line as failed.
-    macro_rules! command_error {
-        ($($arg:tt)*) => {{
-            eprintln!($($arg)*);
-            command_failed = true;
-        }};
-    }
-
-    let mut format = format;
-    let mut had_failure = false;
-    // User-defined command aliases (see the `alias` command and the rc file).
-    // A bare command's first token is expanded textually before dispatch; a
-    // `::`-qualified command bypasses them.
-    let mut aliases: BTreeMap<String, String> = BTreeMap::new();
-    // The `bool` is whether the line belongs in rustyline history: `true` for
-    // a pasted multi-line command split apart below, `false` for the inner
-    // command and restore sentinel a `use <name> <command>` one-shot queues,
-    // so up-arrow recalls the one-shot line as typed rather than its parts.
-    let mut pending: std::collections::VecDeque<(String, bool)> = std::collections::VecDeque::new();
-    // `None` = live state; `Some(name)` = `use <name>` is pointing read-only
-    // commands at that frozen snapshot.
-    let mut in_use: Option<String> = None;
-    // `use <name> <command>` queues `<command>` and this sentinel onto the
-    // front of `pending`, so the command runs with `<name>` in use and the
-    // sentinel then restores whatever was in use before — on every `continue`
-    // path, since it is just another queued line. The null byte keeps it out
-    // of reach of anything a person could type.
-    const USE_RESTORE_PREFIX: &str = "\0use-restore:";
+    let mut repl = Repl::new(core, watch, format);
 
     // rc (startup) lines run first, through the same dispatcher, followed by a
     // sentinel marking the end of the startup phase. rc errors warn and
@@ -981,16 +1660,16 @@ fn session(
     if !rc.is_empty() {
         in_rc = true;
         for line in rc {
-            pending.push_back((line, false));
+            repl.pending.push_back((line, false));
         }
-        pending.push_back((RC_END.to_string(), false));
+        repl.pending.push_back((RC_END.to_string(), false));
     }
 
     loop {
-        if stop_on_error && command_failed && !in_rc {
+        if stop_on_error && repl.command_failed && !in_rc {
             break;
         }
-        let (raw, to_history) = if let Some((queued, to_history)) = pending.pop_front() {
+        let (raw, to_history) = if let Some((queued, to_history)) = repl.pending.pop_front() {
             (Ok(queued), to_history)
         } else {
             // Refresh tab-completion data from the current state before
@@ -998,14 +1677,14 @@ fn session(
             let relations: Vec<String> = {
                 let live = core.last_live();
                 let snapshots = core.snapshots();
-                active_store(&live, &snapshots, &in_use)
+                active_store(&live, &snapshots, &repl.in_use)
                     .relation_names()
                     .filter(|n| !n.starts_with(':') && !n.starts_with('_'))
                     .map(str::to_string)
                     .collect()
             };
-            input.set_completions(aliases.keys().cloned().collect(), relations);
-            (input.readline(&prompt(in_use.as_deref())), true)
+            input.set_completions(repl.aliases.keys().cloned().collect(), relations);
+            (input.readline(&prompt(repl.in_use.as_deref())), true)
         };
         match raw {
             Ok(line) => {
@@ -1013,12 +1692,12 @@ fn session(
                     // Startup phase done: discard any findings/errors the rc
                     // lines produced so they do not affect the exit status.
                     in_rc = false;
-                    command_failed = false;
-                    had_failure = false;
+                    repl.command_failed = false;
+                    repl.had_failure = false;
                     continue;
                 }
                 if let Some(prev) = line.strip_prefix(USE_RESTORE_PREFIX) {
-                    in_use = (!prev.is_empty()).then(|| prev.to_string());
+                    repl.in_use = (!prev.is_empty()).then(|| prev.to_string());
                     continue;
                 }
                 let line = line.trim().to_string();
@@ -1038,7 +1717,7 @@ fn session(
                 } else {
                     // A bare command: expand a user alias on its first token (if
                     // any), then canonicalize to the `::` form.
-                    let expanded = expand_aliases(&line, &aliases);
+                    let expanded = expand_aliases(&line, &repl.aliases);
                     if expanded.starts_with("::") {
                         expanded
                     } else {
@@ -1055,7 +1734,7 @@ fn session(
                 if line.contains('\n') {
                     let cmds = split_commands(&line);
                     if cmds.len() > 1 {
-                        pending.extend(cmds.into_iter().map(|cmd| (cmd, true)));
+                        repl.pending.extend(cmds.into_iter().map(|cmd| (cmd, true)));
                         continue;
                     }
                     // Single command whose newlines are all inside strings
@@ -1070,634 +1749,28 @@ fn session(
                     eprintln!("{line}");
                 }
 
-                if let Some(body) = line
-                    .strip_prefix("::query ")
-                    .or_else(|| line.strip_prefix("?- "))
-                {
-                    let at = current_at(&in_use);
-                    match core.query(&at, body) {
-                        Ok(rows) => print_rows(format, &rows),
-                        Err(e) => command_error!("{e}"),
-                    }
-                    continue;
-                }
-
-                if let Some(fact) = line.strip_prefix("::why ") {
-                    let at = current_at(&in_use);
-                    match core.provenance(&at, fact) {
-                        Ok(trees) if trees.is_empty() => {
-                            eprintln!("No matching facts for '{}'.", fact.trim());
-                        }
-                        Ok(trees) => trees.iter().for_each(print_provenance),
-                        Err(e) => command_error!("{e}"),
-                    }
-                    continue;
-                }
-
-                if line == "::use" || line.starts_with("::use ") {
-                    let rest = line.strip_prefix("::use").unwrap_or("").trim();
-                    if rest.is_empty() {
-                        in_use = None;
-                        eprintln!("Using live state.");
-                        continue;
-                    }
-                    let (name, command) = match rest.split_once(char::is_whitespace) {
-                        Some((n, c)) => (n.to_string(), Some(c.trim().to_string())),
-                        None => (rest.to_string(), None),
-                    };
-                    if !core.has_snapshot(&name) {
-                        command_error!("No snapshot named '{name}'.");
-                        continue;
-                    }
-                    match command {
-                        None => {
-                            eprintln!("Using snapshot '{name}'.");
-                            in_use = Some(name);
-                        }
-                        Some(command) => {
-                            // One-shot: queue the command to run with `name`
-                            // in use, then a sentinel to restore whatever was
-                            // in use before — on every `continue` path, since
-                            // it is just the next queued line.
-                            let prev = in_use.clone().unwrap_or_default();
-                            pending.push_front((format!("{USE_RESTORE_PREFIX}{prev}"), false));
-                            pending.push_front((command, false));
-                            in_use = Some(name);
+                match command::parse_command(&line) {
+                    Ok(cmd) => {
+                        if repl.run(cmd) == Flow::Quit {
+                            break;
                         }
                     }
-                    continue;
-                }
-
-                if let Some(name) = line.strip_prefix("::snapshot ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    match core.snapshot(name.trim()) {
-                        Ok(info) => eprintln!(
-                            "Saved snapshot '{}' ({} relations, {} facts).",
-                            info.name, info.relations, info.facts
-                        ),
-                        Err(e) => command_error!("{e}"),
-                    }
-                    continue;
-                }
-
-                // `diff <name> [<name>]` and `diff-relation <name> [<name>]
-                // <relation>`: one snapshot diffs against whatever is in use.
-                let diff_args = line
-                    .strip_prefix("::diff ")
-                    .map(|rest| (rest, false))
-                    .or_else(|| {
-                        line.strip_prefix("::diff-relation ")
-                            .map(|rest| (rest, true))
-                    });
-                if let Some((rest, one_relation)) = diff_args {
-                    let mut parts: Vec<&str> = rest.split_whitespace().collect();
-                    let relation = if one_relation { parts.pop() } else { None };
-                    let current = current_at(&in_use);
-                    let (before, after) = match parts.as_slice() {
-                        [name] => (At::Snapshot(name.to_string()), current),
-                        [name1, name2] => (
-                            At::Snapshot(name1.to_string()),
-                            At::Snapshot(name2.to_string()),
-                        ),
-                        _ if one_relation => {
-                            command_error!(
-                                "Usage: diff-relation <name> <relation>  or  diff-relation <name1> <name2> <relation>"
-                            );
-                            continue;
-                        }
-                        _ => {
-                            command_error!("Usage: diff <name>  or  diff <name1> <name2>");
-                            continue;
-                        }
-                    };
-                    match core.diff(&before, &after, relation) {
-                        Ok(diff) => print!("{diff}"),
-                        Err(e) => command_error!("{e}"),
-                    }
-                    continue;
-                }
-
-                if line == "::show" || line.starts_with("::show ") {
-                    let tokens: Vec<&str> = line
-                        .strip_prefix("::show")
-                        .unwrap_or("")
-                        .split_whitespace()
-                        .collect();
-                    // `--all`/`*` reveals undocumented intermediate relations in the
-                    // list view; remaining tokens are explicit relation names.
-                    let show_all = tokens.iter().any(|t| *t == "--all" || *t == "*");
-                    let names: Vec<&str> = tokens
-                        .into_iter()
-                        .filter(|t| *t != "--all" && *t != "*")
-                        .collect();
-                    match core.relations(&current_at(&in_use), &names) {
-                        Ok(relations) if names.is_empty() => {
-                            print_relation_list(&relations, show_all);
-                        }
-                        // Detail view: a psql \d-style block per requested relation.
-                        Ok(relations) => relations.iter().for_each(print_relation_detail),
-                        Err(e) => command_error!("{e}"),
-                    }
-                    continue;
-                }
-
-                if let Some(rule) = line.strip_prefix("::define ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    match core.define(rule) {
-                        Ok(()) => eprintln!("Rule added and evaluated."),
-                        Err(e) => command_error!("{e}"),
-                    }
-                    continue;
-                }
-
-                // ~pred(old_args). pred(new_args).  — replace one ground fact
-                if let Some(rest) = line.strip_prefix('~') {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let Some((old_atom, new_atom)) = split_two_atoms(rest.trim()) else {
-                        command_error!("Usage: ~pred(old_args). pred(new_args).");
-                        continue;
-                    };
-                    let parsed = parse_fact(old_atom)
-                        .and_then(|old| parse_fact(new_atom).map(|new| (old, new)));
-                    match parsed {
-                        Ok((old, new)) => match core.replace_fact(&old, new) {
-                            Ok(true) => eprintln!("Replaced."),
-                            Ok(false) => {
-                                eprintln!("Warning: old fact not found; new fact inserted.")
-                            }
-                            Err(e) => command_error!("{e}"),
-                        },
-                        Err(e) => command_error!("Parse error: {e}"),
-                    }
-                    continue;
-                }
-
-                // +pred(args).  — insert ground fact
-                if let Some(inner) = line.strip_prefix('+') {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    match parse_fact(inner.trim_end_matches('.').trim()) {
-                        Ok(fact) => match core.assert_fact(fact) {
-                            Ok(true) => eprintln!("Asserted."),
-                            Ok(false) => eprintln!("Fact already exists."),
-                            Err(e) => command_error!("{e}"),
-                        },
-                        Err(e) => command_error!("Parse error: {e}"),
-                    }
-                    continue;
-                }
-
-                // -pred(args).  — retract ground fact
-                if let Some(inner) = line.strip_prefix('-') {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    match parse_fact(inner.trim_end_matches('.').trim()) {
-                        Ok(fact) => match core.retract_fact(&fact) {
-                            Ok(true) => eprintln!("Retracted."),
-                            Ok(false) => eprintln!("No matching fact found."),
-                            Err(e) => command_error!("{e}"),
-                        },
-                        Err(e) => command_error!("Parse error: {e}"),
-                    }
-                    continue;
-                }
-
-                // The loading commands read files and run commands here, on
-                // the client, and hand the core what they read.
-                if let Some(src) = line.strip_prefix("::source ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    match load::read_source(src.trim()) {
-                        Ok(bytes) => match std::str::from_utf8(&bytes) {
-                            Ok(text) => match core.source(text) {
-                                Ok(()) => eprintln!("Sourced and evaluated."),
-                                Err(e) => command_error!("{e}"),
-                            },
-                            Err(e) => command_error!("Source error: not valid UTF-8: {e}"),
-                        },
-                        Err(e) => command_error!("Source error: {e:#}"),
-                    }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("::k8s::load ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let rest = rest.trim();
-                    let objects = match rest.strip_prefix('!') {
-                        Some(command) => ShellSource {
-                            command: command.trim().to_string(),
-                        }
-                        .k8s_objects(),
-                        None => K8sManifestsSource {
-                            paths: vec![rest.to_string()],
-                        }
-                        .k8s_objects(),
-                    };
-                    match objects {
-                        Ok(objects) => match core.load_objects(objects) {
-                            Ok(summary) => eprintln!(
-                                "Loaded {} object(s) ({} replaced) and evaluated.",
-                                summary.added + summary.updated,
-                                summary.updated
-                            ),
-                            Err(e) => command_error!("{e}"),
-                        },
-                        Err(e) => command_error!("Load error: {e:#}"),
-                    }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("::k8s::apply-delta ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let args: Vec<&str> = rest.split_whitespace().collect();
-                    let [base_arg, head_arg] = args.as_slice() else {
-                        command_error!(
-                            "Usage: k8s::apply-delta <base> <head> (a dir, .json file, or - for an empty side)"
-                        );
-                        continue;
-                    };
-                    let sides = load_delta_side(base_arg)
-                        .and_then(|base| Ok((base, load_delta_side(head_arg)?)));
-                    match sides {
-                        Ok((base, head)) => match core.apply_delta(base, head) {
-                            Ok(delta) => {
-                                eprintln!(
-                                    "Applied delta: +{} ~{} -{} ({} unchanged, {} removed but not live) and evaluated.",
-                                    delta.added,
-                                    delta.updated,
-                                    delta.removed,
-                                    delta.unchanged,
-                                    delta.removed_absent
-                                );
-                                if format == OutputFormat::Ndjson {
-                                    println!("{}", delta_json(&delta));
-                                }
-                            }
-                            Err(e) => command_error!("{e}"),
-                        },
-                        Err(e) => command_error!("Delta error: {e:#}"),
-                    }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("::load ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    let rest = rest.trim();
-                    // Split on first whitespace: <relation> <source>
-                    let Some((relation, source)) = rest.split_once(char::is_whitespace) else {
-                        command_error!(
-                            "Usage: load <relation> <source>  (source is a file path or ! <cmd>)"
-                        );
-                        continue;
-                    };
-                    match load::read_tuples(source.trim()) {
-                        Ok(rows) => match core.load_facts(relation, rows) {
-                            Ok(n) => {
-                                eprintln!("Inserted {n} fact(s) into {relation} and evaluated.");
-                            }
-                            Err(e) => command_error!("{e}"),
-                        },
-                        Err(e) => command_error!("Load error: {e:#}"),
-                    }
-                    continue;
-                }
-
-                // k8s::match <Kind> <namespace> <selector> scopes to one Kind;
-                // k8s::match-all <namespace> <selector> matches any Kind.
-                let match_args = line
-                    .strip_prefix("::k8s::match ")
-                    .map(|rest| (rest, true))
-                    .or_else(|| {
-                        line.strip_prefix("::k8s::match-all ")
-                            .map(|rest| (rest, false))
-                    });
-                if let Some((rest, one_kind)) = match_args {
-                    let fields = if one_kind { 3 } else { 2 };
-                    let parts: Vec<&str> =
-                        rest.trim().splitn(fields, char::is_whitespace).collect();
-                    let (kind, namespace, selector) = match (one_kind, parts.as_slice()) {
-                        (true, [kind, namespace, selector]) => (Some(*kind), *namespace, *selector),
-                        (false, [namespace, selector]) => (None, *namespace, *selector),
-                        (true, _) => {
-                            command_error!(
-                                "Usage: k8s::match <Kind> <namespace> <selector>  (namespace \"\" for cluster-scoped)"
-                            );
-                            continue;
-                        }
-                        (false, _) => {
-                            command_error!("Usage: k8s::match-all <namespace> <selector>");
-                            continue;
-                        }
-                    };
-                    // The cluster-scoped namespace is typed as ""; the REPL
-                    // doesn't otherwise strip quotes from arguments.
-                    let namespace = namespace.trim_matches('"');
-                    match core.match_selector(&current_at(&in_use), kind, namespace, selector) {
-                        Ok(rows) => print_matches(format, &rows),
-                        Err(e) => command_error!("{e}"),
-                    }
-                    continue;
-                }
-
-                if line == "::rbac::diff" {
-                    command_error!("Usage: rbac::diff <snap> [snap2] [--hide-escalation-lost]");
-                    continue;
-                }
-                if let Some(rest) = line.strip_prefix("::rbac::diff ") {
-                    let tokens: Vec<&str> = rest.split_whitespace().collect();
-                    let hide_escalation_lost = tokens.contains(&"--hide-escalation-lost");
-                    let parts: Vec<&str> = tokens
-                        .iter()
-                        .filter(|t| **t != "--hide-escalation-lost")
-                        .copied()
-                        .collect();
-                    // One snapshot diffs against whatever is in use, and the
-                    // header names it instead of "current".
-                    let (before, after, before_label, after_label) = match parts.as_slice() {
-                        [name] => (
-                            At::Snapshot(name.to_string()),
-                            current_at(&in_use),
-                            *name,
-                            in_use.as_deref().unwrap_or("current"),
-                        ),
-                        [name1, name2] => (
-                            At::Snapshot(name1.to_string()),
-                            At::Snapshot(name2.to_string()),
-                            *name1,
-                            *name2,
-                        ),
-                        _ => {
-                            command_error!(
-                                "Usage: rbac::diff <snap> [snap2] [--hide-escalation-lost]"
-                            );
-                            continue;
-                        }
-                    };
-                    match core.rbac_diff(&before, &after) {
-                        Ok(diff) => {
-                            let clean = if format == OutputFormat::Ndjson {
-                                // JSON names only snapshots; the live state
-                                // is "" (snapshot names are never empty), not
-                                // the text header's "current".
-                                let after_name = match &after {
-                                    At::Live => "",
-                                    At::Snapshot(name) => name.as_str(),
-                                };
-                                print_access_diff_ndjson(&diff, before_label, after_name)
-                            } else {
-                                print_access_diff(
-                                    &diff,
-                                    before_label,
-                                    after_label,
-                                    hide_escalation_lost,
-                                )
-                            };
-                            if !clean {
-                                had_failure = true;
-                            }
-                        }
-                        Err(e) => command_error!("{e}"),
-                    }
-                    continue;
-                }
-                if let Some(rest) = line.strip_prefix("::rbac::") {
-                    match rbac_command(rest.trim(), core, &current_at(&in_use), format) {
-                        CheckResult::Pass => {}
-                        CheckResult::Fail => had_failure = true,
-                        CheckResult::Error => command_failed = true,
-                    }
-                    continue;
-                }
-                if let Some(rest) = line.strip_prefix("::sched::") {
-                    match sched_command(rest.trim(), core, &current_at(&in_use), format) {
-                        CheckResult::Pass => {}
-                        CheckResult::Fail => had_failure = true,
-                        CheckResult::Error => command_failed = true,
-                    }
-                    continue;
-                }
-
-                if let Some(query) = line.strip_prefix("::explain ") {
-                    match core.explain(&current_at(&in_use), query) {
-                        Ok(plan) => print!("{plan}"),
-                        Err(e) => command_error!("{e}"),
-                    }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("::smtlib ") {
-                    let relations: Vec<&str> = rest.split_whitespace().collect();
-                    if relations.is_empty() {
-                        command_error!("Usage: smtlib <relation> [relation ...]");
-                        continue;
-                    }
-                    match core.smtlib(&current_at(&in_use), &relations) {
-                        Ok(smtlib) => println!("{smtlib}"),
-                        Err(e) => command_error!("{e}"),
-                    }
-                    continue;
-                }
-
-                if line == "::rollback" || line.starts_with("::rollback ") {
-                    if refuse_if_in_use(&in_use, &mut command_failed) {
-                        continue;
-                    }
-                    if watch.is_some() {
-                        // A rollback swaps the whole EDB behind the watcher's back,
-                        // so objects deleted since the snapshot would come back.
-                        command_error!(
-                            "rollback is unavailable while watching a cluster: the watcher owns the live state."
-                        );
-                        continue;
-                    }
-                    let name = line.strip_prefix("::rollback").unwrap_or("").trim();
-                    if name.is_empty() {
-                        command_error!("Usage: rollback <name>");
-                        continue;
-                    }
-                    match core.rollback(name) {
-                        Ok(()) => eprintln!("Rolled back to snapshot '{name}'."),
-                        Err(e) => command_error!("{e}"),
-                    }
-                    continue;
-                }
-
-                if let Some(cmd) = line.strip_prefix('!') {
-                    let cmd = cmd.trim();
-                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-                    let shell_name = std::path::Path::new(&shell)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("sh")
-                        .to_string();
-                    let status = if shell_name == "zsh" {
-                        std::process::Command::new(&shell)
-                            .args(["-i", "-o", "nomonitor", "-c", cmd])
-                            .status()
-                    } else {
-                        std::process::Command::new(&shell)
-                            .args(["-ic", cmd])
-                            .status()
-                    };
-                    match status {
-                        Ok(status) if !status.success() => {
-                            command_error!("Shell command failed: {status}")
-                        }
-                        Ok(_) => {}
-                        Err(e) => command_error!("Shell error: {e}"),
-                    }
-                    continue;
-                }
-
-                if line == "::quit" || line == "::exit" || line == "::q" {
-                    break;
-                }
-                if line == "::help" || line.starts_with("::help ") {
-                    let topic = line.strip_prefix("::help").unwrap_or("").trim();
-                    if topic.is_empty() {
-                        print_help();
-                    } else {
-                        print_command_help(topic);
-                    }
-                    continue;
-                }
-                // `alias` (no args) lists; `alias <name> <command...>` defines a
-                // textual shorthand expanded on a bare command's first token;
-                // `alias <name>` shows one. Persist aliases by putting them in
-                // the rc file. A `::`-qualified command bypasses aliases.
-                if line == "::alias" || line.starts_with("::alias ") {
-                    let rest = line.strip_prefix("::alias").unwrap_or("").trim();
-                    if rest.is_empty() {
-                        if aliases.is_empty() {
-                            println!("No aliases defined.");
-                        } else {
-                            for (name, body) in &aliases {
-                                println!("  {name} = {body}");
-                            }
-                        }
-                    } else if let Some((name, body)) = rest.split_once(char::is_whitespace) {
-                        let body = body.trim();
-                        if body.is_empty() {
-                            command_error!("Usage: alias <name> <command...>");
-                        } else {
-                            aliases.insert(name.to_string(), body.to_string());
-                        }
-                    } else {
-                        match aliases.get(rest) {
-                            Some(body) => println!("  {rest} = {body}"),
-                            None => command_error!("No alias named '{rest}'."),
-                        }
-                    }
-                    continue;
-                }
-                if line == "::unalias" || line.starts_with("::unalias ") {
-                    let name = line.strip_prefix("::unalias").unwrap_or("").trim();
-                    if name.is_empty() {
-                        command_error!("Usage: unalias <name>");
-                    } else if aliases.remove(name).is_none() {
-                        command_error!("No alias named '{name}'.");
-                    }
-                    continue;
-                }
-                if line == "::pretty" {
-                    // Shortcut: toggle between default and pretty display.
-                    format = if format == OutputFormat::Pretty {
-                        OutputFormat::Plain
-                    } else {
-                        OutputFormat::Pretty
-                    };
-                    eprintln!("Output format: {}.", format.label());
-                    continue;
-                }
-                if line == "::format" || line.starts_with("::format ") {
-                    let arg = line.strip_prefix("::format").unwrap_or("").trim();
-                    match arg {
-                        "default" => format = OutputFormat::Plain,
-                        "compact" => format = OutputFormat::Compact,
-                        "pretty" => format = OutputFormat::Pretty,
-                        "table" => format = OutputFormat::Table,
-                        "ndjson" => format = OutputFormat::Ndjson,
-                        "" => {} // no arg: just report the current format
-                        other => {
-                            command_error!(
-                                "Unknown format '{other}'. Use: default | compact | pretty | table | ndjson."
-                            );
-                            continue;
-                        }
-                    }
-                    eprintln!("Output format: {}.", format.label());
-                    continue;
-                }
-                // Subsystem container-commands. A bare namespace lists its
-                // subcommands; `ns::sub` runs one. The k8s object commands have
-                // their own blocks above, so a leftover `::k8s::` here is an
-                // unknown subcommand.
-                if line == "::rbac" {
-                    print_subsystem_help("rbac");
-                    continue;
-                }
-                if line == "::sched" {
-                    print_subsystem_help("sched");
-                    continue;
-                }
-                if line == "::k8s" {
-                    print_subsystem_help("k8s");
-                    continue;
-                }
-                if let Some(rest) = line.strip_prefix("::k8s::") {
-                    // A known k8s command invoked with no arguments: show usage.
-                    let head = format!("k8s::{}", rest.split_whitespace().next().unwrap_or(""));
-                    if let Some(usage) = command_usage(&head) {
-                        command_error!("Usage: {usage}");
-                    } else {
-                        command_error!(
-                            "Unknown k8s command. Available: k8s::load, k8s::match, k8s::match-all, k8s::apply-delta."
-                        );
-                    }
-                    continue;
-                }
-
-                // Not matched above. If the first path token is a known command
-                // that takes arguments, it was invoked with none: show its usage.
-                // Otherwise it is genuinely unknown.
-                let shown = line.strip_prefix("::").unwrap_or(&line);
-                let head = shown.split_whitespace().next().unwrap_or(shown);
-                if let Some(usage) = command_usage(head) {
-                    command_error!("Usage: {usage}");
-                } else {
-                    command_error!(
-                        "Unknown command: {shown}. Type `help` for commands, or `?- {shown}` to run it as a query."
-                    );
+                    Err(e) => repl.command_error(e),
                 }
             }
             Err(ReadlineError::Interrupted) => continue,
             Err(ReadlineError::Eof) => break,
             Err(e) => {
-                command_error!("Error: {e}");
+                repl.command_error(format!("Error: {e}"));
                 break;
             }
         }
     }
 
     input.save_history();
-    Ok(if stop_on_error && command_failed {
+    Ok(if stop_on_error && repl.command_failed {
         SessionStatus::Error
-    } else if had_failure {
+    } else if repl.had_failure {
         SessionStatus::Findings
     } else {
         SessionStatus::Clean
@@ -3561,6 +3634,30 @@ mod completion_tests {
             CompletionPlan::Words(_, w) => w,
             other => panic!("expected Words, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn command_table_backs_the_derived_lists() {
+        // Completions cover every table path plus the three namespace
+        // prefixes, so nothing added to COMMANDS is left uncompletable.
+        let completions = command_completions();
+        for spec in COMMANDS {
+            assert!(
+                completions.contains(&spec.path),
+                "{} missing from completions",
+                spec.path
+            );
+        }
+        for namespace in ["rbac::", "sched::", "k8s::"] {
+            assert!(completions.contains(&namespace), "{namespace} missing");
+        }
+        // Detailed-help topics are exactly the manpage-flagged commands.
+        let flagged: Vec<&str> = COMMANDS
+            .iter()
+            .filter(|c| c.manpage)
+            .map(|c| c.path)
+            .collect();
+        assert_eq!(help_topics(), flagged);
     }
 
     #[test]
