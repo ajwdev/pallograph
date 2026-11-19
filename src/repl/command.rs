@@ -126,6 +126,17 @@ pub enum Subsystem {
     K8s,
 }
 
+impl Subsystem {
+    /// The namespace name as it appears in commands and help.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Subsystem::Rbac => "rbac",
+            Subsystem::Sched => "sched",
+            Subsystem::K8s => "k8s",
+        }
+    }
+}
+
 /// The `alias` command's forms: list all, show one, or define one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AliasCommand {
