@@ -325,6 +325,72 @@ fn repeated_variable_in_atom() {
     );
 }
 
+/// A variable bound once and written twice in the head, a constant leading
+/// a body atom, and a table of facts written in the rules keyed by name
+/// constants: the shapes of labels.mg's selector_candidate rules.
+#[test]
+fn repeated_variable_in_head_with_rule_facts() {
+    let e = edb(&[
+        ("owner", vec![s("Service"), s("a"), s("web")]),
+        ("owner", vec![s("Claim"), s("a"), s("data")]),
+        ("owner", vec![s("Query"), s("b"), s("q")]),
+        ("object", vec![s("a"), s("Pod"), s("p1")]),
+        ("object", vec![s("a"), s("ConfigMap"), s("c1")]),
+        ("object", vec![s("b"), s("Pod"), s("p2")]),
+        ("object", vec![s(""), s("Volume"), s("v1")]),
+    ]);
+    assert_parity(
+        "repeated_variable_in_head",
+        &e,
+        "Decl owner(Kind, Namespace, Name).\n\
+         Decl object(Namespace, Kind, Name).\n\
+         Decl target(OwnerKind, ObjectKind, Scope).\n\
+         Decl candidate(OwnerKind, OwnerNamespace, OwnerName, ObjectKind, ObjectNamespace, ObjectName).\n\
+         target(\"Service\", \"Pod\", /same_namespace).\n\
+         target(\"Claim\", \"Volume\", /cluster).\n\
+         candidate(K, Ns, N, OK, Ns, ON) :-\n\
+             owner(K, Ns, N), target(K, OK, /same_namespace), object(Ns, OK, ON).\n\
+         candidate(K, Ns, N, OK, ONs, ON) :-\n\
+             owner(K, Ns, N), target(K, OK, /cluster), object(ONs, OK, ON), ONs = \"\".\n\
+         candidate(\"Query\", Ns, N, OK, Ns, ON) :-\n\
+             owner(\"Query\", Ns, N), object(Ns, OK, ON).",
+    );
+}
+
+/// A selector with no requirements selects every candidate (nothing is
+/// unsatisfied), and two In requirements on one key, told apart by index,
+/// must both hold: labels.mg's selects-all and In shapes.
+#[test]
+fn requirements_by_index_and_none() {
+    let e = edb(&[
+        ("candidate", vec![s("all"), s("web")]),
+        ("candidate", vec![s("all"), s("db")]),
+        ("candidate", vec![s("two-in"), s("web")]),
+        ("candidate", vec![s("two-in"), s("db")]),
+        ("candidate", vec![s("two-in"), s("cache")]),
+        ("expr_in", vec![s("two-in"), s("0"), s("app"), s("web")]),
+        ("expr_in", vec![s("two-in"), s("0"), s("app"), s("db")]),
+        ("expr_in", vec![s("two-in"), s("1"), s("app"), s("db")]),
+        ("expr_in", vec![s("two-in"), s("1"), s("app"), s("cache")]),
+        ("label", vec![s("web"), s("app"), s("web")]),
+        ("label", vec![s("db"), s("app"), s("db")]),
+        ("label", vec![s("cache"), s("app"), s("cache")]),
+    ]);
+    assert_parity(
+        "requirements_by_index",
+        &e,
+        "Decl candidate(Selector, Object).\n\
+         Decl expr_in(Selector, Index, Key, Value).\n\
+         Decl label(Object, Key, Value).\n\
+         Decl in_satisfied(Selector, Index, Object).\n\
+         Decl unsatisfied(Selector, Object).\n\
+         Decl matches(Selector, Object).\n\
+         in_satisfied(S, I, O) :- candidate(S, O), expr_in(S, I, K, V), label(O, K, V).\n\
+         unsatisfied(S, O) :- candidate(S, O), expr_in(S, I, _, _), !in_satisfied(S, I, O).\n\
+         matches(S, O) :- candidate(S, O), !unsatisfied(S, O).",
+    );
+}
+
 #[test]
 fn self_join() {
     let e = edb(&[

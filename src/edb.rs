@@ -542,28 +542,24 @@ fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str
 
 // ---- aggregation selector extraction ----
 
-/// Emit the requirements from one aggregation selector entry as standard selector
-/// EDB facts (selector_match_label, selector_expr_in, etc.) under a synthetic owner:
+/// Emit the requirements from each aggregation selector entry as standard selector
+/// EDB facts (selector_match_label, selector_expr_in, etc.), owned by the
+/// ClusterRole, with Selector "aggregationRule.clusterRoleSelectors[i]":
 ///
-///   (ApiVersion="pallograph.dev/agg", Kind="ClusterRoleAggregation",
-///    Namespace=<index>, Name=<aggregator ClusterRole name>)
+///   ("rbac.authorization.k8s.io/v1", "ClusterRole", "", <name>,
+///    "aggregationRule.clusterRoleSelectors[<i>]")
 ///
-/// Using the index in the Namespace slot gives each clusterRoleSelectors[i] its own
-/// owner, so requirements within a single selector are AND'd (all must hold) while
-/// separate selectors are OR'd (independent owners) — matching K8s semantics.
-///
-/// The sel_obj_candidate Case 2 rule in labels.mg (Namespace="") then pairs these
-/// selectors against all cluster-scoped objects, which includes ClusterRoles.
-/// The aggregation rule in rbac_roles.mg pins the object to
-/// "rbac.authorization.k8s.io/v1" / "ClusterRole" / "" to extract the source
-/// ClusterRole from the matches.
+/// Each entry is its own selector, so requirements within one entry are ANDed
+/// (all must hold) while separate entries are ORed, as in Kubernetes.
+/// selector_targets.mg pairs these selectors with every ClusterRole, and the
+/// aggregation rule in rbac_roles.mg reads the source ClusterRole from the
+/// matches.
 ///
 /// An empty selector (`{}` or `{matchLabels: {}}`) matches every ClusterRole in
-/// Kubernetes, and selector_matches cannot see a selector without requirements,
-/// so such an entry gets a `clusterrole_aggregation_empty_selector(Name, Index)`
-/// fact instead. Only a selector with no matchLabels entries and no
-/// matchExpressions gets it: one whose requirements could not be encoded emits
-/// nothing and matches no ClusterRole (see `emit_selector_requirements`).
+/// Kubernetes, so such an entry gets a `selector_selects_all` fact. Only a
+/// selector with no matchLabels entries and no matchExpressions gets it: one
+/// whose requirements could not be encoded emits nothing and matches no
+/// ClusterRole (see `emit_selector_requirements`).
 fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Json) {
     let selectors = data
         .get("aggregationRule")
@@ -572,50 +568,62 @@ fn extract_clusterrole_agg_selectors(store: &mut MemStore, name: &str, data: &Js
     let Some(selectors) = selectors else { return };
 
     for (i, selector) in selectors.iter().enumerate() {
-        let owner = vec![
-            Value::String("pallograph.dev/agg".into()),
-            Value::String("ClusterRoleAggregation".into()),
-            Value::String(i.to_string()),
+        let selector_key = vec![
+            Value::String("rbac.authorization.k8s.io/v1".into()),
+            Value::String("ClusterRole".into()),
+            Value::String(String::new()),
             Value::String(name.to_string()),
+            Value::String(format!("aggregationRule.clusterRoleSelectors[{i}]")),
         ];
-        let description = format!("ClusterRole {name} clusterRoleSelectors[{i}]");
-        if emit_selector_requirements(store, owner, selector, &description) == SelectorFacts::Empty
+        let description = format!("ClusterRole {name} aggregationRule.clusterRoleSelectors[{i}]");
+        // clusterRoleSelectors is a list of LabelSelector values, not
+        // pointers, so a null entry decodes as {} and selects everything too.
+        if emit_selector_requirements(
+            store,
+            selector_key.clone(),
+            selector,
+            SelectorShape::LabelSelector,
+            &description,
+        ) == SelectorFacts::Empty
         {
-            store.add_fact(
-                "clusterrole_aggregation_empty_selector",
-                vec![
-                    Value::String(name.to_string()),
-                    Value::String(i.to_string()),
-                ],
-            );
+            store.add_fact("selector_selects_all", selector_key);
         }
     }
 }
 
 /// Build the EDB fact tuples for one selector requirement (a kube `Expression`)
-/// under `owner` (a 4-element [ApiVersion, Kind, Namespace, Name] slice),
+/// under `selector_key` (the owner and which of its selectors:
+/// [ApiVersion, Kind, Namespace, Name, Selector]),
 /// returning them rather than writing to a store so the caller can add them to a
 /// MemStore (load path) or assert/retract them on an Engine (REPL `::match`).
 ///
 /// The fact shapes match those emitted by `emit_selector_requirements`:
 ///   Equal        -> selector_match_label
-///   In           -> selector_expr_in     (one per value)
+///   In           -> selector_expr_in     (one per value, under `index`)
 ///   NotIn        -> selector_expr_notin  (one per value)
 ///   NotEqual     -> selector_expr_notin  (single value; NotEqual(k,v) == NotIn(k,{v}))
 ///   Exists       -> selector_expr_exists
 ///   DoesNotExist -> selector_expr_notexists
-pub fn expression_facts(owner: &[Value], expr: &Expression) -> Vec<(&'static str, Vec<Value>)> {
+///
+/// `index` is the expression's position in its selector, which tells two In
+/// expressions on one key apart.
+pub fn expression_facts(
+    selector_key: &[Value],
+    index: usize,
+    expr: &Expression,
+) -> Vec<(&'static str, Vec<Value>)> {
     let fact = |rel: &'static str, extra: &[&str]| {
-        let mut args = owner.to_vec();
+        let mut args = selector_key.to_vec();
         args.extend(extra.iter().map(|e| Value::String((*e).to_string())));
         (rel, args)
     };
+    let index = index.to_string();
     match expr {
         Expression::Equal(k, v) => vec![fact("selector_match_label", &[k, v])],
         Expression::NotEqual(k, v) => vec![fact("selector_expr_notin", &[k, v])],
         Expression::In(k, set) => set
             .iter()
-            .map(|v| fact("selector_expr_in", &[k, v]))
+            .map(|v| fact("selector_expr_in", &[&index, k, v]))
             .collect(),
         Expression::NotIn(k, set) => set
             .iter()
@@ -639,17 +647,31 @@ enum SelectorFacts {
     Unencodable,
 }
 
+/// How a selector field is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectorShape {
+    /// A plain label map, like a Service's spec.selector, read as matchLabels.
+    FlatMap,
+    /// A metav1.LabelSelector: matchLabels and matchExpressions.
+    LabelSelector,
+    /// A field of a kind Pallograph does not know (a custom resource): a
+    /// LabelSelector if it has matchLabels or matchExpressions, else a flat map.
+    Unknown,
+}
+
 /// Emit selector requirements (matchLabels and matchExpressions) as EDB facts.
 ///
-/// The `owner` slice must be exactly four Values:
-///   [ApiVersion, Kind, Namespace, Name]
-/// which identifies the object that "owns" this selector (i.e. the object whose
-/// spec.selector or aggregation clusterRoleSelector this is).
+/// The `selector_key` slice must be exactly five Values:
+///   [ApiVersion, Kind, Namespace, Name, Selector]
+/// the object that owns this selector, and which of its selectors it is: the
+/// path of the field it was read from, written as Kubernetes writes field
+/// paths (apimachinery field.Path): spec.selector,
+/// aggregationRule.clusterRoleSelectors[1].
 ///
-/// Emits: selector_match_label/6, selector_expr_in/6, selector_expr_notin/6,
-///        selector_expr_exists/5, selector_expr_notexists/5.
+/// Emits: selector_match_label/7, selector_expr_in/8, selector_expr_notin/7,
+///        selector_expr_exists/6, selector_expr_notexists/6.
 ///
-/// These feed the selector_matches/8 engine in labels.mg, which implements
+/// These feed the selector_matches/9 engine in labels.mg, which implements
 /// AND semantics (all requirements within one selector must hold) via the
 /// *_unsatisfied negation pattern.
 ///
@@ -661,11 +683,12 @@ enum SelectorFacts {
 /// naming `description` is printed, and the selector matches nothing.
 fn emit_selector_requirements(
     store: &mut MemStore,
-    owner: Vec<Value>,
+    selector_key: Vec<Value>,
     selector: &Json,
+    shape: SelectorShape,
     description: &str,
 ) -> SelectorFacts {
-    match selector_requirement_facts(&owner, selector) {
+    match selector_requirement_facts(&selector_key, selector, shape) {
         Ok(facts) if facts.is_empty() => SelectorFacts::Empty,
         Ok(facts) => {
             for (relation, args) in facts {
@@ -683,11 +706,12 @@ fn emit_selector_requirements(
 /// The facts for every requirement of `selector`, or why one of them cannot
 /// be encoded.
 fn selector_requirement_facts(
-    owner: &[Value],
+    selector_key: &[Value],
     selector: &Json,
+    shape: SelectorShape,
 ) -> Result<Vec<(&'static str, Vec<Value>)>, String> {
     let fact = |relation: &'static str, extra: &[&str]| {
-        let mut args = owner.to_vec();
+        let mut args = selector_key.to_vec();
         args.extend(extra.iter().map(|e| Value::String((*e).to_string())));
         (relation, args)
     };
@@ -705,8 +729,14 @@ fn selector_requirement_facts(
     };
     let mut facts = Vec::new();
 
-    // Flat selector (Service-style: no matchLabels/matchExpressions) → matchLabels
-    if !selector.contains_key("matchLabels") && !selector.contains_key("matchExpressions") {
+    let flat = match shape {
+        SelectorShape::FlatMap => true,
+        SelectorShape::LabelSelector => false,
+        SelectorShape::Unknown => {
+            !selector.contains_key("matchLabels") && !selector.contains_key("matchExpressions")
+        }
+    };
+    if flat {
         for (key, value) in selector {
             let value = string(value, &format!("label {key} value"))?;
             facts.push(fact("selector_match_label", &[key, &value]));
@@ -730,7 +760,8 @@ fn selector_requirement_facts(
         Some(Json::Array(expressions)) => expressions,
         Some(other) => return Err(format!("matchExpressions {other} is not a list")),
     };
-    for expression in expressions {
+    for (index, expression) in expressions.iter().enumerate() {
+        let index = index.to_string();
         let key = match expression.get("key") {
             Some(key) => string(key, "matchExpressions key")?,
             None => return Err(format!("matchExpressions entry {expression} has no key")),
@@ -757,7 +788,7 @@ fn selector_requirement_facts(
         match operator.as_str() {
             "In" => {
                 for value in values()? {
-                    facts.push(fact("selector_expr_in", &[&key, &value]));
+                    facts.push(fact("selector_expr_in", &[&index, &key, &value]));
                 }
             }
             "NotIn" => {
@@ -799,16 +830,59 @@ fn extract_labels_and_selectors(
         }
     }
 
-    // spec.selector → selector_match_label/selector_expr_*/6
-    let Some(selector) = data.get("spec").and_then(|s| s.get("selector")) else {
-        return;
+    // The selector field → selector_match_label/selector_expr_*. Which field
+    // it is, how it is written, and whether one without requirements selects
+    // everything depend on the kind; selector_targets.mg says what it selects.
+    let (field, shape, empty_selects_all) = selector_field(api_version, kind);
+    let selector = data.get("spec").and_then(|s| s.get(field));
+    // A NetworkPolicy's podSelector is a LabelSelector value, not a pointer,
+    // so a missing one is {}. Elsewhere a missing selector selects nothing.
+    let empty = Json::Object(Default::default());
+    let selector = match selector {
+        Some(selector) => selector,
+        None if field == "podSelector" => &empty,
+        None => return,
     };
     let description = if namespace.is_empty() {
-        format!("{kind} {name} spec.selector")
+        format!("{kind} {name} spec.{field}")
     } else {
-        format!("{kind} {namespace}/{name} spec.selector")
+        format!("{kind} {namespace}/{name} spec.{field}")
     };
-    emit_selector_requirements(store, owner, selector, &description);
+    let mut selector_key = owner;
+    selector_key.push(Value::String(format!("spec.{field}")));
+    if emit_selector_requirements(store, selector_key.clone(), selector, shape, &description)
+        == SelectorFacts::Empty
+        && empty_selects_all
+    {
+        store.add_fact("selector_selects_all", selector_key);
+    }
+}
+
+/// The spec field holding `kind`'s label selector, how it is written, and
+/// whether one without requirements selects every target.
+///
+/// A metav1.LabelSelector that is {} selects everything
+/// (`LabelSelectorAsSelector`); a Service's or ReplicationController's plain
+/// map selects nothing when empty. policy/v1beta1 PodDisruptionBudgets
+/// selected nothing with {}. A custom resource's {} is taken to select
+/// nothing, since its type is unknown.
+fn selector_field(api_version: &str, kind: &str) -> (&'static str, SelectorShape, bool) {
+    match (api_version, kind) {
+        ("v1", "Service" | "ReplicationController") => ("selector", SelectorShape::FlatMap, false),
+        ("networking.k8s.io/v1", "NetworkPolicy") => {
+            ("podSelector", SelectorShape::LabelSelector, true)
+        }
+        ("policy/v1beta1", "PodDisruptionBudget") => {
+            ("selector", SelectorShape::LabelSelector, false)
+        }
+        ("v1", "PersistentVolumeClaim")
+        | ("policy/v1", "PodDisruptionBudget")
+        | ("batch/v1", "Job")
+        | ("apps/v1", "Deployment" | "ReplicaSet" | "StatefulSet" | "DaemonSet") => {
+            ("selector", SelectorShape::LabelSelector, true)
+        }
+        _ => ("selector", SelectorShape::Unknown, false),
+    }
 }
 
 fn extract_pod_scheduling(store: &mut MemStore, namespace: &str, name: &str, data: &Json) {
@@ -1000,6 +1074,7 @@ mod tests {
     use super::*;
     use crate::engine::{Engine, InterpreterBackend};
     use serde_json::json;
+    use std::collections::BTreeSet;
     use std::path::Path;
 
     fn engine_from_store(store: MemStore) -> Engine {
@@ -1620,9 +1695,7 @@ mod tests {
             );
 
             assert!(
-                store
-                    .get_facts("clusterrole_aggregation_empty_selector")
-                    .is_empty(),
+                store.get_facts("selector_selects_all").is_empty(),
                 "{selector} must not be marked empty"
             );
             let result = engine_from_store(store).evaluate().unwrap();
@@ -1638,13 +1711,176 @@ mod tests {
         }
     }
 
+    /// The selector facts loading `object` emits, as (relation, the columns
+    /// after the owner, starting with Selector).
+    fn selector_facts(object: serde_json::Value) -> BTreeSet<(String, Vec<String>)> {
+        let object: DynamicObject = serde_json::from_value(object).unwrap();
+        let mut store = MemStore::new();
+        add_object(&mut store, &object, None);
+        let mut facts = BTreeSet::new();
+        for relation in store.relation_names() {
+            if !relation.starts_with("selector_") {
+                continue;
+            }
+            for row in store.get_facts(&relation) {
+                let rest = row[4..]
+                    .iter()
+                    .map(|value| match value {
+                        Value::String(text) => text.clone(),
+                        other => panic!("{relation}: {other:?}"),
+                    })
+                    .collect();
+                facts.insert((relation.clone(), rest));
+            }
+        }
+        facts
+    }
+
+    // A selector without requirements selects everything only where
+    // Kubernetes reads it as a LabelSelector that is {}: not for a flat map,
+    // a policy/v1beta1 PodDisruptionBudget, a missing selector or a custom
+    // resource. A NetworkPolicy without a podSelector is {}.
+    #[test]
+    fn empty_selector_selects_all_by_kind() {
+        let selects_all = |field: &str| {
+            BTreeSet::from([("selector_selects_all".to_string(), vec![field.to_string()])])
+        };
+        let spec_selector = selects_all("spec.selector");
+        let spec_pod_selector = selects_all("spec.podSelector");
+        let object = |api_version: &str, kind: &str, spec: serde_json::Value| {
+            json!({
+                "apiVersion": api_version,
+                "kind": kind,
+                "metadata": {"name": "o", "namespace": "ns"},
+                "spec": spec,
+            })
+        };
+        for (api_version, kind, spec, want) in [
+            (
+                "policy/v1",
+                "PodDisruptionBudget",
+                json!({"selector": {}}),
+                &spec_selector,
+            ),
+            (
+                "policy/v1",
+                "PodDisruptionBudget",
+                json!({"selector": {"matchLabels": {}}}),
+                &spec_selector,
+            ),
+            (
+                "policy/v1",
+                "PodDisruptionBudget",
+                json!({"minAvailable": 1}),
+                &BTreeSet::new(),
+            ),
+            (
+                "policy/v1beta1",
+                "PodDisruptionBudget",
+                json!({"selector": {}}),
+                &BTreeSet::new(),
+            ),
+            (
+                "networking.k8s.io/v1",
+                "NetworkPolicy",
+                json!({"podSelector": {}}),
+                &spec_pod_selector,
+            ),
+            (
+                "networking.k8s.io/v1",
+                "NetworkPolicy",
+                json!({}),
+                &spec_pod_selector,
+            ),
+            ("v1", "Service", json!({"selector": {}}), &BTreeSet::new()),
+            (
+                "v1",
+                "Service",
+                json!({"type": "ExternalName"}),
+                &BTreeSet::new(),
+            ),
+            (
+                "example.com/v1",
+                "Widget",
+                json!({"selector": {}}),
+                &BTreeSet::new(),
+            ),
+        ] {
+            assert_eq!(
+                &selector_facts(object(api_version, kind, spec.clone())),
+                want,
+                "{api_version} {kind} {spec}"
+            );
+        }
+    }
+
+    // Each In expression carries its position, so two on one key stay two
+    // requirements. NotIn needs no index.
+    #[test]
+    fn in_expressions_carry_their_index() {
+        let facts = selector_facts(json!({
+            "apiVersion": "policy/v1",
+            "kind": "PodDisruptionBudget",
+            "metadata": {"name": "o", "namespace": "ns"},
+            "spec": {"selector": {"matchExpressions": [
+                {"key": "app", "operator": "In", "values": ["web", "db"]},
+                {"key": "tier", "operator": "NotIn", "values": ["x"]},
+                {"key": "app", "operator": "In", "values": ["db"]},
+            ]}},
+        }));
+        let row = |relation: &str, columns: &[&str]| {
+            (
+                relation.to_string(),
+                columns.iter().map(|c| c.to_string()).collect(),
+            )
+        };
+        assert_eq!(
+            facts,
+            BTreeSet::from([
+                row("selector_expr_in", &["spec.selector", "0", "app", "web"]),
+                row("selector_expr_in", &["spec.selector", "0", "app", "db"]),
+                row("selector_expr_notin", &["spec.selector", "tier", "x"]),
+                row("selector_expr_in", &["spec.selector", "2", "app", "db"]),
+            ])
+        );
+    }
+
+    // A Service's selector is a flat map even when a label key is literally
+    // matchLabels.
+    #[test]
+    fn service_selector_is_a_flat_map() {
+        let facts = selector_facts(json!({
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {"name": "o", "namespace": "ns"},
+            "spec": {"selector": {"matchLabels": "web"}},
+        }));
+        assert_eq!(
+            facts,
+            BTreeSet::from([(
+                "selector_match_label".to_string(),
+                vec![
+                    "spec.selector".to_string(),
+                    "matchLabels".to_string(),
+                    "web".to_string()
+                ]
+            )])
+        );
+    }
+
     // Only a selector with no matchLabels entries and no matchExpressions
     // is marked empty.
     #[test]
     fn selector_encoding_outcomes() {
-        let owner = vec![Value::String("o".into()); 4];
+        let selector_key = vec![Value::String("o".into()); 5];
         let outcome = |selector: serde_json::Value| {
-            emit_selector_requirements(&mut MemStore::new(), owner.clone(), &selector, "test")
+            emit_selector_requirements(
+                &mut MemStore::new(),
+                selector_key.clone(),
+                &selector,
+                SelectorShape::LabelSelector,
+                "test",
+            )
         };
         assert_eq!(outcome(json!({})), SelectorFacts::Empty);
         assert_eq!(outcome(json!({"matchLabels": {}})), SelectorFacts::Empty);

@@ -98,71 +98,80 @@ Decl object_label(ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue)
   ]
   bound [/string, /string, /string, /string, /string, /string].
 
-Decl selector_match_label(ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue)
+Decl selector_match_label(ApiVersion, Kind, Namespace, Name, Selector, LabelKey, LabelValue)
   descr [
     doc("matchLabels selector entries, one row per key/value."),
     arg(ApiVersion, "selecting object apiVersion"),
     arg(Kind, "selecting object kind"),
     arg(Namespace, "selecting object namespace; empty for cluster-scoped"),
     arg(Name, "selecting object name"),
+    arg(Selector, "which of the object's selectors: the path of the field it was read from, as Kubernetes field paths are written (spec.selector, aggregationRule.clusterRoleSelectors[1])"),
     arg(LabelKey, "required label key"),
     arg(LabelValue, "required label value")
   ]
-  bound [/string, /string, /string, /string, /string, /string].
+  bound [/string, /string, /string, /string, /string, /string, /string].
 
-Decl selector_expr_in(ApiVersion, Kind, Namespace, Name, LabelKey, AllowedValue)
+Decl selector_expr_in(ApiVersion, Kind, Namespace, Name, Selector, Index, LabelKey, AllowedValue)
   descr [
-    doc("matchExpressions In terms, one row per allowed value."),
+    doc("matchExpressions In terms, one row per allowed value. Each expression must hold, so two In expressions on one key are told apart by Index."),
     arg(ApiVersion, "selecting object apiVersion"),
     arg(Kind, "selecting object kind"),
     arg(Namespace, "selecting object namespace; empty for cluster-scoped"),
     arg(Name, "selecting object name"),
+    arg(Selector, "which of the object's selectors: the path of the field it was read from, as Kubernetes field paths are written (spec.selector, aggregationRule.clusterRoleSelectors[1])"),
+    arg(Index, "the expression's position in matchExpressions, as a string"),
     arg(LabelKey, "label key the expression matches on"),
     arg(AllowedValue, "one value from the In set")
   ]
-  bound [/string, /string, /string, /string, /string, /string].
+  bound [/string, /string, /string, /string, /string, /string, /string, /string].
 
-Decl selector_expr_notin(ApiVersion, Kind, Namespace, Name, LabelKey, ExcludedValue)
+Decl selector_expr_notin(ApiVersion, Kind, Namespace, Name, Selector, LabelKey, ExcludedValue)
   descr [
     doc("matchExpressions NotIn terms, one row per excluded value."),
     arg(ApiVersion, "selecting object apiVersion"),
     arg(Kind, "selecting object kind"),
     arg(Namespace, "selecting object namespace; empty for cluster-scoped"),
     arg(Name, "selecting object name"),
+    arg(Selector, "which of the object's selectors: the path of the field it was read from, as Kubernetes field paths are written (spec.selector, aggregationRule.clusterRoleSelectors[1])"),
     arg(LabelKey, "label key the expression matches on"),
     arg(ExcludedValue, "one value from the NotIn set")
   ]
-  bound [/string, /string, /string, /string, /string, /string].
+  bound [/string, /string, /string, /string, /string, /string, /string].
 
-Decl selector_expr_exists(ApiVersion, Kind, Namespace, Name, LabelKey)
+Decl selector_expr_exists(ApiVersion, Kind, Namespace, Name, Selector, LabelKey)
   descr [
     doc("matchExpressions Exists terms, one row per key."),
     arg(ApiVersion, "selecting object apiVersion"),
     arg(Kind, "selecting object kind"),
     arg(Namespace, "selecting object namespace; empty for cluster-scoped"),
     arg(Name, "selecting object name"),
+    arg(Selector, "which of the object's selectors: the path of the field it was read from, as Kubernetes field paths are written (spec.selector, aggregationRule.clusterRoleSelectors[1])"),
     arg(LabelKey, "label key that must exist")
   ]
-  bound [/string, /string, /string, /string, /string].
+  bound [/string, /string, /string, /string, /string, /string].
 
-Decl selector_expr_notexists(ApiVersion, Kind, Namespace, Name, LabelKey)
+Decl selector_expr_notexists(ApiVersion, Kind, Namespace, Name, Selector, LabelKey)
   descr [
     doc("matchExpressions DoesNotExist terms, one row per key."),
     arg(ApiVersion, "selecting object apiVersion"),
     arg(Kind, "selecting object kind"),
     arg(Namespace, "selecting object namespace; empty for cluster-scoped"),
     arg(Name, "selecting object name"),
+    arg(Selector, "which of the object's selectors: the path of the field it was read from, as Kubernetes field paths are written (spec.selector, aggregationRule.clusterRoleSelectors[1])"),
     arg(LabelKey, "label key that must not exist")
   ]
-  bound [/string, /string, /string, /string, /string].
+  bound [/string, /string, /string, /string, /string, /string].
 
-Decl clusterrole_aggregation_empty_selector(ClusterRole, Index)
+Decl selector_selects_all(ApiVersion, Kind, Namespace, Name, Selector)
   descr [
-    doc("ClusterRole aggregationRule.clusterRoleSelectors entries with no requirements at all ({} or {matchLabels: {}}), which match every ClusterRole. An entry whose requirements could not be encoded gets no row and matches nothing."),
-    arg(ClusterRole, "aggregating ClusterRole name"),
-    arg(Index, "entry index as a string; the Namespace of its synthetic pallograph.dev/agg selector owner")
+    doc("Selectors with no requirements that select every object in scope, like a policy/v1 PodDisruptionBudget's selector: {}. A Service's empty selector, or a missing one, selects nothing and gets no row."),
+    arg(ApiVersion, "selecting object apiVersion"),
+    arg(Kind, "selecting object kind"),
+    arg(Namespace, "selecting object namespace; empty for cluster-scoped"),
+    arg(Name, "selecting object name"),
+    arg(Selector, "which of the object's selectors: the path of the field it was read from, as Kubernetes field paths are written (spec.selector, aggregationRule.clusterRoleSelectors[1])")
   ]
-  bound [/string, /string].
+  bound [/string, /string, /string, /string, /string].
 
 Decl nodepool_requirement(Pool, Key, Operator, Value)
   descr [

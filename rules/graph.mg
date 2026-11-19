@@ -1,12 +1,14 @@
 # Object graph reachability — transitive closure over relationship edges.
 #
 # A "graph edge" is any directed relationship between two Kubernetes objects.
-# Currently the only edge source is label selector matching (selector_matches/8
-# from labels.mg). Owner references will be added as a second edge source once
-# that EDB is available; no changes to reachable/8 will be required at that point.
+# Currently the only edge source is label selector matching (selector_matches/9
+# from labels.mg), which follows the kinds Kubernetes evaluates each selector
+# against: a Service has edges to its Pods, a Deployment to its ReplicaSets.
+# Owner references will be added as a second edge source once that EDB is
+# available; no changes to reachable/8 will be required at that point.
 #
 # Predicate hierarchy:
-#   selector_matches/8  (from labels.mg)
+#   selector_matches/9  (from labels.mg)
 #     → graph_edge/8     (union of all edge sources; extend here for new sources)
 #     → reachable/8      (transitive closure over graph_edge)
 #
@@ -17,12 +19,13 @@
 
 # ---- graph_edge ----
 #
-# A directed edge exists from Src to Dst when Src's label selector matches Dst.
+# A directed edge exists from Src to Dst when one of Src's label selectors
+# matches Dst.
 # Add additional rules here for new edge sources (e.g. owner references).
 
 graph_edge(SrcApiVersion, SrcKind, SrcNamespace, SrcName,
            DstApiVersion, DstKind, DstNamespace, DstName) :-
-    selector_matches(SrcApiVersion, SrcKind, SrcNamespace, SrcName,
+    selector_matches(SrcApiVersion, SrcKind, SrcNamespace, SrcName, _,
                      DstApiVersion, DstKind, DstNamespace, DstName).
 
 # Future: owner reference edges (child → parent direction inverted to parent → child).

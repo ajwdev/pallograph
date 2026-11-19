@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	_ "k8s.io/kubernetes/pkg/apis/apps/install"
@@ -50,10 +51,14 @@ type ObjectRef struct {
 	Name       string `json:"name"`
 }
 
-// Selection is one object a selector owner's selector selects.
+// Selection is one object a selector selects. Selector says which of the
+// owner's selectors it is: the path of the field it was read from, in the
+// form apimachinery's field.Path prints and API server validation errors use
+// (spec.selector, aggregationRule.clusterRoleSelectors[1]).
 type Selection struct {
-	Owner  ObjectRef `json:"owner"`
-	Object ObjectRef `json:"object"`
+	Owner    ObjectRef `json:"owner"`
+	Selector string    `json:"selector"`
+	Object   ObjectRef `json:"object"`
 }
 
 // LabelQuery is a kubectl selector evaluated in one namespace. An empty
@@ -85,10 +90,11 @@ var (
 	clusterRoles        = selectorTarget{"rbac.authorization.k8s.io/v1", "ClusterRole", true}
 )
 
-// ownedSelector is one selector, the object that owns it and what it is
-// evaluated against.
+// ownedSelector is one selector, the object that owns it, the field it was
+// read from and what it is evaluated against.
 type ownedSelector struct {
 	owner    ObjectRef
+	field    string
 	selector labels.Selector
 	targets  []selectorTarget
 }
@@ -136,13 +142,16 @@ func EvaluateLabelsWorld(dir string) ([]Selection, []QueryResult, error) {
 	for _, selector := range owned {
 		for _, object := range objects {
 			if selectsObject(selector, object) {
-				selections = append(selections, Selection{selector.owner, objectRef(object)})
+				selections = append(selections, Selection{selector.owner, selector.field, objectRef(object)})
 			}
 		}
 	}
 	slices.SortFunc(selections, func(a, b Selection) int {
 		if c := compareRefs(a.Owner, b.Owner); c != 0 {
 			return c
+		}
+		if a.Selector != b.Selector {
+			return strings.Compare(a.Selector, b.Selector)
 		}
 		return compareRefs(a.Object, b.Object)
 	})
@@ -204,11 +213,11 @@ func readStoredObjects(path string) ([]runtime.Object, error) {
 // the controller that reads it lists objects in.
 func ownedSelectors(objects []runtime.Object) ([]ownedSelector, error) {
 	var owned []ownedSelector
-	add := func(object runtime.Object, selector labels.Selector, err error, targets ...selectorTarget) error {
+	add := func(object runtime.Object, field string, selector labels.Selector, err error, targets ...selectorTarget) error {
 		if err != nil {
 			return fmt.Errorf("%v: %w", objectRef(object), err)
 		}
-		owned = append(owned, ownedSelector{objectRef(object), selector, targets})
+		owned = append(owned, ownedSelector{objectRef(object), field, selector, targets})
 		return nil
 	}
 
@@ -220,37 +229,37 @@ func ownedSelectors(objects []runtime.Object) ([]ownedSelector, error) {
 			// selector (pkg/controller/endpointslice) and lists Pods in
 			// its namespace.
 			if object.Spec.Selector != nil {
-				err = add(object, labels.SelectorFromSet(object.Spec.Selector), nil, pods)
+				err = add(object, field.NewPath("spec", "selector").String(), labels.SelectorFromSet(object.Spec.Selector), nil, pods)
 			}
 		case *corev1.ReplicationController:
 			// pkg/controller/replication goes through the ReplicaSet
 			// controller, which lists Pods in the namespace.
-			err = add(object, labels.SelectorFromSet(object.Spec.Selector), nil, pods)
+			err = add(object, field.NewPath("spec", "selector").String(), labels.SelectorFromSet(object.Spec.Selector), nil, pods)
 		case *appsv1.ReplicaSet:
 			selector, selectorErr := metav1.LabelSelectorAsSelector(object.Spec.Selector)
-			err = add(object, selector, selectorErr, pods)
+			err = add(object, field.NewPath("spec", "selector").String(), selector, selectorErr, pods)
 		case *appsv1.Deployment:
 			// The Deployment controller adopts ReplicaSets by selector
 			// (getReplicaSetsForDeployment); its Pods hang off those.
 			selector, selectorErr := metav1.LabelSelectorAsSelector(object.Spec.Selector)
-			err = add(object, selector, selectorErr, replicaSets)
+			err = add(object, field.NewPath("spec", "selector").String(), selector, selectorErr, replicaSets)
 		case *appsv1.StatefulSet:
 			// Pods and the ControllerRevisions holding its history
 			// (pkg/controller/history).
 			selector, selectorErr := metav1.LabelSelectorAsSelector(object.Spec.Selector)
-			err = add(object, selector, selectorErr, pods, controllerRevisions)
+			err = add(object, field.NewPath("spec", "selector").String(), selector, selectorErr, pods, controllerRevisions)
 		case *appsv1.DaemonSet:
 			selector, selectorErr := metav1.LabelSelectorAsSelector(object.Spec.Selector)
-			err = add(object, selector, selectorErr, pods, controllerRevisions)
+			err = add(object, field.NewPath("spec", "selector").String(), selector, selectorErr, pods, controllerRevisions)
 		case *batchv1.Job:
 			selector, selectorErr := metav1.LabelSelectorAsSelector(object.Spec.Selector)
-			err = add(object, selector, selectorErr, pods)
+			err = add(object, field.NewPath("spec", "selector").String(), selector, selectorErr, pods)
 		case *policyv1.PodDisruptionBudget:
 			// The disruption controller (pkg/controller/disruption) lists
 			// Pods in the namespace. A nil selector selects nothing and {}
 			// every Pod.
 			selector, selectorErr := metav1.LabelSelectorAsSelector(object.Spec.Selector)
-			err = add(object, selector, selectorErr, pods)
+			err = add(object, field.NewPath("spec", "selector").String(), selector, selectorErr, pods)
 		case *policyv1beta1.PodDisruptionBudget:
 			// policy/v1beta1 selected no Pods with {}. Converting to the
 			// internal type applies the selector the API server rewrites
@@ -260,26 +269,25 @@ func ownedSelectors(objects []runtime.Object) ([]ownedSelector, error) {
 				break
 			}
 			selector, selectorErr := metav1.LabelSelectorAsSelector(internal.Spec.Selector)
-			err = add(object, selector, selectorErr, pods)
+			err = add(object, field.NewPath("spec", "selector").String(), selector, selectorErr, pods)
 		case *networkingv1.NetworkPolicy:
 			// spec.podSelector picks the Pods the policy applies to; {}
 			// is every Pod in the namespace.
 			selector, selectorErr := metav1.LabelSelectorAsSelector(&object.Spec.PodSelector)
-			err = add(object, selector, selectorErr, pods)
+			err = add(object, field.NewPath("spec", "podSelector").String(), selector, selectorErr, pods)
 		case *corev1.PersistentVolumeClaim:
 			// The PV binder ignores labels when a claim has no selector.
 			// Pallograph keeps no edge for that, so neither does the
 			// oracle.
 			if object.Spec.Selector != nil {
 				selector, selectorErr := metav1.LabelSelectorAsSelector(object.Spec.Selector)
-				err = add(object, selector, selectorErr, persistentVolumes)
+				err = add(object, field.NewPath("spec", "selector").String(), selector, selectorErr, persistentVolumes)
 			}
 		case *rbacv1.ClusterRole:
 			if object.AggregationRule == nil {
 				break
 			}
-			// Each clusterRoleSelectors entry under the synthetic owner
-			// Pallograph emits for it, numbered in the Namespace slot.
+			// Each clusterRoleSelectors entry is a selector of its own.
 			for i := range object.AggregationRule.ClusterRoleSelectors {
 				selector, selectorErr := metav1.LabelSelectorAsSelector(&object.AggregationRule.ClusterRoleSelectors[i])
 				if selectorErr != nil {
@@ -287,7 +295,8 @@ func ownedSelectors(objects []runtime.Object) ([]ownedSelector, error) {
 					break
 				}
 				owned = append(owned, ownedSelector{
-					owner:    ObjectRef{"pallograph.dev/agg", "ClusterRoleAggregation", strconv.Itoa(i), object.Name},
+					owner:    objectRef(object),
+					field:    field.NewPath("aggregationRule", "clusterRoleSelectors").Index(i).String(),
 					selector: selector,
 					targets:  []selectorTarget{clusterRoles},
 				})

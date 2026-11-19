@@ -1,11 +1,8 @@
 # RBAC roles - what each Role and ClusterRole grants.
 #
 # Facts loaded from the cluster (EDB) used here:
-#   k8s/5                                     - Role and ClusterRole objects
-#   clusterrole_aggregation_empty_selector/2  - clusterRoleSelectors entries
-#                                               with no requirements
-#   selector_* / object_label                 - via selector_matches/8 in
-#                                               labels.mg
+#   k8s/5                     - Role and ClusterRole objects
+#   selector_* / object_label - via selector_matches/9 in labels.mg
 #
 # Derived relations (IDB):
 #   role/3, clusterrole/2                           (type filters)
@@ -82,15 +79,15 @@ clusterrole_own_rule(Role, Rule) :-
 # are used as they are. This mirrors aggregate() in
 # tools/k8s-oracle/world.go.
 #
-# Each clusterRoleSelectors[i] entry is emitted by edb.rs as a synthetic
-# selector owner (ApiVersion="pallograph.dev/agg", Kind="ClusterRoleAggregation",
-# Namespace=i, Name=<aggregating ClusterRole>), with its matchLabels and
-# matchExpressions stored as the standard selector_* facts. selector_matches/8
-# in labels.mg then gives AND semantics within one selector and OR semantics
-# across selectors. An empty selector ({} or {matchLabels: {}}) has no
-# requirements and matches every ClusterRole, as in Kubernetes; edb.rs marks
-# it with clusterrole_aggregation_empty_selector. A selector edb.rs could not
-# encode gets neither requirements nor the marker, so it matches nothing.
+# Each clusterRoleSelectors[i] entry is one of the ClusterRole's selectors
+# (Selector "aggregationRule.clusterRoleSelectors[i]"), with its matchLabels
+# and matchExpressions stored as the standard selector_* facts.
+# selector_matches/9 in labels.mg then gives AND semantics within one
+# entry, and reading it with Selector left open gives OR semantics across
+# entries. An empty selector ({} or {matchLabels: {}}) has no requirements
+# and matches every ClusterRole, as in Kubernetes; edb.rs marks it with
+# selector_selects_all. A selector edb.rs could not encode gets neither
+# requirements nor the marker, so it matches nothing.
 
 Decl clusterrole_aggregates(Aggregator, Source)
   descr [
@@ -100,13 +97,8 @@ Decl clusterrole_aggregates(Aggregator, Source)
   ].
 
 clusterrole_aggregates(Aggregator, Source) :-
-    selector_matches("pallograph.dev/agg", "ClusterRoleAggregation", _, Aggregator,
+    selector_matches("rbac.authorization.k8s.io/v1", "ClusterRole", "", Aggregator, _,
                      "rbac.authorization.k8s.io/v1", "ClusterRole", "", Source),
-    Aggregator != Source.
-
-clusterrole_aggregates(Aggregator, Source) :-
-    clusterrole_aggregation_empty_selector(Aggregator, _),
-    clusterrole(Source, _),
     Aggregator != Source.
 
 # ---- Aggregation cycles ----
