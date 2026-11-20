@@ -87,6 +87,24 @@ fn mutual_recursion() {
 }
 
 #[test]
+#[ignore = "upstream mangle-interpreter bug: nonlinear recursion misses facts (AGENTS.md)"]
+fn nonlinear_recursion_new_fact_second() {
+    // d(1, 2) is derived first; d(2, 3) only in the next round, because its
+    // rule needs d(1, 2). d(1, 3) then needs the old fact in the first atom
+    // and the new one in the second, a join the interpreter never plans.
+    // DD derives it. Found by `generated_parity.rs`.
+    let e = edb(&[("p", vec![n(1), n(2)]), ("q", vec![n(2), n(3)])]);
+    assert_parity(
+        "nonlinear_new_fact_second",
+        &e,
+        "Decl p(A, B).\nDecl q(A, B).\nDecl d(A, B).\n\
+         d(A, B) :- p(A, B).\n\
+         d(A, B) :- q(A, B), d(1, 2).\n\
+         d(X, Z) :- d(X, Y), d(Y, Z).",
+    );
+}
+
+#[test]
 fn stratified_negation() {
     let e = edb(&[
         ("node", vec![n(1)]),

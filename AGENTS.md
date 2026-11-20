@@ -189,6 +189,18 @@ Known upstream `mangle-rs` bugs, deliberately not patched here:
   its relation (`Vec::contains` in `MemStore::add_fact`), so loading facts
   takes quadratic time: about 0.76s for 20k facts in one relation, against
   0.007s on the DD backend.
+- In the interpreter only, a rule whose body uses a recursive relation twice
+  (nonlinear recursion, `d(X, Z) :- d(X, Y), d(Y, Z)`) can miss facts.
+  `mangle-driver`, and our copy of its loop in `execute_with_provenance`
+  (`src/engine.rs`), plan one semi-naive variant per premise, but the
+  planner marks the new-facts scan by predicate, not by position
+  (`Planner::with_delta` in `mangle-analysis`). Every variant reads new facts
+  in the scanned atom and all facts in the indexed one, so an old fact in
+  the first atom never meets a new one in the second
+  (`nonlinear_recursion_new_fact_second` in
+  `tests/dd_interp_parity.rs`). Rules here use a recursive relation at most
+  once per body, and so does the program generator in
+  `tests/generated_parity.rs`.
 
 Don't work around these by making the DD backend diverge from the
 interpreter. Leave the affected test ignored or the rule shaped around the bug.
