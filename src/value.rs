@@ -40,7 +40,7 @@ pub fn json_to_value(v: &Json) -> Option<Value> {
 /// names `/true` and `/false` become JSON bools again, and other names
 /// (struct keys aside) become strings. `json_to_value` drops nulls, so
 /// `json_to_value(&data_to_json(v)) == Some(v)` holds but the JSON side
-/// loses them. Used to rebuild a k8s object from its `k8s/5` Data.
+/// loses them. Used to rebuild a k8s object from its `k8s/6` Data.
 pub fn data_to_json(v: &Value) -> Json {
     match v {
         Value::Name(s) if s == "/true" => Json::Bool(true),

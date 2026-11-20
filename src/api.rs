@@ -2005,7 +2005,7 @@ mod tests {
                 }
             );
             let names = sorted(
-                core.query(&At::Live, "k8s(_, \"ConfigMap\", _, N, _)")
+                core.query(&At::Live, "k8s(_, \"ConfigMap\", _, N, _, _)")
                     .unwrap(),
             );
             assert_eq!(names.rows, [vec![s("db")], vec![s("new")], vec![s("web")]]);

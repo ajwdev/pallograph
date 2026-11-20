@@ -1,7 +1,7 @@
 # RBAC subjects - who each RoleBinding and ClusterRoleBinding applies to.
 #
 # Facts loaded from the cluster (EDB) used here:
-#   k8s/5          - RoleBinding, ClusterRoleBinding and ServiceAccount objects
+#   k8s/6          - RoleBinding, ClusterRoleBinding and ServiceAccount objects
 #   user_groups/2  - (Username, Group) memberships supplied by the caller
 #
 # Derived relations (IDB):
@@ -21,10 +21,10 @@
 # ---- Type filters ----
 
 rolebinding(Namespace, Name, Data) :-
-    k8s("rbac.authorization.k8s.io/v1", "RoleBinding", Namespace, Name, Data).
+    k8s("rbac.authorization.k8s.io/v1", "RoleBinding", Namespace, Name, Data, _).
 
 clusterrolebinding(Name, Data) :-
-    k8s("rbac.authorization.k8s.io/v1", "ClusterRoleBinding", "", Name, Data).
+    k8s("rbac.authorization.k8s.io/v1", "ClusterRoleBinding", "", Name, Data, _).
 
 # Both binding kinds, ClusterRoleBindings with namespace "".
 binding(Namespace, Name, Data) :- rolebinding(Namespace, Name, Data).

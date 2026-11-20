@@ -13,6 +13,7 @@ debug = true
 [build-dependencies]
 mangle-ast    = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }
 mangle-driver = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }
+mangle-parse  = { git = "https://codeberg.org/TauCeti/mangle-rs", rev = "3ce2b034dda232d5a160b49bfc6b9a56fbe39087" }
 glob          = "0.3"
 
 [dependencies]

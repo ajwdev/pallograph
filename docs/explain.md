@@ -12,8 +12,8 @@ anything.
 `explain <body>` takes the same body as `?-`, projection included:
 
 ```
-pallograph> explain host_network_pod(Ns, N), k8s(_, "Pod", Ns, N, R)
-pallograph> explain _(R) :- host_network_pod(Ns, N), k8s(_, "Pod", Ns, N, R)
+pallograph> explain host_network_pod(Ns, N), k8s(_, "Pod", Ns, N, R, _)
+pallograph> explain _(R) :- host_network_pod(Ns, N), k8s(_, "Pod", Ns, N, R, _)
 ```
 
 There is also a CLI flag, `--explain`, that dumps the plan for every rule in
@@ -24,7 +24,7 @@ or a `use`d snapshot), so it adds the cost section.
 The rest of this doc walks through one example:
 
 ```
-pallograph> ::explain k8s(_, "Pod", Ns, N, R), host_network_pod(Ns, N)
+pallograph> ::explain k8s(_, "Pod", Ns, N, R, _), host_network_pod(Ns, N)
 ● Stratum 139 (`__query`)
   ->  Iterate on k8s
         IndexLookup [_, $scan_0, Ns, N, R]
@@ -112,7 +112,7 @@ because it decides whether a lookup is selective or close to a scan.
 
 Look at the two lookups in the example:
 
-- `k8s(_, "Pod", Ns, N, R)`: the first column is `_` (unbound), so the first
+- `k8s(_, "Pod", Ns, N, R, _)`: the first column is `_` (unbound), so the first
   *bound* argument is the constant `"Pod"` in column 1 (`Kind`). The index keys
   on `Kind`, which is low-cardinality: `Key on "Pod"` matches every Pod in the
   cluster. The later `Filter`s on `Ns` and `N` then throw most of them away.
