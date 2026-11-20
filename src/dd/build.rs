@@ -518,7 +518,16 @@ where
                     vec![Row(rkc.iter().map(|&i| row.0[i].clone()).collect())]
                 });
 
-                curr = Some(keyed_input.antijoin(neg_keys).map(|(_key, row)| row));
+                // DD's antijoin subtracts the semijoin, so it is a set
+                // difference only when each key has multiplicity 0 or 1. EDB
+                // inputs can hold a fact more than once, and a key projected
+                // from fewer columns than the relation can repeat, so make
+                // the keys a set first.
+                curr = Some(
+                    keyed_input
+                        .antijoin(neg_keys.distinct())
+                        .map(|(_key, row)| row),
+                );
             }
 
             // ---------------------------------------------------------------

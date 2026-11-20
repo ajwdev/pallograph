@@ -2175,6 +2175,39 @@ mod tests {
         }
     }
 
+    /// Negating a fact two objects emit removes a row once, not twice. Both
+    /// NodePools emit `nodepool_label("pool", "zone", "a")`, so the live EDB
+    /// holds it twice; `ok("p")` still follows from zone b.
+    #[test]
+    fn negation_over_fact_another_object_emits() {
+        let startup = objects(vec![
+            node_pool("karpenter.sh/v1", "a"),
+            node_pool("other.dev/v1", "a"),
+        ]);
+        let edb = vec![
+            ("wants".into(), vec![s("p"), s("a")]),
+            ("wants".into(), vec![s("p"), s("b")]),
+        ];
+        let rules = vec![
+            "Decl wants(P, Zone).\nDecl ok(P).\n\
+             ok(P) :- wants(P, Zone), !nodepool_label(\"pool\", \"zone\", Zone)."
+                .to_string(),
+        ];
+        let backends: [Box<dyn Backend>; 2] = [
+            Box::new(InterpreterBackend),
+            Box::new(DdBackend { provenance: false }),
+        ];
+        for backend in backends {
+            let mut engine =
+                Engine::from_objects(edb.clone(), startup.clone(), rules.clone(), backend).unwrap();
+            assert_eq!(rows(&engine, "ok"), [vec![s("p")]], "at startup");
+            // Moving one pool to b leaves zone a held once and b held once,
+            // so nothing in `wants` survives and `ok` goes.
+            engine.upsert_objects(objects(vec![node_pool("karpenter.sh/v1", "b")]));
+            assert!(rows(&engine, "ok").is_empty(), "after upsert");
+        }
+    }
+
     /// Another version in the same API group is the same object.
     #[test]
     fn upsert_matches_any_version_in_group() {
