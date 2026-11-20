@@ -15,5 +15,5 @@
 #   k8s_object_count("Pod",              "pallograph-test", 3)
 #   k8s_object_count("ClusterRoleBinding", "",              1)
 k8s_object_count(Kind, Namespace, N) :-
-    k8s(_, Kind, Namespace, Name, _)
+    k8s(_, Kind, Namespace, Name, _, _)
     |> do fn:group_by(Kind, Namespace), let N = fn:count(Name).

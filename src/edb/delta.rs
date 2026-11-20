@@ -11,7 +11,7 @@ use mangle_common::Value;
 use crate::edb::{ObjectFacts, ObjectKey};
 use crate::engine::Change;
 
-/// The `k8s/5` row an object emitted, which carries its whole body and so
+/// The `k8s/6` row an object emitted, which carries its whole body and so
 /// stands in for its content. Compared between base and head to tell an
 /// unchanged object from a changed one.
 fn k8s_row(object: &ObjectFacts) -> Option<&Vec<Value>> {

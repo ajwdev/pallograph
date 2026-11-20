@@ -491,10 +491,11 @@ fn negation_over_empty_input_relation() {
 
 #[test]
 fn negation_over_duplicate_input_fact() {
-    // The EDB is a multiset: two objects that emit the same fact each add a
-    // copy. DD's antijoin is only a set difference when the negated side has
-    // multiplicity 0 or 1, so a negated fact held twice must still remove
-    // its row once, not twice (which would cancel ok(alice) derived via r1).
+    // `Engine` keeps its EDB a set, but a backend can still be handed the
+    // same fact twice. DD's antijoin is only a set difference when the
+    // negated side has multiplicity 0 or 1, so a negated fact given twice
+    // must still remove its row once, not twice (which would cancel
+    // ok(alice) derived via r1).
     let e = edb(&[
         ("sub", vec![s("alice"), s("r1")]),
         ("sub", vec![s("alice"), s("r2")]),
