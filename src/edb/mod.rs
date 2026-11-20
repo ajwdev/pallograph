@@ -483,18 +483,23 @@ fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str
         &body,
     );
 
-    if kind == "Node" {
-        extract_node_data(store, &name, &body);
-    }
-    if kind == "Pod" {
-        extract_pod_scheduling(store, &namespace, &name, &body);
-        extract_pod_anti_affinity(store, &namespace, &name, &body);
-    }
-    if kind == "ClusterRole" {
-        extract_clusterrole_agg_selectors(store, &name, &body);
-    }
-    if kind == "NodePool" {
-        extract_nodepool_data(store, &name, &body);
+    let key = ObjectKey::new(api_version, kind, &namespace, &name);
+    // These facts leave out the object's group (and the node and pool facts
+    // its kind), so they run only for the group each kind is read from in
+    // `CLUSTER_RESOURCES`. Otherwise a same-named object in another group,
+    // such as a CRD called `Pod`, would emit the same facts, and the EDB
+    // would hold one fact on behalf of two objects.
+    match (key.group.as_str(), kind) {
+        ("", "Node") => extract_node_data(store, &name, &body),
+        ("", "Pod") => {
+            extract_pod_scheduling(store, &namespace, &name, &body);
+            extract_pod_anti_affinity(store, &namespace, &name, &body);
+        }
+        ("rbac.authorization.k8s.io", "ClusterRole") => {
+            extract_clusterrole_agg_selectors(store, &name, &body)
+        }
+        ("karpenter.sh", "NodePool") => extract_nodepool_data(store, &name, &body),
+        _ => {}
     }
 }
 
