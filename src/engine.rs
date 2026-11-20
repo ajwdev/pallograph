@@ -2157,54 +2157,29 @@ mod tests {
         }
     }
 
-    /// A fact two objects emit stays while either is still loaded with it.
-    /// NodePools in two API groups are two objects, but both emit
-    /// `nodepool_label("pool", "zone", ...)`.
+    /// Only a NodePool in `karpenter.sh`, the group read from clusters,
+    /// emits `nodepool_*` facts. Those facts leave out the group, so a
+    /// NodePool `pool` in another group would emit the same ones, and the
+    /// EDB would hold one fact on behalf of two objects.
     #[test]
-    fn upsert_keeps_fact_another_object_emits() {
+    fn nodepool_facts_only_for_karpenter_group() {
         let startup = objects(vec![
             node_pool("karpenter.sh/v1", "a"),
             node_pool("other.dev/v1", "a"),
         ]);
         let zone = |z: &str| vec![s("pool"), s("zone"), s(z)];
         for mut engine in object_engines(startup) {
+            assert_eq!(rows(&engine, "k8s").len(), 2, "both pools load");
+            assert_eq!(rows(&engine, "nodepool_label"), [zone("a")]);
             engine.upsert_objects(objects(vec![node_pool("karpenter.sh/v1", "b")]));
-            assert_eq!(rows(&engine, "nodepool_label"), [zone("a"), zone("b")]);
-            engine.upsert_objects(objects(vec![node_pool("other.dev/v1", "b")]));
             assert_eq!(rows(&engine, "nodepool_label"), [zone("b")]);
-        }
-    }
-
-    /// Negating a fact two objects emit removes a row once, not twice. Both
-    /// NodePools emit `nodepool_label("pool", "zone", "a")`, so the live EDB
-    /// holds it twice; `ok("p")` still follows from zone b.
-    #[test]
-    fn negation_over_fact_another_object_emits() {
-        let startup = objects(vec![
-            node_pool("karpenter.sh/v1", "a"),
-            node_pool("other.dev/v1", "a"),
-        ]);
-        let edb = vec![
-            ("wants".into(), vec![s("p"), s("a")]),
-            ("wants".into(), vec![s("p"), s("b")]),
-        ];
-        let rules = vec![
-            "Decl wants(P, Zone).\nDecl ok(P).\n\
-             ok(P) :- wants(P, Zone), !nodepool_label(\"pool\", \"zone\", Zone)."
-                .to_string(),
-        ];
-        let backends: [Box<dyn Backend>; 2] = [
-            Box::new(InterpreterBackend),
-            Box::new(DdBackend { provenance: false }),
-        ];
-        for backend in backends {
-            let mut engine =
-                Engine::from_objects(edb.clone(), startup.clone(), rules.clone(), backend).unwrap();
-            assert_eq!(rows(&engine, "ok"), [vec![s("p")]], "at startup");
-            // Moving one pool to b leaves zone a held once and b held once,
-            // so nothing in `wants` survives and `ok` goes.
-            engine.upsert_objects(objects(vec![node_pool("karpenter.sh/v1", "b")]));
-            assert!(rows(&engine, "ok").is_empty(), "after upsert");
+            engine.apply_changes(vec![Change::Retract(ObjectKey::new(
+                "other.dev/v1",
+                "NodePool",
+                "",
+                "pool",
+            ))]);
+            assert_eq!(rows(&engine, "nodepool_label"), [zone("b")]);
         }
     }
 
