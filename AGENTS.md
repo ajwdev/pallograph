@@ -154,6 +154,14 @@ the `dd_matches_interpreter` test in `src/engine.rs` passing. Prefer adding a
 small feature-matrix case to `tests/dd_interp_parity.rs` when touching a
 specific Datalog feature.
 
+Those tests check that DD matches mangle-rs, not that either is correct
+Datalog: a bug both backends share passes, since they share Mangle's parser,
+analysis and planner. `tests/generated_parity.rs` checks both backends
+against an outside oracle, Soufflé (in the Nix dev shell), over random
+programs. When a disagreement turns out to be a mangle-rs bug, document it
+in the list below with an ignored parity case, and send a fix upstream
+where possible.
+
 One deliberate difference: the DD backend rejects `fn:time:now` (see
 `NON_DETERMINISTIC_FUNCTIONS` in `src/dd/build.rs`). DD evaluates a `let`
 again on retraction, so a function that changes between calls would leave
@@ -182,6 +190,18 @@ Known upstream `mangle-rs` bugs, deliberately not patched here:
   its relation (`Vec::contains` in `MemStore::add_fact`), so loading facts
   takes quadratic time: about 0.76s for 20k facts in one relation, against
   0.007s on the DD backend.
+- In the interpreter only, a rule whose body uses a recursive relation twice
+  (nonlinear recursion, `d(X, Z) :- d(X, Y), d(Y, Z)`) can miss facts.
+  `mangle-driver`, and our copy of its loop in `execute_with_provenance`
+  (`src/engine.rs`), plan one semi-naive variant per premise, but the
+  planner marks the new-facts scan by predicate, not by position
+  (`Planner::with_delta` in `mangle-analysis`). Every variant reads new facts
+  in the scanned atom and all facts in the indexed one, so an old fact in
+  the first atom never meets a new one in the second
+  (`nonlinear_recursion_new_fact_second` in
+  `tests/dd_interp_parity.rs`). Rules here use a recursive relation at most
+  once per body, and `tests/generated_parity.rs` skips the interpreter on
+  programs that don't.
 
 Don't work around these by making the DD backend diverge from the
 interpreter. Leave the affected test ignored or the rule shaped around the bug.
