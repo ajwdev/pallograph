@@ -27,6 +27,8 @@
       # Builds tools/k8s-oracle, which generates the compatibility
       # test data (hack/compat-gen.sh).
       go
+      # The outside oracle for tests/generated_parity.rs.
+      souffle
     ];
 
     env = {

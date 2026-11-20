@@ -152,14 +152,15 @@ The DD backend must produce the same facts as the interpreter. Any change to
 lowering, dataflow construction, or rules should keep `dd_interp_parity` and
 the `dd_matches_interpreter` test in `src/engine.rs` passing. Prefer adding a
 small feature-matrix case to `tests/dd_interp_parity.rs` when touching a
-specific Datalog feature. `tests/generated_parity.rs` checks the same thing
-over random programs.
+specific Datalog feature.
 
-These tests check that DD matches mangle-rs, not that either is correct
+Those tests check that DD matches mangle-rs, not that either is correct
 Datalog: a bug both backends share passes, since they share Mangle's parser,
-analysis and planner. When a disagreement turns out to be a mangle-rs bug,
-document it in the list below with an ignored parity case, and send a fix
-upstream where possible.
+analysis and planner. `tests/generated_parity.rs` checks both backends
+against an outside oracle, Soufflé (in the Nix dev shell), over random
+programs. When a disagreement turns out to be a mangle-rs bug, document it
+in the list below with an ignored parity case, and send a fix upstream
+where possible.
 
 One deliberate difference: the DD backend rejects `fn:time:now` (see
 `NON_DETERMINISTIC_FUNCTIONS` in `src/dd/build.rs`). DD evaluates a `let`
@@ -199,8 +200,8 @@ Known upstream `mangle-rs` bugs, deliberately not patched here:
   the first atom never meets a new one in the second
   (`nonlinear_recursion_new_fact_second` in
   `tests/dd_interp_parity.rs`). Rules here use a recursive relation at most
-  once per body, and so does the program generator in
-  `tests/generated_parity.rs`.
+  once per body, and `tests/generated_parity.rs` skips the interpreter on
+  programs that don't.
 
 Don't work around these by making the DD backend diverge from the
 interpreter. Leave the affected test ignored or the rule shaped around the bug.
