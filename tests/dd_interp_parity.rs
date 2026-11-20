@@ -588,6 +588,23 @@ fn negation_over_empty_input_relation() {
 }
 
 #[test]
+fn negation_over_duplicate_input_fact() {
+    // The EDB is a multiset: two objects that emit the same fact each add a
+    // copy. DD's antijoin is only a set difference when the negated side has
+    // multiplicity 0 or 1, so a negated fact held twice must still remove
+    // its row once, not twice (which would cancel ok(alice) derived via r1).
+    let e = edb(&[
+        ("sub", vec![s("alice"), s("r1")]),
+        ("sub", vec![s("alice"), s("r2")]),
+        ("denied", vec![s("r2")]),
+        ("denied", vec![s("r2")]),
+    ]);
+    let rules = "Decl sub(S, R).\nDecl denied(R).\nDecl ok(S).\n\
+         ok(S) :- sub(S, R), !denied(R).";
+    assert_parity("negation_over_duplicate_input_fact", &e, rules);
+}
+
+#[test]
 fn join_on_struct_column() {
     // Equal structs built separately must join. A struct with the same
     // fields in another order, or another value, must compare the same way

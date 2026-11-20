@@ -62,7 +62,7 @@ Only the non-obvious parts:
 - Clients do the I/O; the core does anything that has to agree with the
   rules. The REPL reads files and runs `!` commands; the core turns k8s
   objects into facts (`edb::single_object_facts`) and splits a sourced
-  file into facts and rules (`src/source.rs`). `src/delta.rs` diffs two
+  file into facts and rules (`src/source.rs`). `src/edb/delta.rs` diffs two
   renders of the same manifests for `k8s::apply-delta`.
 - `?-` and `k8s::match` are reads: they evaluate over the state plus a
   query rule or extra facts (`Engine::evaluate_query_on`,
@@ -71,7 +71,7 @@ Only the non-obvious parts:
 - `Engine::version()` is the DD worker's settled epoch (the interpreter
   counts changes instead). Rebuilds continue from it, so it never goes
   backwards; it is the one notion of time, not a second counter.
-- `src/watch.rs` - with `watch = true` on a `k8s` datasource (or
+- `src/edb/watch.rs` - with `watch = true` on a `k8s` datasource (or
   `--watch`), kube watchers keep the engine current through
   `Engine::apply_changes`, one DD commit per batch.
 - `src/builtins.txt` - built-in K8s/EKS principals filtered from SMT output.
