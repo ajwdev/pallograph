@@ -12,7 +12,8 @@
 //! 2. **Property-based** — the same rule shapes over randomly-generated EDBs
 //!    (seeded, deterministic), which catches data-shape-dependent divergences
 //!    (cycles, self-loops, duplicates, empty relations) that a single fixture
-//!    never exercises.
+//!    never exercises. Random programs, not just random data, are in
+//!    `generated_parity.rs`.
 //!
 //! Both backends prepend the (Decls-only) EDB prelude, so the comparison is
 //! symmetric. `$temp` planner relations are skipped (the interpreter
@@ -807,19 +808,6 @@ fn random_graph(rng: &mut Lcg, nodes: u64) -> Edb {
             ("edge".to_string(), vec![n(a), n(b)])
         })
         .collect()
-}
-
-#[test]
-fn property_transitive_closure_random_graphs() {
-    let rules = "Decl edge(A, B).\nDecl path(A, B).\n\
-         path(X, Y) :- edge(X, Y).\n\
-         path(X, Z) :- path(X, Y), edge(Y, Z).";
-    for seed in 0..40u64 {
-        let mut rng = Lcg::new(seed.wrapping_add(1));
-        let nodes = 2 + rng.below(6); // 2..=7 nodes
-        let e = random_graph(&mut rng, nodes);
-        assert_parity(&format!("tc_seed_{seed}"), &e, rules);
-    }
 }
 
 #[test]

@@ -152,7 +152,14 @@ The DD backend must produce the same facts as the interpreter. Any change to
 lowering, dataflow construction, or rules should keep `dd_interp_parity` and
 the `dd_matches_interpreter` test in `src/engine.rs` passing. Prefer adding a
 small feature-matrix case to `tests/dd_interp_parity.rs` when touching a
-specific Datalog feature.
+specific Datalog feature. `tests/generated_parity.rs` checks the same thing
+over random programs.
+
+These tests check that DD matches mangle-rs, not that either is correct
+Datalog: a bug both backends share passes, since they share Mangle's parser,
+analysis and planner. When a disagreement turns out to be a mangle-rs bug,
+document it in the list below with an ignored parity case, and send a fix
+upstream where possible.
 
 One deliberate difference: the DD backend rejects `fn:time:now` (see
 `NON_DETERMINISTIC_FUNCTIONS` in `src/dd/build.rs`). DD evaluates a `let`
