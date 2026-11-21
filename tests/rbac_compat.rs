@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! RBAC compatibility harness: checks `rbac_allowed` (rules/rbac.mg) against
+//! RBAC compatibility harness: checks `rbac_allowed` (rules/k8s_rbac.mg) against
 //! the kube-apiserver RBAC authorizer, and the single-step impersonation
 //! and RBAC write relations of the escalation rules against the API server
 //! code around it (see "Escalation questions" below).
@@ -49,8 +49,8 @@
 //!
 //! | question                               | Pallograph allows when                                  |
 //! |----------------------------------------|---------------------------------------------------------|
-//! | impersonate user U                     | `escalation_hop(P, U)`                                  |
-//! | impersonate ServiceAccount ns/name     | `principal_subject(P, K, N)`, `subject_impersonatable_sa(N, K, ns, name)` |
+//! | impersonate user U                     | `granted_pivot(P, U)`                                   |
+//! | impersonate ServiceAccount ns/name     | `principal_subject(P, K, N)`, `pivot(N, _, K, "system:serviceaccount:ns:name", _, /serviceaccount, /impersonate, /grant)` |
 //! | impersonate group G                    | `perm_group_impersonate(P, G)`                          |
 //! | create ClusterRoleBinding of R         | `rbac_write_role(P, /principal, "bind", "", R)`         |
 //! | update ClusterRoleBinding B (of R)     | `rbac_write_role(P, /principal, "bind", B, R)`          |
@@ -64,7 +64,7 @@
 //!
 //! P's rows are those with Name P and Kind /user or /serviceaccount.
 //!
-//! The write relations come from rules/rbac_write.mg. Buckets of these
+//! The write relations come from rules/k8s_rbac_write.mg. Buckets of these
 //! kinds are prefixed with the kind, e.g. "impersonate over-grant: total".
 //! A write the principal's own rules already cover is allowed by
 //! Kubernetes (tagged write-allowed-by-covering-rules) but gains nothing,
@@ -321,7 +321,7 @@ fn decide_escalation(
     let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("rules");
     let results = Engine::new(store, &rules, backend)?.evaluate()?;
 
-    let hops: BTreeSet<(String, String)> = text_rows(&results, "escalation_hop", 2)?
+    let hops: BTreeSet<(String, String)> = text_rows(&results, "granted_pivot", 2)?
         .into_iter()
         .map(|row| (row[0].clone(), row[1].clone()))
         .collect();
@@ -333,13 +333,24 @@ fn decide_escalation(
             .push(row[0].clone());
     }
     let mut impersonatable_accounts = BTreeSet::new();
-    for row in text_rows(&results, "subject_impersonatable_sa", 4)? {
+    // pivot(From, _, FromKind, To, _, ToKind, Mechanism, Source); a
+    // ServiceAccount's username is system:serviceaccount:<ns>:<name>.
+    for row in text_rows(&results, "pivot", 8)? {
+        if row[5] != "/serviceaccount" || row[6] != "/impersonate" || row[7] != "/grant" {
+            continue;
+        }
+        let Some((namespace, name)) = row[3]
+            .strip_prefix("system:serviceaccount:")
+            .and_then(|rest| rest.split_once(':'))
+        else {
+            continue;
+        };
         for principal in principals_of
-            .get(&(row[1].clone(), row[0].clone()))
+            .get(&(row[2].clone(), row[0].clone()))
             .into_iter()
             .flatten()
         {
-            impersonatable_accounts.insert((principal.clone(), row[2].clone(), row[3].clone()));
+            impersonatable_accounts.insert((principal.clone(), namespace.into(), name.into()));
         }
     }
     let impersonatable_groups: BTreeSet<(String, String)> =

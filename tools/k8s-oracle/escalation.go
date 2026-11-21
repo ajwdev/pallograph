@@ -77,7 +77,7 @@ func (w *World) bindings() []binding {
 
 // knownServiceAccounts returns the usernames of the ServiceAccounts a
 // binding names or that exist as objects: the ones Pallograph knows
-// (service_account_principal in rules/rbac_subjects.mg).
+// (service_account_principal in rules/k8s_rbac_subjects.mg).
 func (w *World) knownServiceAccounts() sets.Set[string] {
 	known := sets.New[string]()
 	for _, b := range w.bindings() {

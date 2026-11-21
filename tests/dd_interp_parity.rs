@@ -229,7 +229,7 @@ fn repeated_variable_in_atom() {
 
 /// A variable bound once and written twice in the head, a constant leading
 /// a body atom, and a table of facts written in the rules keyed by name
-/// constants: the shapes of labels.mg's selector_candidate rules.
+/// constants: the shapes of k8s_labels.mg's selector_candidate rules.
 #[test]
 fn repeated_variable_in_head_with_rule_facts() {
     let e = edb(&[
@@ -261,7 +261,7 @@ fn repeated_variable_in_head_with_rule_facts() {
 
 /// A selector with no requirements selects every candidate (nothing is
 /// unsatisfied), and two In requirements on one key, told apart by index,
-/// must both hold: labels.mg's selects-all and In shapes.
+/// must both hold: k8s_labels.mg's selects-all and In shapes.
 #[test]
 fn requirements_by_index_and_none() {
     let e = edb(&[
@@ -598,7 +598,7 @@ fn mixed_value_types() {
 #[test]
 fn name_constant_and_strings_in_one_column() {
     // One column holding a /name constant next to strings, as ResourceName
-    // does in rules/rbac_roles.mg: /any for every name, or a literal name,
+    // does in rules/k8s_rbac_roles.mg: /any for every name, or a literal name,
     // including "". A join on the column must not equate /any with a string.
     let e = edb(&[
         ("rule", vec![s("r1")]),

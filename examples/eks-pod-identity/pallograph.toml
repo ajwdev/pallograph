@@ -1,0 +1,44 @@
+# Run from this directory:
+#   cargo run --bin pallograph -- -C pallograph.toml --rules eks.mg
+default_profile = "dev"
+
+[datasources.cluster]
+source = "file"
+paths = ["cluster/"]
+content = "k8s-manifests"
+
+# Each AWS input is a json-tuples file here. Against a real account, use a
+# shell datasource instead, e.g.
+#   command = "aws eks list-pod-identity-associations --cluster-name prod ... | jq -c ..."
+[datasources.pod-identity-associations]
+source = "file"
+paths = ["aws/pod-identity-associations.json"]
+content = "json-tuples"
+relation = "aws_pod_identity_association"
+
+[datasources.pod-identity-trust]
+source = "file"
+paths = ["aws/pod-identity-trust.json"]
+content = "json-tuples"
+relation = "aws_role_trusts_pod_identity"
+
+[datasources.role-can-assume]
+source = "file"
+paths = ["aws/role-can-assume.json"]
+content = "json-tuples"
+relation = "aws_role_can_assume"
+
+[datasources.access-entries]
+source = "file"
+paths = ["aws/access-entries.json"]
+content = "json-tuples"
+relation = "aws_eks_access_entry"
+
+[datasources.access-entry-groups]
+source = "file"
+paths = ["aws/access-entry-groups.json"]
+content = "json-tuples"
+relation = "aws_eks_access_entry_group"
+
+[profiles.dev]
+sources = ["cluster", "pod-identity-associations", "pod-identity-trust", "role-can-assume", "access-entries", "access-entry-groups"]

@@ -2,13 +2,13 @@
 # authorization requests the way the kube-apiserver RBAC authorizer does.
 #
 # The model is split across three files:
-#   rbac_roles.mg     - what each Role and ClusterRole grants (role_rule,
+#   k8s_rbac_roles.mg     - what each Role and ClusterRole grants (role_rule,
 #                       clusterrole_rule, policy_rule_perm), including
 #                       ClusterRole aggregation
-#   rbac_subjects.mg  - who each binding applies to (binding_subject,
+#   k8s_rbac_subjects.mg  - who each binding applies to (binding_subject,
 #                       binding_roleref) and the subjects a principal acts
 #                       as (principal_group, principal_subject)
-#   rbac.mg           - this file: direct_perm, direct_url_perm and
+#   k8s_rbac.mg           - this file: direct_perm, direct_url_perm and
 #                       rbac_allowed
 #
 # Facts loaded from the cluster or supplied by the caller (EDB) used here:

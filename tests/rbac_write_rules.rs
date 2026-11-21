@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Escalation by writing RBAC objects (rules/rbac_write.mg) over small
+//! Escalation by writing RBAC objects (rules/k8s_rbac_write.mg) over small
 //! hand-written clusters, checked on both backends. Like
 //! tests/escalation_rules.rs, each test reads the derived relations
 //! directly.
@@ -549,7 +549,7 @@ fn admin_pod() -> Vec<String> {
     ]
 }
 
-// A gained role feeds escalation.mg: sa-a may only bind ns1's pod-creator
+// A gained role feeds k8s_rbac_escalation.mg: sa-a may only bind ns1's pod-creator
 // Role and create RoleBindings in ns1. Binding it lets sa-a create pods in
 // ns1, which run as ns1/admin.
 #[test]
@@ -868,10 +868,18 @@ fn gained_named_group_impersonation_through_an_assumed_user() {
     ));
 
     for (backend, result) in evaluate(&manifests, &[("alice", "staff")]) {
+        let hop = vec![
+            Value::String("alice".into()),
+            Value::Name("/k8s".into()),
+            Value::Name("/user".into()),
+            Value::String("admins".into()),
+            Value::Name("/k8s".into()),
+            Value::Name("/group".into()),
+        ];
         assert!(
-            has_row(&result, "assumed_group_impersonate", &["alice", "admins"]),
+            result.scan("node_pivot").contains(&hop),
             "{backend}: assumed alice can impersonate admins, got {:?}",
-            result.scan("assumed_group_impersonate")
+            result.scan("node_pivot")
         );
         assert_eq!(controlled(&result, "imp"), ["admins", "alice"], "{backend}");
     }

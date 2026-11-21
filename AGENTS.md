@@ -28,17 +28,23 @@ art alongside so readers can look it up: "facts loaded from the cluster
 
 Only the non-obvious parts:
 
-- `rules/*.mg` - Mangle rules. `00_edb_prelude.mg` declares the input
+- `rules/*.mg` - Mangle rules. `00_k8s_prelude.mg` declares the input
   relations and is `include_str!`'d into the binary; `build.rs` compiles every
   rule file at build time, so a broken rule fails `cargo build`.
-- Label selectors: `rules/labels.mg` matches a selector against candidate
-  objects, and `rules/selector_targets.mg` says which kinds and scope each
+- Label selectors: `rules/k8s_labels.mg` matches a selector against candidate
+  objects, and `rules/k8s_selector_targets.mg` says which kinds and scope each
   owner kind selects, as upstream controllers do. Matching any kind is the
   opt-in `examples/selectors-any-kind/`.
-- RBAC rules are split three ways: `rules/rbac_roles.mg` (what a role grants,
-  aggregation included), `rules/rbac_subjects.mg` (who a binding applies to,
-  and the subjects a principal acts as) and `rules/rbac.mg` (`direct_perm`,
+- RBAC rules are split three ways: `rules/k8s_rbac_roles.mg` (what a role grants,
+  aggregation included), `rules/k8s_rbac_subjects.mg` (who a binding applies to,
+  and the subjects a principal acts as) and `rules/k8s_rbac.mg` (`direct_perm`,
   `direct_url_perm` and `rbac_allowed`). File headers list the relations.
+- `rules/closure.mg` is the escalation closure for every system: one pivot
+  relation (`pivot`) and what each node acts as (`acts_as`), filled
+  by each system's rules. Nothing in it names a system, kind or mechanism;
+  keep it that way. `k8s_`-prefixed rule files are Kubernetes only.
+  `examples/eks-pod-identity/` adds AWS with rule files alone, and
+  `tests/cross_system.rs` checks that it still does.
 - `hack/relation-sizes.sh` counts rows per RBAC and escalation relation;
   use it to compare rule revisions.
 - `src/engine.rs` - `Engine` and the `Backend` trait, with two backends
@@ -180,12 +186,12 @@ Known upstream `mangle-rs` bugs, deliberately not patched here:
   same temp relation (`$temp_grp_0`), even across strata. When two GroupBy
   rules read different relations, one picks up the other's rows (wrong
   counts and sums, extra groups) or loses its output entirely. So
-  `rules/summary.mg` keeps a single GroupBy rule.
+  `rules/k8s_summary.mg` keeps a single GroupBy rule.
 - The interpreter indexes a struct-valued column by its field count alone
   (`value_to_index_key` in `mangle-interpreter`), so a lookup keyed on a
   struct (e.g. a PolicyRule `Rule`) returns nearly every row. Results stay
   correct, but evaluation is slow. `policy_rule_has_wildcard_verb` in
-  `rules/policies.mg` is shaped around it.
+  `rules/k8s_policies.mg` is shaped around it.
 - The interpreter's store checks each new fact against every row already in
   its relation (`Vec::contains` in `MemStore::add_fact`), so loading facts
   takes quadratic time: about 0.76s for 20k facts in one relation, against

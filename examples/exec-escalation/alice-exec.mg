@@ -6,7 +6,7 @@
 # has cluster-admin. Exec access means alice can read the mounted token directly
 # from the pod filesystem and authenticate as kube-system:default.
 #
-# The escalation is driven by subject_exec_reachable_sa (escalation.mg), which finds
+# The escalation is driven by the /pod_exec pivot rules (k8s_rbac_escalation.mg), which find
 # the SA of any pod alice can exec into.
 #
 # Attack chain:

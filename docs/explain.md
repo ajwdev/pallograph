@@ -189,7 +189,7 @@ fan-out per namespace. A lower number is a cheaper query.
 The example is a nested loop over every Pod, with the `k8s` atom keyed on the
 unselective `Kind = "Pod"`. Two things help:
 
-1. **Query a narrower relation.** `pod(Namespace, Name, Data)` (from `base.mg`)
+1. **Query a narrower relation.** `pod(Namespace, Name, Data)` (from `k8s_base.mg`)
    holds only Pods and leads with `Namespace`, so a lookup keys on the namespace
    instead of scanning all objects by `Kind`:
 

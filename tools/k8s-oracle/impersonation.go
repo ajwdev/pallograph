@@ -163,7 +163,7 @@ func impersonationAttributes(r *Request) authorizer.AttributesRecord {
 //
 // Pallograph's escalation rules only follow impersonation to identities
 // like these: impersonating a user or group without grants of its own, or a
-// ServiceAccount that does not exist, gains nothing (rules/escalation.mg).
+// ServiceAccount that does not exist, gains nothing (rules/k8s_rbac_escalation.mg).
 func GenerateImpersonationRequests(world *World) []Request {
 	impersonates := func(rule rbacv1.PolicyRule) bool {
 		return ruleHasVerb(rule, "impersonate")

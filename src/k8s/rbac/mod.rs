@@ -21,7 +21,7 @@ mod resource_scope;
 
 use facts::{
     Permission, RbacWrite, RoleKey, Writer, ns_covers, parse_binding_subject, parse_strings,
-    parse_subject_rows, value_covers,
+    value_covers,
 };
 pub use facts::{PermissionTables, Subject, SubjectKind};
 
@@ -83,8 +83,8 @@ impl RoleKind {
 /// How one identity is assumed in a single escalation hop. `PodExec`,
 /// `PodCreate` and `Token` apply only to ServiceAccounts (a pod running as
 /// it, or its token); a principal of any kind can be reached by
-/// impersonation. The labels are the vocabulary of the `subject_*_sa` and
-/// `gained_escalation_hop` relations in rules/rbac_write.mg.
+/// impersonation. The `Mechanism` column of `pivot` in
+/// rules/closure.mg.
 #[derive(Clone, Copy, Hash, Ord, PartialEq, PartialOrd, Eq, Debug)]
 pub enum ReachMechanism {
     PodExec,
@@ -94,7 +94,15 @@ pub enum ReachMechanism {
 }
 
 impl ReachMechanism {
-    /// The label the rules use and the reports show.
+    /// The order a hop by its own grants lists its mechanisms in.
+    const GRANT_ORDER: [Self; 4] = [
+        Self::PodExec,
+        Self::Token,
+        Self::PodCreate,
+        Self::Impersonate,
+    ];
+
+    /// The label the reports show.
     pub fn label(self) -> &'static str {
         match self {
             ReachMechanism::PodExec => "pod-exec",
@@ -104,13 +112,21 @@ impl ReachMechanism {
         }
     }
 
-    /// A mechanism label the rules emit, or `None` for anything else.
-    pub fn from_label(label: &str) -> Option<Self> {
-        match label {
-            "pod-exec" => Some(Self::PodExec),
-            "pod-create" => Some(Self::PodCreate),
-            "token" => Some(Self::Token),
-            "impersonate" => Some(Self::Impersonate),
+    /// The mechanism's name constant in the rules, e.g. "/pod_exec".
+    pub fn name_constant(self) -> &'static str {
+        match self {
+            ReachMechanism::PodExec => "/pod_exec",
+            ReachMechanism::PodCreate => "/pod_create",
+            ReachMechanism::Token => "/token",
+            ReachMechanism::Impersonate => "/impersonate",
+        }
+    }
+
+    pub fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Name(name) => Self::GRANT_ORDER
+                .into_iter()
+                .find(|mechanism| mechanism.name_constant() == name.as_str()),
             _ => None,
         }
     }
@@ -124,7 +140,7 @@ impl std::fmt::Display for ReachMechanism {
 
 /// The RBAC-write verb class that lets a principal grant itself a role:
 /// `bind` an existing role, or `escalate` to a role with more permissions
-/// than it already holds. From `rbac_verb_class` in rules/rbac_write.mg.
+/// than it already holds. From `rbac_verb_class` in rules/k8s_rbac_write.mg.
 #[derive(Clone, Copy, Hash, Ord, PartialEq, PartialOrd, Eq, Debug)]
 pub enum WriteMechanism {
     Bind,
@@ -304,15 +320,113 @@ fn write_path(write: &RbacWrite, hops: Vec<(Subject, String)>) -> AccessPath {
     }
 }
 
-/// Relations naming the ServiceAccounts one binding subject's grants reach
-/// by one mechanism, each `(Name, Kind, Namespace, ServiceAccount)`, with the
-/// mechanism label.
-const SERVICE_ACCOUNT_MECHANISMS: [(&str, ReachMechanism); 4] = [
-    ("subject_exec_reachable_sa", ReachMechanism::PodExec),
-    ("subject_token_accessible_sa", ReachMechanism::Token),
-    ("subject_pod_creatable_sa", ReachMechanism::PodCreate),
-    ("subject_impersonatable_sa", ReachMechanism::Impersonate),
-];
+/// The identities and groups one hop reaches, each with the mechanisms that
+/// reach it.
+type Hops = BTreeMap<Subject, BTreeSet<ReachMechanism>>;
+
+/// Where a `pivot` row starts: a binding subject's own grants
+/// (Source `/grant`), or a role a writer can grant itself (`/rbac_write`).
+enum HopStart {
+    Grant(Subject),
+    RbacWrite(Writer),
+}
+
+/// `pivot(Subject, System, Kind, Target, System, TargetKind,
+/// Mechanism, Source)` rows, split by source. Targets are principals
+/// (`Subject::principal`), so a User subject naming a ServiceAccount's
+/// username is that ServiceAccount.
+fn parse_subject_hops(rows: &[Vec<Value>]) -> (HashMap<Subject, Hops>, HashMap<Writer, Hops>) {
+    let mut grant_hops: HashMap<Subject, Hops> = HashMap::new();
+    let mut write_hops: HashMap<Writer, Hops> = HashMap::new();
+    for row in rows.iter().filter(|row| is_k8s_rbac_hop(row)) {
+        let parsed = match row.as_slice() {
+            [
+                Value::String(name),
+                _,
+                kind,
+                Value::String(target),
+                _,
+                target_kind,
+                mechanism,
+                Value::Name(source),
+            ] => (|| {
+                let start = match source.as_str() {
+                    "/grant" => {
+                        HopStart::Grant(Subject::new(SubjectKind::from_value(kind)?, name.clone()))
+                    }
+                    "/rbac_write" => HopStart::RbacWrite(facts::writer(name, kind)?),
+                    _ => return None,
+                };
+                let target =
+                    Subject::new(SubjectKind::from_value(target_kind)?, target.clone()).principal();
+                Some((start, target, ReachMechanism::from_value(mechanism)?))
+            })(),
+            _ => None,
+        };
+        let Some((start, target, mechanism)) = parsed else {
+            facts::unexpected_row("pivot", row);
+            continue;
+        };
+        let hops = match start {
+            HopStart::Grant(subject) => grant_hops.entry(subject).or_default(),
+            HopStart::RbacWrite(writer) => write_hops.entry(writer).or_default(),
+        };
+        hops.entry(target).or_default().insert(mechanism);
+    }
+    (grant_hops, write_hops)
+}
+
+/// Whether a `pivot` row is one this model reads: both ends in
+/// Kubernetes, from a binding subject or writer. Other systems' hops, and
+/// the `/impersonated_group` hops only the closure walks, are left out.
+fn is_k8s_rbac_hop(row: &[Value]) -> bool {
+    let k8s = |value: &Value| matches!(value, Value::Name(name) if name.as_str() == "/k8s");
+    match row {
+        [_, system, Value::Name(kind), _, target_system, ..] => {
+            k8s(system) && k8s(target_system) && kind.as_str() != "/impersonated_group"
+        }
+        _ => true,
+    }
+}
+
+/// The hops of several subjects or writers, as one.
+fn merge_hops<'a>(
+    all: impl Iterator<Item = &'a Hops>,
+) -> BTreeMap<&'a Subject, BTreeSet<ReachMechanism>> {
+    let mut merged: BTreeMap<&Subject, BTreeSet<ReachMechanism>> = BTreeMap::new();
+    for hops in all {
+        for (target, mechanisms) in hops {
+            merged.entry(target).or_default().extend(mechanisms);
+        }
+    }
+    merged
+}
+
+/// How one hop reaches `target`, e.g. "pod-exec, token": by the
+/// mechanisms its own grants allow (`granted`), or, when they allow none,
+/// by those of roles gained by writing RBAC objects (`gained`), e.g.
+/// "pod-create after RBAC write". A group is always reached by
+/// impersonation.
+fn mechanism(
+    target: &Subject,
+    granted: Option<&BTreeSet<ReachMechanism>>,
+    gained: Option<&BTreeSet<ReachMechanism>>,
+) -> String {
+    if target.kind == SubjectKind::Group {
+        return ReachMechanism::Impersonate.label().to_string();
+    }
+    if let Some(granted) = granted {
+        let labels: Vec<&str> = ReachMechanism::GRANT_ORDER
+            .iter()
+            .filter(|mechanism| granted.contains(mechanism))
+            .map(|mechanism| mechanism.label())
+            .collect();
+        return labels.join(", ");
+    }
+    let mut labels: Vec<&str> = gained.into_iter().flatten().map(|m| m.label()).collect();
+    labels.sort_unstable();
+    format!("{} after RBAC write", labels.join(", "))
+}
 
 /// Closed-world RBAC access model derived from Mangle facts.
 pub struct RbacAccessModel {
@@ -327,26 +441,15 @@ pub struct RbacAccessModel {
     subject_bindings: HashMap<Subject, Vec<(String, String)>>,
     /// `binding_roleref`: (role kind, role name) per binding.
     binding_roles: HashMap<(String, String), Vec<(String, String)>>,
-    /// `subject_escalation_hop`: the identities (usernames) each binding
-    /// subject's grants can assume in one hop.
-    subject_hops: HashMap<Subject, BTreeSet<String>>,
-    /// `gained_escalation_hop`: the identities each binding subject can
-    /// assume in one hop through a role it can grant itself by writing RBAC
-    /// objects, with the mechanisms.
-    gained_hops: HashMap<Writer, BTreeMap<String, BTreeSet<ReachMechanism>>>,
+    /// `pivot` with Source `/grant`: what each binding subject's own
+    /// grants reach in one hop.
+    grant_hops: HashMap<Subject, Hops>,
+    /// `pivot` with Source `/rbac_write`: what each writer reaches in
+    /// one hop through a role it can grant itself by writing RBAC objects.
+    write_hops: HashMap<Writer, Hops>,
     /// `rbac_write_binding_direct`: the writes each writer can make in one
     /// request, which explain a path best.
     rbac_writes_direct: HashMap<Writer, HashSet<RbacWrite>>,
-    /// Per mechanism label, the (namespace, ServiceAccount) pairs each binding
-    /// subject's grants reach.
-    service_account_mechanisms: Vec<(ReachMechanism, HashMap<Subject, HashSet<(String, String)>>)>,
-    /// `subject_impersonatable_group`: the groups each binding subject's
-    /// grants can impersonate. Sorted.
-    subject_groups: HashMap<Subject, BTreeSet<String>>,
-    /// `gained_impersonatable_group`: the groups each writer can
-    /// impersonate through a role it can grant itself by writing RBAC
-    /// objects. Sorted.
-    gained_groups: HashMap<Writer, BTreeSet<String>>,
 }
 
 impl RbacAccessModel {
@@ -372,47 +475,7 @@ impl RbacAccessModel {
                 .push((role_kind, role_name));
         }
 
-        let mut subject_hops: HashMap<Subject, BTreeSet<String>> = HashMap::new();
-        for (subject, [target]) in
-            parse_subject_rows::<1>("subject_escalation_hop", &scan("subject_escalation_hop"))
-        {
-            subject_hops.entry(subject).or_default().insert(target);
-        }
-        let mut gained_hops: HashMap<Writer, BTreeMap<String, BTreeSet<ReachMechanism>>> =
-            HashMap::new();
-        for (writer, [target, mechanism]) in
-            facts::parse_writer_rows::<2>("gained_escalation_hop", &scan("gained_escalation_hop"))
-        {
-            let Some(mechanism) = ReachMechanism::from_label(&mechanism) else {
-                facts::unexpected_row(
-                    "gained_escalation_hop",
-                    &[Value::String(target), Value::String(mechanism)],
-                );
-                continue;
-            };
-            gained_hops
-                .entry(writer)
-                .or_default()
-                .entry(target)
-                .or_default()
-                .insert(mechanism);
-        }
-
-        let service_account_mechanisms = SERVICE_ACCOUNT_MECHANISMS
-            .iter()
-            .map(|(relation, label)| {
-                let mut reached: HashMap<Subject, HashSet<(String, String)>> = HashMap::new();
-                for (subject, [namespace, service_account]) in
-                    parse_subject_rows::<2>(relation, &scan(relation))
-                {
-                    reached
-                        .entry(subject)
-                        .or_default()
-                        .insert((namespace, service_account));
-                }
-                (*label, reached)
-            })
-            .collect();
+        let (grant_hops, write_hops) = parse_subject_hops(&scan("pivot"));
 
         let mut rbac_writes_direct: HashMap<Writer, HashSet<RbacWrite>> = HashMap::new();
         for (writer, write) in facts::parse_rbac_write_binding(
@@ -422,33 +485,14 @@ impl RbacAccessModel {
             rbac_writes_direct.entry(writer).or_default().insert(write);
         }
 
-        let mut subject_groups: HashMap<Subject, BTreeSet<String>> = HashMap::new();
-        for (subject, [group]) in parse_subject_rows::<1>(
-            "subject_impersonatable_group",
-            &scan("subject_impersonatable_group"),
-        ) {
-            subject_groups.entry(subject).or_default().insert(group);
-        }
-
-        let mut gained_groups: HashMap<Writer, BTreeSet<String>> = HashMap::new();
-        for (writer, [group]) in facts::parse_writer_rows::<1>(
-            "gained_impersonatable_group",
-            &scan("gained_impersonatable_group"),
-        ) {
-            gained_groups.entry(writer).or_default().insert(group);
-        }
-
         Self {
             include_builtins: false,
             tables,
             subject_bindings,
             binding_roles,
-            subject_hops,
-            gained_hops,
+            grant_hops,
+            write_hops,
             rbac_writes_direct,
-            service_account_mechanisms,
-            subject_groups,
-            gained_groups,
         }
     }
 
@@ -830,13 +874,11 @@ impl RbacAccessModel {
     ///
     /// Breadth-first, so each chain has the fewest hops and cycles in
     /// mutual-escalation graphs are harmless. It follows the rules'
-    /// closure: `principal` acts with all its subjects (`subjects_of`), an
-    /// identity reached on the way only with its `assumed_subject`
-    /// subjects, and a group with its own grants. From each, a hop is a
-    /// `subject_escalation_hop` of one of those subjects, or impersonating
-    /// a group, `subject_impersonatable_group`, and the same through roles
-    /// its writers can grant themselves (`gained_escalation_hop`,
-    /// `gained_impersonatable_group`).
+    /// closure (rules/closure.mg): `principal` acts with all its subjects
+    /// (`subjects_of`), an identity reached on the way only with its
+    /// `assumed_subject` subjects, and a group with its own grants. From
+    /// each, a hop is a `pivot` of one of those subjects (Source
+    /// `/grant`) or of one of its writers (`/rbac_write`).
     fn escalation_tree(&self, principal: &Subject) -> HashMap<Subject, (Subject, String)> {
         let mut tree: HashMap<Subject, (Subject, String)> = HashMap::new();
         let mut queue = VecDeque::from([principal.clone()]);
@@ -853,110 +895,27 @@ impl RbacAccessModel {
                     self.tables.target_writers(&node),
                 )
             };
+            let granted = merge_hops(subjects.iter().filter_map(|s| self.grant_hops.get(s)));
+            let gained = merge_hops(writers.iter().filter_map(|w| self.write_hops.get(w)));
 
-            // Sorted so ties between equally short chains resolve the same way
-            // on every run.
-            let identities: BTreeSet<&String> = subjects
-                .iter()
-                .filter_map(|subject| self.subject_hops.get(subject))
-                .flatten()
-                .chain(
-                    writers
-                        .iter()
-                        .filter_map(|writer| self.gained_hops.get(writer))
-                        .flat_map(BTreeMap::keys),
-                )
-                .collect();
-            let mut next: Vec<(Subject, String)> = identities
+            // Identities before groups, each sorted by name, so ties between
+            // equally short chains resolve the same way on every run.
+            let targets: BTreeSet<&Subject> =
+                granted.keys().chain(gained.keys()).copied().collect();
+            let (groups, identities): (Vec<&Subject>, Vec<&Subject>) = targets
                 .into_iter()
-                .map(|identity| {
-                    let identity = Subject::username(identity.as_str());
-                    let mechanism = self.mechanism(&subjects, &writers, &identity);
-                    (identity, mechanism)
-                })
-                .collect();
-            let groups: BTreeSet<&String> = subjects
-                .iter()
-                .filter_map(|subject| self.subject_groups.get(subject))
-                .chain(
-                    writers
-                        .iter()
-                        .filter_map(|writer| self.gained_groups.get(writer)),
-                )
-                .flatten()
-                .collect();
+                .partition(|target| target.kind == SubjectKind::Group);
 
-            next.extend(
-                groups
-                    .into_iter()
-                    .map(|group| (Subject::group(group.as_str()), "impersonate".to_string())),
-            );
-
-            for (target, mechanism) in next {
-                if target == *principal || tree.contains_key(&target) {
+            for target in identities.into_iter().chain(groups) {
+                if target == principal || tree.contains_key(target) {
                     continue;
                 }
+                let mechanism = mechanism(target, granted.get(target), gained.get(target));
                 tree.insert(target.clone(), (node.clone(), mechanism));
-                queue.push_back(target);
+                queue.push_back(target.clone());
             }
         }
         tree
-    }
-
-    /// The mechanisms by which `subjects` assume `identity` in one hop,
-    /// comma-separated, e.g. "pod-exec, token". A ServiceAccount is reached
-    /// by the mechanisms whose `subject_*_sa` relation lists it; otherwise
-    /// the hop is user impersonation. A hop only a role gained by writing
-    /// RBAC objects allows (`gained_escalation_hop`) says so, e.g.
-    /// "pod-create after RBAC write".
-    fn mechanism(&self, subjects: &[Subject], writers: &[Writer], identity: &Subject) -> String {
-        let direct = subjects.iter().any(|subject| {
-            self.subject_hops
-                .get(subject)
-                .is_some_and(|targets| targets.contains(&identity.name))
-        });
-        if !direct {
-            let gained: BTreeSet<ReachMechanism> = writers
-                .iter()
-                .filter_map(|writer| self.gained_hops.get(writer))
-                .filter_map(|targets| targets.get(&identity.name))
-                .flatten()
-                .copied()
-                .collect();
-            if !gained.is_empty() {
-                let mut labels: Vec<&str> = gained.iter().map(|m| m.label()).collect();
-                labels.sort_unstable();
-                return format!("{} after RBAC write", labels.join(", "));
-            }
-        }
-
-        let service_account = identity
-            .name
-            .strip_prefix("system:serviceaccount:")
-            .and_then(|rest| rest.split_once(':'))
-            .map(|(namespace, name)| (namespace.to_string(), name.to_string()));
-
-        let mechanisms: Vec<&str> = service_account
-            .map(|service_account| {
-                self.service_account_mechanisms
-                    .iter()
-                    .filter(|(_, reached)| {
-                        subjects.iter().any(|subject| {
-                            reached
-                                .get(subject)
-                                .is_some_and(|pairs| pairs.contains(&service_account))
-                        })
-                    })
-                    .map(|(mechanism, _)| mechanism.label())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if mechanisms.is_empty() {
-            "impersonate".to_string()
-        } else {
-            mechanisms.join(", ")
-        }
     }
 
     /// Return true when a role's permissions include at least one rule that
@@ -1156,12 +1115,13 @@ fn permission_covers(granted: &Permission, query: PermissionPattern<'_>) -> bool
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::path::Path;
 
     use mangle_common::Value;
     use mangle_interpreter::MemStore;
 
-    use super::{Permission, RbacAccessModel, RoleKind, Subject, SubjectKind};
+    use super::{Permission, RbacAccessModel, ReachMechanism, RoleKind, Subject, SubjectKind};
     use crate::edb;
     use crate::engine::{Engine, InterpreterBackend};
 
@@ -1331,7 +1291,7 @@ mod tests {
 
     /// One ServiceAccount per namespace (`ns-<name>/<name>`), plus a token-mint
     /// edge `src -> dst` for each pair: a RoleBinding in dst's namespace gives src
-    /// `serviceaccounts/token create`, so `escalation_hop(src, dst)` holds.
+    /// `serviceaccounts/token create`, so `granted_pivot(src, dst)` holds.
     /// `holder` additionally gets cluster-wide `secrets get`.
     fn token_graph(names: &[&str], edges: &[(&str, &str)], holder: &str) -> String {
         let mut out = String::new();
@@ -1628,10 +1588,16 @@ mod tests {
                 .any(|target| target.kind != SubjectKind::Group),
             "controls_identity"
         );
-        assert!(!model.subject_hops.is_empty(), "subject_escalation_hop");
-        for (label, reached) in &model.service_account_mechanisms {
-            assert!(!reached.is_empty(), "{label} relation");
-        }
+        let mechanisms: BTreeSet<ReachMechanism> = model
+            .grant_hops
+            .values()
+            .flat_map(|hops| hops.values().flatten().copied())
+            .collect();
+        assert_eq!(
+            mechanisms.len(),
+            ReachMechanism::GRANT_ORDER.len(),
+            "pivot mechanisms: {mechanisms:?}"
+        );
         assert!(
             model.tables.effective_entries().len() > model.tables.direct_entries().len(),
             "escalation added nothing to the effective entries"

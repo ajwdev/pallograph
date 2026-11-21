@@ -230,7 +230,7 @@ pub fn grant_covers(granted: &Permission, query: &Permission) -> bool {
 pub type RoleKey = (RoleKind, String, String);
 
 /// A role a binding subject can grant itself by writing RBAC objects
-/// (`rbac_write_binding` in rules/rbac_write.mg).
+/// (`rbac_write_binding` in rules/k8s_rbac_write.mg).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RbacWrite {
     /// The verb that lets the write through.
@@ -279,7 +279,7 @@ impl RbacWrite {
 /// `Subject::principal`) as it logs in or, for a group, with its own grants;
 /// or, with `assumed`, a user with `user_groups` groups as it acts when
 /// assumed through escalation, without them (writer kind `/assumed_user` in
-/// rules/rbac_write.mg).
+/// rules/k8s_rbac_write.mg).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Writer {
     pub subject: Subject,
@@ -295,6 +295,18 @@ impl Writer {
     }
 }
 
+/// The writer a `(Name, Kind)` pair names, with Kind a subject kind or
+/// `/assumed_user`.
+pub fn writer(name: &str, kind: &Value) -> Option<Writer> {
+    Some(match kind {
+        Value::Name(kind) if kind.as_str() == "/assumed_user" => Writer {
+            subject: Subject::username(name),
+            assumed: true,
+        },
+        kind => Writer::login(&Subject::new(SubjectKind::from_value(kind)?, name)),
+    })
+}
+
 /// Rows of `relation` that start with a writer, `(Name, Kind, ...)` with
 /// Kind a subject kind or `/assumed_user`, followed by N strings.
 pub fn parse_writer_rows<const N: usize>(
@@ -305,16 +317,7 @@ pub fn parse_writer_rows<const N: usize>(
         .filter_map(|row| {
             let parsed = match row.as_slice() {
                 [Value::String(name), kind, rest @ ..] if rest.len() == N => (|| {
-                    let writer = match kind {
-                        Value::Name(kind) if kind.as_str() == "/assumed_user" => Writer {
-                            subject: Subject::username(name.as_str()),
-                            assumed: true,
-                        },
-                        kind => Writer::login(&Subject::new(
-                            SubjectKind::from_value(kind)?,
-                            name.clone(),
-                        )),
-                    };
+                    let writer = writer(name, kind)?;
                     let rest: Vec<String> = rest
                         .iter()
                         .map(|value| string(value).cloned())
@@ -376,7 +379,7 @@ pub fn parse_rbac_write_binding(relation: &str, rows: &[Vec<Value>]) -> Vec<(Wri
 
 /// The rules of each Role and ClusterRole (role_rule and clusterrole_rule),
 /// after aggregation, and the (apigroup, resource, verb) each rule grants
-/// (policy_rule_perm, ResourceName dropped). As in rbac_roles.mg, a rule's
+/// (policy_rule_perm, ResourceName dropped). As in k8s_rbac_roles.mg, a rule's
 /// permissions are stored once per distinct PolicyRule value and joined with
 /// a role on demand, not copied into every role that has the rule.
 #[derive(Default)]
@@ -538,35 +541,6 @@ pub fn parse_binding_subject(rows: &[Vec<Value>]) -> Vec<(Subject, (String, Stri
             };
             if parsed.is_none() {
                 unexpected_row("binding_subject", row);
-            }
-            parsed
-        })
-        .collect()
-}
-
-/// Rows of a relation keyed by a binding subject, `(Name, Kind, ...)` with
-/// `N` string columns after the kind.
-pub fn parse_subject_rows<const N: usize>(
-    relation: &str,
-    rows: &[Vec<Value>],
-) -> Vec<(Subject, [String; N])> {
-    rows.iter()
-        .filter_map(|row| {
-            let parsed = match row.as_slice() {
-                [Value::String(name), kind, rest @ ..] if rest.len() == N => (|| {
-                    let rest: Vec<String> = rest
-                        .iter()
-                        .map(|value| string(value).cloned())
-                        .collect::<Option<_>>()?;
-                    Some((
-                        Subject::new(SubjectKind::from_value(kind)?, name.clone()),
-                        rest.try_into().ok()?,
-                    ))
-                })(),
-                _ => None,
-            };
-            if parsed.is_none() {
-                unexpected_row(relation, row);
             }
             parsed
         })
@@ -1013,7 +987,7 @@ impl PermissionTables {
 
 /// The subjects any login as `username` matches, whether or not the loaded
 /// objects mention it: itself, and the groups Kubernetes adds, as
-/// `implicit_group` and `principal_group` in rules/rbac_subjects.mg derive
+/// `implicit_group` and `principal_group` in rules/k8s_rbac_subjects.mg derive
 /// them. A ServiceAccount is in system:serviceaccounts and
 /// system:serviceaccounts:<ns>; everyone but system:anonymous is in
 /// system:authenticated, and system:anonymous is in system:unauthenticated.

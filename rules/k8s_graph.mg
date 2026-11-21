@@ -2,17 +2,17 @@
 #
 # A "graph edge" is any directed relationship between two Kubernetes objects.
 # Currently the only edge source is label selector matching (selector_matches/9
-# from labels.mg), which follows the kinds Kubernetes evaluates each selector
+# from k8s_labels.mg), which follows the kinds Kubernetes evaluates each selector
 # against: a Service has edges to its Pods, a Deployment to its ReplicaSets.
 # Owner references will be added as a second edge source once that EDB is
 # available; no changes to reachable/8 will be required at that point.
 #
 # Predicate hierarchy:
-#   selector_matches/9  (from labels.mg)
+#   selector_matches/9  (from k8s_labels.mg)
 #     → graph_edge/8     (union of all edge sources; extend here for new sources)
 #     → reachable/8      (transitive closure over graph_edge)
 #
-# Variable naming follows the same convention as labels.mg:
+# Variable naming follows the same convention as k8s_labels.mg:
 #   SrcApiVersion, SrcKind, SrcNamespace, SrcName  — the source (parent) object
 #   DstApiVersion, DstKind, DstNamespace, DstName  — the destination (child) object
 #   MidApiVersion, MidKind, MidNamespace, MidName  — intermediate hop in recursion

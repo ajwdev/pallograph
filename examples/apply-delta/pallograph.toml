@@ -8,7 +8,7 @@ content = "k8s-manifests"
 
 # The cluster-admin allow-list: principals approved to hold cluster-admin.
 # Loaded at startup (before the snapshot) into the cluster_admin_allowed EDB
-# relation, which is declared empty by default in rules/00_edb_prelude.mg.
+# relation, which is declared empty by default in rules/00_k8s_prelude.mg.
 [datasources.admin-allowlist]
 source = "file"
 paths = ["cluster-admin-allowlist.json"]

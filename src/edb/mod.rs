@@ -509,8 +509,8 @@ fn add_object(store: &mut MemStore, obj: &DynamicObject, type_hint: Option<(&str
 ///
 /// Each entry is its own selector, so requirements within one entry are ANDed
 /// (all must hold) while separate entries are ORed, as in Kubernetes.
-/// selector_targets.mg pairs these selectors with every ClusterRole, and the
-/// aggregation rule in rbac_roles.mg reads the source ClusterRole from the
+/// k8s_selector_targets.mg pairs these selectors with every ClusterRole, and the
+/// aggregation rule in k8s_rbac_roles.mg reads the source ClusterRole from the
 /// matches.
 ///
 /// An empty selector (`{}` or `{matchLabels: {}}`) matches every ClusterRole in
@@ -629,7 +629,7 @@ enum SelectorShape {
 /// Emits: selector_match_label/7, selector_expr_in/8, selector_expr_notin/7,
 ///        selector_expr_exists/6, selector_expr_notexists/6.
 ///
-/// These feed the selector_matches/9 engine in labels.mg, which implements
+/// These feed the selector_matches/9 engine in k8s_labels.mg, which implements
 /// AND semantics (all requirements within one selector must hold) via the
 /// *_unsatisfied negation pattern.
 ///
@@ -790,7 +790,7 @@ fn extract_labels_and_selectors(
 
     // The selector field → selector_match_label/selector_expr_*. Which field
     // it is, how it is written, and whether one without requirements selects
-    // everything depend on the kind; selector_targets.mg says what it selects.
+    // everything depend on the kind; k8s_selector_targets.mg says what it selects.
     let (field, shape, empty_selects_all) = selector_field(api_version, kind);
     let selector = data.get("spec").and_then(|s| s.get(field));
     // A NetworkPolicy's podSelector is a LabelSelector value, not a pointer,
@@ -909,7 +909,7 @@ fn extract_pod_anti_affinity(store: &mut MemStore, namespace: &str, name: &str, 
 
 fn extract_node_data(store: &mut MemStore, name: &str, data: &Json) {
     // status.allocatable → node_allocatable(Name, Resource, Quantity)
-    // node_taint is derived via Mangle rules in base.mg using :list:member + :match_field.
+    // node_taint is derived via Mangle rules in k8s_base.mg using :list:member + :match_field.
     if let Some(alloc) = data
         .get("status")
         .and_then(|s| s.get("allocatable"))
@@ -1194,7 +1194,7 @@ mod tests {
 
     /// The (ApiGroup, Resource, ResourceName, Verb) rows `role` grants after
     /// aggregation: clusterrole_rule joined with policy_rule_perm, the join
-    /// rules/rbac_roles.mg describes. One entry per joined row, so a
+    /// rules/k8s_rbac_roles.mg describes. One entry per joined row, so a
     /// duplicate would show up twice.
     fn clusterrole_perms(result: &crate::engine::EvalStore, role: &str) -> Vec<Vec<Value>> {
         let role = Value::String(role.into());

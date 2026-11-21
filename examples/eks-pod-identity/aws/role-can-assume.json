@@ -1,0 +1,3 @@
+[
+  ["arn:aws:iam::111122223333:role/uploader", "arn:aws:iam::111122223333:role/deploy"]
+]

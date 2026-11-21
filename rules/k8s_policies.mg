@@ -60,7 +60,7 @@ orphaned_sa(Namespace, SAName) :-
 # wildcard cases are handled by writing two rules per policy predicate - one
 # matching the literal resource name and one matching "*".
 #
-# These read direct_perm (rbac.mg), so they consider grants bound to the
+# These read direct_perm (k8s_rbac.mg), so they consider grants bound to the
 # ServiceAccount or user itself, not grants reached through group membership.
 
 # sa_is_cluster_admin(Namespace, SAName)
@@ -91,7 +91,7 @@ user_is_cluster_admin(UserName) :-
 # The approval gate (unexpected_cluster_admin = cluster-admins minus the
 # cluster_admin_allowed closure) is not shipped: the closure and policy are
 # the operator's. The EDB hook cluster_admin_allowed is declared empty in
-# 00_edb_prelude.mg; load a closure and the view from Mangle files. See
+# 00_k8s_prelude.mg; load a closure and the view from Mangle files. See
 # examples/cluster-admin-approved/.
 
 # PolicyRules granting a wildcard verb. The two checks below look this up by
