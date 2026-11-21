@@ -113,7 +113,7 @@ subject_controls(Subject, SubjectSystem, SubjectKind, Target, TargetSystem, Targ
 
 # ---- Per principal and per group ----
 #
-# What src/rbac reads. A principal reaches what any subject it logs in as
+# What src/k8s/rbac reads. A principal reaches what any subject it logs in as
 # reaches.
 
 Decl controls_identity(Principal, Target)

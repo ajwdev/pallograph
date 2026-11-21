@@ -259,30 +259,6 @@ subject_hop(Name, /k8s, Kind, Group, /k8s, /group, /impersonate, /grant) :-
     grant_group_impersonate(Name, Kind, "", Group),
     group_has_grant(Group).
 
-# The same hops by subject alone, as src/rbac reads them.
-Decl subject_escalation_hop(Name, Kind, Target)
-  descr [
-    doc("Single-step escalation using only the grants of binding subject (Kind, Name): whoever acts as that subject can assume Target's identity via one mechanism."),
-    arg(Name, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
-    arg(Kind, "/user, /group or /serviceaccount"),
-    arg(Target, "the user or ServiceAccount whose identity can be directly assumed")
-  ].
-
-subject_escalation_hop(Name, Kind, Target) :-
-    subject_hop(Name, /k8s, Kind, Target, /k8s, TargetKind, _, /grant),
-    identity_kind(TargetKind).
-
-Decl subject_impersonatable_group(Name, Kind, Group)
-  descr [
-    doc("Whoever acts as binding subject (Kind, Name) can impersonate Group, which holds grants."),
-    arg(Name, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
-    arg(Kind, "/user, /group or /serviceaccount"),
-    arg(Group, "group whose direct_perm grants the impersonator can use")
-  ].
-
-subject_impersonatable_group(Name, Kind, Group) :-
-    subject_hop(Name, /k8s, Kind, Group, /k8s, /group, _, /grant).
-
 # ---- Subjects an identity acts as (acts_as) ----
 
 acts_as(Identity, /k8s, Name, /k8s, Kind, /login) :-

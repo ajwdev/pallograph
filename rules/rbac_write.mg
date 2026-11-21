@@ -81,8 +81,8 @@
 #   rbac_role_writable/5         - the roles it can write any rules into, in
 #                                  one request
 #   rbac_write_anything/1        - principals that may write anything
-#   gained_escalation_hop/4      - escalation hops through gained roles
-#                                  (subject_hop rows with Source /rbac_write)
+#   subject_hop/8                - escalation hops through gained roles
+#                                  (Source /rbac_write; see closure.mg)
 #   rbac_write_role/5            - rbac_write_binding_direct cluster-wide,
 #                                  by principal, for tests/rbac_compat.rs
 #
@@ -579,7 +579,7 @@ rbac_write_role(Writer, /group, Mechanism, Binding, Role) :-
 # ---- Feeding escalation.mg ----
 #
 # The permissions escalation.mg's mechanisms need, by resource and verb,
-# projected per role like clusterrole_rbac_perm.
+# projected per role like clusterrole_rbac_power.
 
 # (Action, Resource, Verb), each matched literally or by "*".
 escalation_action(/pods_create, "pods", "create").
@@ -668,13 +668,13 @@ gained_namespaced_action(Name, Kind, Ns, Action) :-
 gained_namespaced_action(Name, Kind, "", Action) :-
     gained_action(Name, Kind, "*", Action).
 
-# How each action reaches a ServiceAccount, with the mechanism labels
-# src/rbac uses: any ServiceAccount in the namespace, or one a pod there
-# runs as.
-action_reaches_serviceaccount(/pods_create, "pod-create").
-action_reaches_serviceaccount(/sa_token, "token").
-action_reaches_pod(/pods_exec, "pod-exec").
-action_reaches_pod(/pods_attach, "pod-exec").
+# How each action reaches a ServiceAccount, with its subject_hop
+# mechanism: any ServiceAccount in the namespace, or one a pod there runs
+# as.
+action_reaches_serviceaccount(/pods_create, /pod_create).
+action_reaches_serviceaccount(/sa_token, /token).
+action_reaches_pod(/pods_exec, /pod_exec).
+action_reaches_pod(/pods_attach, /pod_exec).
 
 gained_reachable_sa(Name, Kind, SANs, SAName, Mechanism) :-
     gained_namespaced_action(Name, Kind, SANs, Action),
@@ -707,32 +707,26 @@ gained_namespaced_impersonate(Name, Kind, Ns, Action, ResourceName) :-
 gained_namespaced_impersonate(Name, Kind, "", Action, ResourceName) :-
     gained_impersonate(Name, Kind, "*", Action, ResourceName).
 
-gained_reachable_sa(Name, Kind, SANs, SAName, "impersonate") :-
+gained_reachable_sa(Name, Kind, SANs, SAName, /impersonate) :-
     gained_namespaced_impersonate(Name, Kind, SANs, /sa_impersonate, /any),
     serviceaccount(SANs, SAName, _).
 
-gained_reachable_sa(Name, Kind, SANs, SAName, "impersonate") :-
+gained_reachable_sa(Name, Kind, SANs, SAName, /impersonate) :-
     gained_namespaced_impersonate(Name, Kind, SANs, /sa_impersonate, SAName),
     serviceaccount(SANs, SAName, _).
 
-gained_reachable_sa(Name, Kind, SANs, SAName, "impersonate") :-
+gained_reachable_sa(Name, Kind, SANs, SAName, /impersonate) :-
     gained_namespaced_impersonate(Name, Kind, "", /sa_impersonate, /any),
     serviceaccount(SANs, SAName, _).
 
-gained_reachable_sa(Name, Kind, SANs, SAName, "impersonate") :-
+gained_reachable_sa(Name, Kind, SANs, SAName, /impersonate) :-
     gained_namespaced_impersonate(Name, Kind, "", /sa_impersonate, SAName),
     serviceaccount(SANs, SAName, _).
 
 # ---- Hops through gained roles (subject_hop, Source /rbac_write) ----
 
-mechanism_label(/impersonate, "impersonate").
-mechanism_label(/token, "token").
-mechanism_label(/pod_exec, "pod-exec").
-mechanism_label(/pod_create, "pod-create").
-
 subject_hop(Name, /k8s, Kind, Target, /k8s, /serviceaccount, Mechanism, /rbac_write) :-
-    gained_reachable_sa(Name, Kind, SANs, SAName, Label),
-    mechanism_label(Mechanism, Label)
+    gained_reachable_sa(Name, Kind, SANs, SAName, Mechanism)
     |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
 
 # Users and groups are cluster-scoped: only a cluster-wide gain counts, and
@@ -752,32 +746,6 @@ subject_hop(Name, /k8s, Kind, Group, /k8s, /group, /impersonate, /rbac_write) :-
 subject_hop(Name, /k8s, Kind, Group, /k8s, /group, /impersonate, /rbac_write) :-
     gained_impersonate(Name, Kind, "", /group_impersonate, Group),
     group_has_grant(Group).
-
-# The same hops by writer, as src/rbac reads them.
-Decl gained_escalation_hop(Name, Kind, Target, Mechanism)
-  descr [
-    doc("Like subject_escalation_hop, through a role binding subject (Kind, Name) can grant itself by writing RBAC objects (rbac_write_binding) rather than its own grants. Kept apart from escalation_hop, which answers what a principal may do now."),
-    arg(Name, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
-    arg(Kind, "/user, /group or /serviceaccount"),
-    arg(Target, "the user or ServiceAccount whose identity can then be assumed"),
-    arg(Mechanism, "pod-create, token, impersonate or pod-exec")
-  ].
-
-gained_escalation_hop(Name, Kind, Target, Label) :-
-    subject_hop(Name, /k8s, Kind, Target, /k8s, TargetKind, Mechanism, /rbac_write),
-    identity_kind(TargetKind),
-    mechanism_label(Mechanism, Label).
-
-Decl gained_impersonatable_group(Name, Kind, Group)
-  descr [
-    doc("Like subject_impersonatable_group, through a role binding subject (Kind, Name) can grant itself by writing RBAC objects: it can then impersonate Group, which holds grants."),
-    arg(Name, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
-    arg(Kind, "/user, /group, /serviceaccount or /assumed_user"),
-    arg(Group, "group whose grants the impersonator can use")
-  ].
-
-gained_impersonatable_group(Name, Kind, Group) :-
-    subject_hop(Name, /k8s, Kind, Group, /k8s, /group, _, /rbac_write).
 
 # The writes an identity reached on the way can make: an assumed user with
 # user_groups groups uses its /assumed_user writes, not those it could make

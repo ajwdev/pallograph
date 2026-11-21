@@ -1,10 +1,10 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Escalation rules (rules/escalation.mg) over small hand-written clusters,
-//! checked on both backends. Each test reads the derived relations
-//! directly, so it pins what the rules say independently of the Rust
-//! consumers in src/rbac.
+//! Escalation rules (rules/escalation.mg and rules/closure.mg) over small
+//! hand-written clusters, checked on both backends. Each test reads the
+//! derived relations directly, so it pins what the rules say
+//! independently of the Rust consumers in src/k8s/rbac.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
