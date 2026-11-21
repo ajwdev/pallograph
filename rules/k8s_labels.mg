@@ -36,7 +36,7 @@
 #     ObjApiVersion, ObjKind, ObjNamespace, ObjName
 #
 # Base facts (EDB - Extensional Database, i.e. facts asserted directly, not derived):
-#   k8s/5                     - Kubernetes objects loaded from the cluster
+#   k8s/6                     - Kubernetes objects loaded from the cluster
 #   object_label/6            - (ApiVersion, Kind, Namespace, Name, LabelKey, LabelValue)
 #                               One fact per label on any object. Extracted at load time
 #                               in Rust because Mangle cannot enumerate struct fields with
@@ -59,7 +59,7 @@
 #                               target, like a PodDisruptionBudget's selector: {}.
 #
 # Predicate hierarchy (IDB - Intensional Database, i.e. facts derived by rules):
-#   k8s/5
+#   k8s/6
 #     → object_in_namespace/4        (objects keyed by namespace, for candidate lookups)
 #   object_label/6
 #     → object_has_label_key/5       (strips LabelValue; needed because Mangle forbids
@@ -85,12 +85,12 @@
 # ---- Base helpers ----
 
 # Every object, keyed by its namespace. Candidate rules look objects up by
-# the selector owner's namespace; keyed on k8s/5's leading ApiVersion
+# the selector owner's namespace; keyed on k8s/6's leading ApiVersion
 # instead, each selector would pair with every "v1" object in the cluster
 # before the namespace filter (see "Write rules with the planner's lookups
 # in mind" in AGENTS.md).
 object_in_namespace(Namespace, Kind, ApiVersion, Name) :-
-    k8s(ApiVersion, Kind, Namespace, Name, _).
+    k8s(ApiVersion, Kind, Namespace, Name, _, _).
 
 # Strips LabelValue so the key alone can be tested in negation.
 #

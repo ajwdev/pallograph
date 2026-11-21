@@ -715,7 +715,7 @@ fn text_answers_stay_on_stdout() {
     let ws = Workspace::new();
     let out = ws.run_script("snapshot base\nshow k8s\n");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    assert!(stdout(&out).contains("k8s/5"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("k8s/6"), "{}", stdout(&out));
     assert!(!stdout(&out).contains("Saved snapshot"), "{}", stdout(&out));
 }
 

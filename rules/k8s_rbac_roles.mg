@@ -1,7 +1,7 @@
 # RBAC roles - what each Role and ClusterRole grants.
 #
 # Facts loaded from the cluster (EDB) used here:
-#   k8s/5                     - Role and ClusterRole objects
+#   k8s/6                     - Role and ClusterRole objects
 #   selector_* / object_label - via selector_matches/9 in k8s_labels.mg
 #
 # Derived relations (IDB):
@@ -28,10 +28,10 @@
 # ---- Type filters ----
 
 role(Namespace, Name, Data) :-
-    k8s("rbac.authorization.k8s.io/v1", "Role", Namespace, Name, Data).
+    k8s("rbac.authorization.k8s.io/v1", "Role", Namespace, Name, Data, _).
 
 clusterrole(Name, Data) :-
-    k8s("rbac.authorization.k8s.io/v1", "ClusterRole", "", Name, Data).
+    k8s("rbac.authorization.k8s.io/v1", "ClusterRole", "", Name, Data, _).
 
 # ---- PolicyRules as written ----
 

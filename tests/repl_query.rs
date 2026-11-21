@@ -616,7 +616,7 @@ fn use_refuses_state_changes() {
 #[test]
 fn use_snapshot_matches_frozen_labels() {
     for backend in ["interpreter", "dd"] {
-        let commands = "+k8s(\"v1\", \"Pod\", \"pallograph-probe\", \"p1\", {/x: 1}).\n\
+        let commands = "+k8s(\"v1\", \"Pod\", \"pallograph-probe\", \"p1\", {/x: 1}, \"plg:core/Pod/pallograph-probe/p1\").\n\
              +object_label(\"v1\", \"Pod\", \"pallograph-probe\", \"p1\", \"probe\", \"web\").\n\
              snapshot before\n\
              -object_label(\"v1\", \"Pod\", \"pallograph-probe\", \"p1\", \"probe\", \"web\").\n\
@@ -943,7 +943,7 @@ fn query_projects_to_head_variables() {
 /// `explain` plans a query and prints the operator tree without running it.
 #[test]
 fn explain_prints_plan() {
-    let (stdout, _) = run_session("explain k8s(_, \"Pod\", Ns, N, R)\n::quit\n");
+    let (stdout, _) = run_session("explain k8s(_, \"Pod\", Ns, N, R, _)\n::quit\n");
     assert!(stdout.contains("Stratum"), "no stratum header: {stdout}");
     assert!(
         stdout.contains("Iterate on k8s"),
@@ -959,7 +959,7 @@ fn explain_prints_plan() {
 /// total is labelled exact, with no `~` estimate marker.
 #[test]
 fn explain_cost_exact_for_constant_key() {
-    let (stdout, _) = run_session("explain k8s(_, \"Pod\", Ns, N, R)\n::quit\n");
+    let (stdout, _) = run_session("explain k8s(_, \"Pod\", Ns, N, R, _)\n::quit\n");
     assert!(stdout.contains("Cost ("), "no cost section: {stdout}");
     assert!(
         stdout.contains("lookup col 1 = \"Pod\":") && stdout.contains("match)"),
@@ -977,7 +977,7 @@ fn explain_cost_exact_for_constant_key() {
 #[test]
 fn explain_cost_estimate_for_variable_key() {
     let (stdout, _) =
-        run_session("explain k8s(_, \"Pod\", Ns, N, R), host_network_pod(Ns, N)\n::quit\n");
+        run_session("explain k8s(_, \"Pod\", Ns, N, R, _), host_network_pod(Ns, N)\n::quit\n");
     assert!(
         stdout.contains("/key over"),
         "no averaged per-key fan-out: {stdout}"

@@ -7,16 +7,17 @@
 # predicates, so their bounds are never validated against loaded data. Bounds would
 # only be enforced if added to IDB (derived) rule heads. They are surfaced in the
 # REPL's `::show` command for documentation.
-Decl k8s(ApiVersion, Kind, Namespace, Name, Data)
+Decl k8s(ApiVersion, Kind, Namespace, Name, Data, Uid)
   descr [
     doc("Raw Kubernetes objects, one row per live object."),
     arg(ApiVersion, "apiVersion, e.g. apps/v1"),
     arg(Kind, "object kind, e.g. Pod"),
     arg(Namespace, "namespace; empty for cluster-scoped objects"),
     arg(Name, "object name"),
-    arg(Data, "object body (spec, status, ...) plus metadata, minus managedFields and the last-applied-configuration annotation; access via :match_field(Data, /spec, ...)")
+    arg(Data, "object body (spec, status, ...) plus metadata, minus managedFields and the last-applied-configuration annotation; access via :match_field(Data, /spec, ...)"),
+    arg(Uid, "metadata.uid; for an object with none (a manifest), the UID of the live object it changes, else one made up as plg:<group>/<kind>/[<namespace>/]<name>")
   ]
-  bound [/string, /string, /string, /string, /any].
+  bound [/string, /string, /string, /string, /any, /string].
 
 Decl node_allocatable(NodeName, Resource, Quantity)
   descr [
