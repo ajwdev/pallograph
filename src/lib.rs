@@ -17,6 +17,7 @@ pub mod engine;
 pub mod graph_server;
 pub mod k8s;
 pub mod load;
+pub mod pivots;
 pub(crate) mod query;
 pub mod repl;
 pub mod rule_graph;
