@@ -26,6 +26,8 @@ use crate::engine::{ApplySummary, Change, Engine, EvalStore, RelationDoc};
 use crate::k8s::rbac::diff::{AccessDiff, access_diff};
 use crate::k8s::rbac::{PermissionTables, RbacAccessModel, Violation};
 use crate::k8s::selector::parse_selector;
+use crate::pivots::PivotGraph;
+pub use crate::pivots::{Node, NodeQuery, PivotPath, PivotStep, ResolveError};
 use crate::query::{
     self, body_relations, count_top_level_args, extract_vars, single_atom, split_atom,
     split_projection, suggest,
@@ -206,6 +208,17 @@ pub trait Core {
 
     /// What changed in RBAC access going from `before` to `after`.
     fn rbac_diff(&self, before: &At, after: &At) -> Result<AccessDiff, ReadError>;
+
+    /// Walk the pivot graph (rules/closure.mg) forward from `from`: one
+    /// shortest path to each node it reaches, or only the path to `to` when
+    /// one is given (none when `to` is unreachable). A naive walk over every
+    /// system, for those without first-class commands.
+    fn pivots(
+        &self,
+        at: &At,
+        from: &NodeQuery,
+        to: Option<&NodeQuery>,
+    ) -> Result<Pivots, PivotsError>;
 
     /// Pods with a nodeSelector no node satisfies (Z3 finds no node: unsat).
     fn sched_node_selector(&self, at: &At) -> Result<Vec<UnschedulablePod>, ReadError>;
@@ -522,6 +535,33 @@ impl From<ReadError> for QueryError {
         match error {
             ReadError::UnknownSnapshot(name) => QueryError::UnknownSnapshot(name),
             ReadError::Evaluation(e) => QueryError::Evaluation(e),
+        }
+    }
+}
+
+/// What [`Core::pivots`] found: the node walked from, and a path to each
+/// node reached, sorted by that node.
+#[derive(Debug, Clone)]
+pub struct Pivots {
+    pub from: Node,
+    pub paths: Vec<PivotPath>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PivotsError {
+    #[error("No snapshot named '{0}'.")]
+    UnknownSnapshot(String),
+    #[error("Error: {0:#}")]
+    Evaluation(anyhow::Error),
+    #[error("{0}")]
+    Resolve(#[from] ResolveError),
+}
+
+impl From<ReadError> for PivotsError {
+    fn from(error: ReadError) -> Self {
+        match error {
+            ReadError::UnknownSnapshot(name) => PivotsError::UnknownSnapshot(name),
+            ReadError::Evaluation(e) => PivotsError::Evaluation(e),
         }
     }
 }
@@ -1218,6 +1258,24 @@ impl Core for LocalCore {
         })
     }
 
+    fn pivots(
+        &self,
+        at: &At,
+        from: &NodeQuery,
+        to: Option<&NodeQuery>,
+    ) -> Result<Pivots, PivotsError> {
+        let graph = self.with_store(at, |store| {
+            PivotGraph::from_scan(|relation| store.scan(relation).to_vec())
+        })?;
+        let from = graph.resolve(from)?;
+        let to = to.map(|to| graph.resolve(to)).transpose()?;
+        let mut paths = graph.walk(&from);
+        if let Some(to) = &to {
+            paths.retain(|path| &path.to == to);
+        }
+        Ok(Pivots { from, paths })
+    }
+
     fn rbac_isolation(
         &self,
         at: &At,
@@ -1544,6 +1602,115 @@ mod tests {
                 LocalCore::new(Arc::new(Mutex::new(engine)), live)
             })
             .collect()
+    }
+
+    /// Cores whose pivot graph is given as facts: a (start kind /u) pivots
+    /// to b, b to c; d is known (it acts as itself) but unreachable.
+    fn pivot_cores() -> Vec<LocalCore> {
+        let n = |text: &str| Value::Name(text.into());
+        let fact = |relation: &str, row: Vec<Value>| (relation.to_string(), row);
+        let pivot = |from: (&str, &str), to: (&str, &str)| {
+            fact(
+                "pivot",
+                vec![
+                    s(from.0),
+                    n("/s"),
+                    n(from.1),
+                    s(to.0),
+                    n("/s"),
+                    n(to.1),
+                    n("/m"),
+                    n("/grant"),
+                ],
+            )
+        };
+        let itself = |name: &str, kind: &str| {
+            fact(
+                "acts_as",
+                vec![
+                    s(name),
+                    n("/s"),
+                    n(kind),
+                    s(name),
+                    n("/s"),
+                    n(kind),
+                    n("/assumed"),
+                ],
+            )
+        };
+        let edb = vec![
+            pivot(("a", "/u"), ("b", "/i")),
+            pivot(("b", "/i"), ("c", "/i")),
+            itself("b", "/i"),
+            itself("d", "/i"),
+            fact("pivot_mode", vec![n("/assumed"), n("/grant")]),
+            fact("start_kind", vec![n("/s"), n("/u")]),
+        ];
+        let rules = vec![
+            "Decl pivot(F, FS, FK, T, TS, TK, M, S).\n\
+             Decl acts_as(A, AS, AK, G, GS, GK, M).\n\
+             Decl pivot_mode(M, S).\nDecl start_kind(S, K).\nDecl start_mode(M)."
+                .to_string(),
+        ];
+        let backends: [Box<dyn Backend>; 2] = [
+            Box::new(InterpreterBackend),
+            Box::new(DdBackend { provenance: false }),
+        ];
+        backends
+            .into_iter()
+            .map(|backend| {
+                let engine = Engine::from_parts(edb.clone(), rules.clone(), backend).unwrap();
+                let live = engine.evaluate().unwrap();
+                LocalCore::new(Arc::new(Mutex::new(engine)), live)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pivots_walks_from_a_node_and_keeps_the_path_asked_for() {
+        let query = |name: &str| NodeQuery {
+            name: name.into(),
+            ..NodeQuery::default()
+        };
+        for core in pivot_cores() {
+            let all = core.pivots(&At::Live, &query("a"), None).unwrap();
+            assert_eq!(all.from.name, "a");
+            let reached: Vec<&str> = all.paths.iter().map(|path| path.to.name.as_str()).collect();
+            assert_eq!(reached, ["b", "c"]);
+
+            let to_c = core
+                .pivots(&At::Live, &query("a"), Some(&query("c")))
+                .unwrap();
+            assert_eq!(to_c.paths.len(), 1);
+            assert_eq!(to_c.paths[0].steps.len(), 2);
+
+            let to_d = core
+                .pivots(&At::Live, &query("a"), Some(&query("d")))
+                .unwrap();
+            assert!(to_d.paths.is_empty());
+
+            assert_eq!(
+                core.pivots(&At::Live, &query("nope"), None)
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "No node named 'nope'."
+            );
+            assert_eq!(
+                core.pivots(&At::Live, &query("a"), Some(&query("nope")))
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "No node named 'nope'."
+            );
+            assert_eq!(
+                core.pivots(&At::Snapshot("gone".into()), &query("a"), None)
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "No snapshot named 'gone'."
+            );
+        }
     }
 
     fn sorted(mut rows: Rows) -> Rows {

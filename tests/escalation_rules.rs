@@ -14,6 +14,8 @@ use mangle_interpreter::MemStore;
 use pallograph::edb;
 use pallograph::engine::{Backend, DdBackend, Engine, EvalStore, InterpreterBackend};
 
+mod pivot_walk;
+
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 /// Load `manifests` (NDJSON) plus `user_groups` memberships and evaluate the
@@ -747,5 +749,23 @@ fn start_mode_is_login() {
             vec![vec![name("/login")]],
             "{backend}"
         );
+    }
+}
+
+// The pivots command's walk reaches what controls says, on a real cluster.
+#[test]
+fn walk_reaches_what_controls_says_small_fixture() {
+    let small = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/testdata/small");
+    let backends: Vec<(&str, Box<dyn Backend>)> = vec![
+        ("interpreter", Box::new(InterpreterBackend)),
+        ("dd", Box::new(DdBackend { provenance: false })),
+    ];
+    for (backend_name, backend) in backends {
+        let mut store = MemStore::new();
+        edb::load_from_manifests(&mut store, vec![small.to_string_lossy().into_owned()])
+            .expect("load manifests");
+        let engine = Engine::new(store, Path::new("rules"), backend).expect("engine");
+        let result = engine.evaluate().expect("evaluate");
+        assert!(pivot_walk::assert_walk_matches_controls(backend_name, &result) > 0);
     }
 }

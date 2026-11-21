@@ -14,6 +14,8 @@ use mangle_interpreter::MemStore;
 use pallograph::engine::{self, Backend, DdBackend, Engine, EvalStore, InterpreterBackend};
 use pallograph::{edb, load};
 
+mod pivot_walk;
+
 const EXAMPLE: &str = "examples/eks-pod-identity";
 
 /// The example's json-tuples datasources (pallograph.toml), as
@@ -182,6 +184,44 @@ fn association_without_trust_is_no_pivot() {
                 "controls_group",
                 &[string("alice"), string("platform-admins")]
             ),
+            "{backend}"
+        );
+    }
+}
+
+// The pivots command's walk reaches what controls says, from every node a
+// path can start at, and alice's path out of the cluster and back is the
+// four pivots of the example's story.
+#[test]
+fn walk_reaches_what_controls_says() {
+    for (backend, result) in evaluate(&[]) {
+        assert!(pivot_walk::assert_walk_matches_controls(backend, &result) > 0);
+
+        let graph =
+            pallograph::pivots::PivotGraph::from_scan(|relation| result.scan(relation).to_vec());
+        let alice = pallograph::api::Node {
+            name: "alice".into(),
+            system: "/k8s".into(),
+            kind: "/user".into(),
+        };
+        let paths = graph.walk(&alice);
+        let to_admins = paths
+            .iter()
+            .find(|path| path.to.name == "platform-admins" && path.to.kind == "/group")
+            .expect("alice reaches platform-admins");
+        let mechanisms: Vec<&[String]> = to_admins
+            .steps
+            .iter()
+            .map(|step| step.mechanisms.as_slice())
+            .collect();
+        assert_eq!(
+            mechanisms,
+            [
+                &["/pod_exec".to_string()][..],
+                &["/pod_identity".to_string()][..],
+                &["/sts_assume_role".to_string()][..],
+                &["/impersonate".to_string()][..],
+            ],
             "{backend}"
         );
     }
