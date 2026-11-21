@@ -273,6 +273,8 @@ start_kind(/k8s, /user).
 start_kind(/k8s, /serviceaccount).
 start_kind(/k8s, /group).
 
+start_mode(/login).
+
 # An identity reached on the way acts as its assumed subjects for pivots from
 # their own grants, and as its /assumed_writes subjects for pivots through a
 # role it can grant itself. /login continues no path: it is how a

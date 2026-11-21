@@ -735,3 +735,17 @@ fn mutual_impersonation_records_the_cycle() {
         );
     }
 }
+
+// A path starts from a principal logged in (rules/closure.mg start_mode).
+#[test]
+fn start_mode_is_login() {
+    let manifests = exec_into_admin_pod();
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert_eq!(
+            result.scan("start_mode"),
+            vec![vec![name("/login")]],
+            "{backend}"
+        );
+    }
+}

@@ -14,6 +14,7 @@
 #   acts_as/7        - whose grants a node acts with, per mode
 #   pivot_mode/2     - which pivot source each acts_as mode uses
 #   start_kind/2     - the kinds a path can start from
+#   start_mode/1     - the acts_as modes a path starts in
 #   identity_kind/2  - the kinds that are identities (for views)
 #
 # Derived relations (IDB):
@@ -39,7 +40,7 @@
 #               ambient grantees.
 #   mode        How a node is acting, which changes its ambient grantees:
 #               Kubernetes /login (with user_groups) vs /assumed (reached
-#               by a pivot, without them).
+#               by a pivot, without them). A path starts in a start_mode.
 #   pivot       One escalation step a grant makes possible: becoming
 #               another node, by a mechanism (/pod_exec, /token,
 #               /impersonate, /pod_identity, ...). Unlike acts_as, a
@@ -115,6 +116,12 @@ Decl start_kind(System, Kind)
     doc("Paths start from grantees of this kind."),
     arg(System, "the grantee's system"),
     arg(Kind, "the grantee's kind")
+  ].
+
+Decl start_mode(Mode)
+  descr [
+    doc("Paths start from a node's grantees in this mode (acts_as), and from the node itself when start_kind lists its kind."),
+    arg(Mode, "an acts_as mode, e.g. /login")
   ].
 
 Decl identity_kind(System, Kind)
