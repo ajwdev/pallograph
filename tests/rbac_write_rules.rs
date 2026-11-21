@@ -871,14 +871,15 @@ fn gained_named_group_impersonation_through_an_assumed_user() {
         let hop = vec![
             Value::String("alice".into()),
             Value::Name("/k8s".into()),
+            Value::Name("/user".into()),
             Value::String("admins".into()),
             Value::Name("/k8s".into()),
             Value::Name("/group".into()),
         ];
         assert!(
-            result.scan("assumed_hop").contains(&hop),
+            result.scan("node_pivot").contains(&hop),
             "{backend}: assumed alice can impersonate admins, got {:?}",
-            result.scan("assumed_hop")
+            result.scan("node_pivot")
         );
         assert_eq!(controlled(&result, "imp"), ["admins", "alice"], "{backend}");
     }

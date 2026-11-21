@@ -199,7 +199,7 @@ and `k8s_rbac.mg` files model RBAC (see below); `k8s_rbac_escalation.mg` models 
 hops of identity theft (exec into a pod, mint a token, impersonate); `k8s_rbac_write.mg`
 models granting yourself a role by writing RBAC objects (`bind`,
 `escalate`), which adds hops through the roles gained; `closure.mg` chains
-hops into paths; `k8s_labels.mg` implements label selectors, evaluated against the kinds and scope Kubernetes uses for each owner (`k8s_selector_targets.mg`); `k8s_summary.mg` does
+hops into paths, whatever system they come from; `k8s_labels.mg` implements label selectors, evaluated against the kinds and scope Kubernetes uses for each owner (`k8s_selector_targets.mg`); `k8s_summary.mg` does
 inventory counts. `build.rs` compiles every rule file at build time, so a
 broken rule fails `cargo build` instead of your demo.
 

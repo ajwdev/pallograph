@@ -19,7 +19,7 @@ Section citations below are to the arXiv preprint.
 
 ```
 pallograph --backend dd --provenance
-> ::why escalation_hop(X, Y)
+> ::why granted_pivot(X, Y)
 ```
 
 `--provenance` is off by default because it adds operators to every rule. The

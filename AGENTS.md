@@ -39,6 +39,10 @@ Only the non-obvious parts:
   aggregation included), `rules/k8s_rbac_subjects.mg` (who a binding applies to,
   and the subjects a principal acts as) and `rules/k8s_rbac.mg` (`direct_perm`,
   `direct_url_perm` and `rbac_allowed`). File headers list the relations.
+- `rules/closure.mg` is the escalation closure for every system: one pivot
+  relation (`pivot`) and what each node acts as (`acts_as`), filled
+  by each system's rules. Nothing in it names a system, kind or mechanism;
+  keep it that way. `k8s_`-prefixed rule files are Kubernetes only.
 - `hack/relation-sizes.sh` counts rows per RBAC and escalation relation;
   use it to compare rule revisions.
 - `src/engine.rs` - `Engine` and the `Backend` trait, with two backends

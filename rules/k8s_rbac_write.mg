@@ -55,10 +55,10 @@
 #   - Into the writer's own RBAC permissions (Mode /all), so binding a role
 #     that allows more RBAC writes continues the path, through any number
 #     of writes. A group's gains count for its members too.
-#   - Into the escalation closure of closure.mg, as subject_hop rows with
+#   - Into the escalation closure of closure.mg, as pivot rows with
 #     Source /rbac_write, so a role gained here can reach identities, and
 #     an identity reached there brings what it can grant itself.
-#     escalation_hop and the grant_* guards leave these out: they say what
+#     granted_pivot and the grant_* guards leave these out: they say what
 #     a principal may do now, in one request.
 #
 # An identity assumed through escalation acts without its user_groups
@@ -81,7 +81,7 @@
 #   rbac_role_writable/5         - the roles it can write any rules into, in
 #                                  one request
 #   rbac_write_anything/1        - principals that may write anything
-#   subject_hop/8                - escalation hops through gained roles
+#   pivot/8                - escalation pivots through gained roles
 #                                  (Source /rbac_write; see closure.mg)
 #   rbac_write_role/5            - rbac_write_binding_direct cluster-wide,
 #                                  by principal, for tests/rbac_compat.rs
@@ -668,7 +668,7 @@ gained_namespaced_action(Name, Kind, Ns, Action) :-
 gained_namespaced_action(Name, Kind, "", Action) :-
     gained_action(Name, Kind, "*", Action).
 
-# How each action reaches a ServiceAccount, with its subject_hop
+# How each action reaches a ServiceAccount, with its pivot
 # mechanism: any ServiceAccount in the namespace, or one a pod there runs
 # as.
 action_reaches_serviceaccount(/pods_create, /pod_create).
@@ -723,34 +723,35 @@ gained_reachable_sa(Name, Kind, SANs, SAName, /impersonate) :-
     gained_namespaced_impersonate(Name, Kind, "", /sa_impersonate, SAName),
     serviceaccount(SANs, SAName, _).
 
-# ---- Hops through gained roles (subject_hop, Source /rbac_write) ----
+# ---- Pivots through gained roles (pivot, Source /rbac_write) ----
 
-subject_hop(Name, /k8s, Kind, Target, /k8s, /serviceaccount, Mechanism, /rbac_write) :-
+pivot(Name, /k8s, Kind, Target, /k8s, /serviceaccount, Mechanism, /rbac_write) :-
     gained_reachable_sa(Name, Kind, SANs, SAName, Mechanism)
     |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
 
 # Users and groups are cluster-scoped: only a cluster-wide gain counts, and
 # a named one reaches only the users or groups it names.
-subject_hop(Name, /k8s, Kind, Target, /k8s, /user, /impersonate, /rbac_write) :-
+pivot(Name, /k8s, Kind, Target, /k8s, /user, /impersonate, /rbac_write) :-
     gained_impersonate(Name, Kind, "", /user_impersonate, /any),
     user_has_own_grant(Target).
 
-subject_hop(Name, /k8s, Kind, Target, /k8s, /user, /impersonate, /rbac_write) :-
+pivot(Name, /k8s, Kind, Target, /k8s, /user, /impersonate, /rbac_write) :-
     gained_impersonate(Name, Kind, "", /user_impersonate, Target),
     user_has_own_grant(Target).
 
-subject_hop(Name, /k8s, Kind, Group, /k8s, /group, /impersonate, /rbac_write) :-
+pivot(Name, /k8s, Kind, Group, /k8s, /group, /impersonate, /rbac_write) :-
     gained_impersonate(Name, Kind, "", /group_impersonate, /any),
     group_has_grant(Group).
 
-subject_hop(Name, /k8s, Kind, Group, /k8s, /group, /impersonate, /rbac_write) :-
+pivot(Name, /k8s, Kind, Group, /k8s, /group, /impersonate, /rbac_write) :-
     gained_impersonate(Name, Kind, "", /group_impersonate, Group),
     group_has_grant(Group).
 
 # The writes an identity reached on the way can make: an assumed user with
 # user_groups groups uses its /assumed_user writes, not those it could make
-# logged in. closure.mg reads these as acts_as /assumed_writes; a principal
-# logging in writes as itself (acts_as /login).
+# logged in. These are acts_as /assumed_writes, which pivot_mode pairs with
+# /rbac_write pivots; a principal logging in writes as itself (acts_as
+# /login).
 assumed_gains_subject(Identity, /group, Group) :-
     assumed_subject(Identity, /group, Group).
 
@@ -765,8 +766,9 @@ assumed_gains_subject(Identity, /assumed_user, Identity) :-
     assumed_subject(Identity, /user, Identity),
     user_has_groups(Identity).
 
-acts_as(Identity, /k8s, Name, /k8s, Kind, /assumed_writes) :-
-    assumed_gains_subject(Identity, Kind, Name).
+acts_as(Identity, /k8s, IdentityKind, Name, /k8s, Kind, /assumed_writes) :-
+    assumed_gains_subject(Identity, Kind, Name),
+    k8s_identity(Identity, IdentityKind).
 
 # A user or group that can grant itself a role holds grants of its own,
 # which impersonating it brings.

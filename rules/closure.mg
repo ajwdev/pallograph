@@ -1,189 +1,161 @@
-# Escalation closure - who can reach whom by chaining escalation hops.
+# Escalation closure - who can reach whom by chaining pivots.
 #
-# One hop relation and one closure over it, whatever system the hop comes
-# from. The Kubernetes rules fill the inputs:
-#   k8s_rbac_escalation.mg  - subject_hop from a binding subject's own grants
-#                    (Source /grant), and acts_as for logging in and for
-#                    being assumed
-#   k8s_rbac_write.mg  - subject_hop through a role a subject can grant itself
-#                    by writing RBAC objects (Source /rbac_write), and
-#                    acts_as for the writes an assumed identity can make
+# A pivot is one step of escalation: whoever holds one node's grants can
+# take over another node, by some mechanism. This file has one pivot
+# relation and one closure over it, whatever system a pivot comes from.
+# Nothing here names a system, a kind or a mechanism: each system's rules
+# (its adapter) fill the inputs, and a pivot whose two ends are in
+# different systems links them. The Kubernetes adapter is
+# k8s_rbac_escalation.mg and k8s_rbac_write.mg.
+#
+# Inputs, filled by each adapter:
+#   pivot/8          - one pivot: whoever holds From's grants can take over
+#                      To, by a mechanism and from a source
+#   acts_as/7        - whose grants a node acts with, per mode
+#   pivot_mode/2     - which pivot source each acts_as mode uses
+#   start_kind/2     - the kinds a path can start from
+#   identity_kind/2  - the kinds that are identities (for views)
 #
 # Derived relations (IDB):
-#   subject_hop/8       - one hop from a subject's grants, with how and why
-#   acts_as/6           - the subjects an identity acts as, per mode
-#   subject_controls/6  - every target a subject reaches in one or more hops
-#   controls_identity/2, controls_group/2, group_controls_identity/2,
-#   group_controls_group/2, escalation_hop/2, perm_group_impersonate/2
-#                       - the same per principal or group, by name
+#   node_pivot/6  - pivot re-keyed by the node a path reaches (a lookup
+#                   table for the recursion)
+#   controls/6    - every node From reaches in one or more pivots
 #
-# Identities (users and ServiceAccounts) and subjects (what a binding
-# names: a user, a ServiceAccount or a group) are flat columns: name,
-# system, kind. Every system is /k8s for now.
+# Glossary. Each term has one meaning in this file; the Kubernetes and IAM
+# words are the nearest equivalents.
 #
-# A path starts at a subject: one a principal acts as when it logs in, or
-# a group, whose members are mostly unknown. Every hop after the first
-# starts from what the previous hop reached:
-#   - an identity acts only as its assumed subjects (acts_as /assumed), and
-#     can make only the RBAC writes it could make assumed (/assumed_writes);
-#   - an impersonated group acts with its own grants, and only its hops to
-#     identities count. Impersonating a group does not let the request
-#     impersonate further groups.
-
-identity_kind(/user).
-identity_kind(/serviceaccount).
-
-# A constant in the recursive atom would make the planner look up the
-# whole relation on it every round instead of only the new rows, so the
-# rule matches MidKind against this fact.
-group_kind(/group).
-
-# Paths start from subjects a principal can log in as, or from a group.
-# /assumed_user subjects (k8s_rbac_write.mg) are only reached mid-path.
-start_subject_kind(/user).
-start_subject_kind(/serviceaccount).
-start_subject_kind(/group).
-
-Decl subject_hop(Subject, SubjectSystem, SubjectKind, Target, TargetSystem, TargetKind, Mechanism, Source)
-  descr [
-    doc("One escalation hop: whoever acts as subject (SubjectKind, Subject) can assume identity Target, or impersonate group Target, by Mechanism."),
-    arg(Subject, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
-    arg(SubjectSystem, "/k8s"),
-    arg(SubjectKind, "/user, /group or /serviceaccount; /assumed_user for a user with user_groups groups, as it acts when assumed (Source /rbac_write only)"),
-    arg(Target, "user name, system:serviceaccount:<ns>:<name>, or group name"),
-    arg(TargetSystem, "/k8s"),
-    arg(TargetKind, "/user, /serviceaccount or /group"),
-    arg(Mechanism, "/impersonate, /token, /pod_exec (exec or attach) or /pod_create"),
-    arg(Source, "/grant: the subject's own grants; /rbac_write: a role the subject can grant itself by writing RBAC objects")
-  ].
-
-Decl acts_as(Identity, IdentitySystem, Subject, SubjectSystem, SubjectKind, Mode)
-  descr [
-    doc("The binding subjects identity Identity acts as. Hops from those subjects are hops from the identity."),
-    arg(Identity, "user name or system:serviceaccount:<ns>:<name>"),
-    arg(IdentitySystem, "/k8s"),
-    arg(Subject, "subject name"),
-    arg(SubjectSystem, "/k8s"),
-    arg(SubjectKind, "/user, /group, /serviceaccount, or /assumed_user in mode /assumed_writes"),
-    arg(Mode, "/login: logged in, with its user_groups groups (principal_subject); /assumed: reached by a hop, for /grant hops (assumed_subject); /assumed_writes: reached by a hop, for /rbac_write hops (assumed_gains_subject)")
-  ].
-
-Decl subject_controls(Subject, SubjectSystem, SubjectKind, Target, TargetSystem, TargetKind)
-  descr [
-    doc("Whoever acts as subject (SubjectKind, Subject) reaches Target in one or more escalation hops (transitively closed)."),
-    arg(Subject, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
-    arg(SubjectSystem, "/k8s"),
-    arg(SubjectKind, "/user, /group or /serviceaccount"),
-    arg(Target, "user name, system:serviceaccount:<ns>:<name>, or group name"),
-    arg(TargetSystem, "/k8s"),
-    arg(TargetKind, "/user, /serviceaccount or /group")
-  ].
-
-# The next hop from an identity reached on the way.
-assumed_hop(Identity, IdentitySystem, Target, TargetSystem, TargetKind) :-
-    acts_as(Identity, IdentitySystem, Subject, SubjectSystem, SubjectKind, /assumed),
-    subject_hop(Subject, SubjectSystem, SubjectKind, Target, TargetSystem, TargetKind, _, /grant).
-
-assumed_hop(Identity, IdentitySystem, Target, TargetSystem, TargetKind) :-
-    acts_as(Identity, IdentitySystem, Subject, SubjectSystem, SubjectKind, /assumed_writes),
-    subject_hop(Subject, SubjectSystem, SubjectKind, Target, TargetSystem, TargetKind, _, /rbac_write).
-
-# The next hop from an impersonated group: its own grants, to identities.
-impersonated_group_hop(Group, GroupSystem, Target, TargetSystem, TargetKind) :-
-    subject_hop(Group, GroupSystem, /group, Target, TargetSystem, TargetKind, _, _),
-    identity_kind(TargetKind).
-
-# Each recursive rule extends a path by one hop, so why on a
-# subject_controls fact shows a shortest path: the interpreter derives paths
-# one hop per round and keeps the first proof, and the DD backend's lazy
-# provenance picks the proof of least height.
-subject_controls(Subject, SubjectSystem, SubjectKind, Target, TargetSystem, TargetKind) :-
-    subject_hop(Subject, SubjectSystem, SubjectKind, Target, TargetSystem, TargetKind, _, _),
-    start_subject_kind(SubjectKind).
-
-subject_controls(Subject, SubjectSystem, SubjectKind, Target, TargetSystem, TargetKind) :-
-    subject_controls(Subject, SubjectSystem, SubjectKind, Mid, MidSystem, MidKind),
-    identity_kind(MidKind),
-    assumed_hop(Mid, MidSystem, Target, TargetSystem, TargetKind).
-
-subject_controls(Subject, SubjectSystem, SubjectKind, Target, TargetSystem, TargetKind) :-
-    subject_controls(Subject, SubjectSystem, SubjectKind, Mid, MidSystem, MidKind),
-    group_kind(MidKind),
-    impersonated_group_hop(Mid, MidSystem, Target, TargetSystem, TargetKind).
-
-# ---- Per principal and per group ----
+#   node        Anything a path can pass through: (name, system, kind).
+#   system      Where a node lives: /k8s, /aws, ...
+#   identity    A node that can be assumed (identity_kind): a Kubernetes
+#               user or ServiceAccount, an IAM role.
+#   grant       A permission given to a grantee. Kubernetes: what a
+#               binding's role allows (direct_perm). IAM: a policy.
+#   grantee     Whatever a grant names. Kubernetes: a binding subject (a
+#               User, Group or ServiceAccount in a binding's subjects).
+#               IAM: the role, user or group a policy is attached to.
+#   ambient     Held without doing anything ("ambient authority", from
+#               capability security). Logged in as alice, the grants of
+#               alice and of her groups apply. acts_as lists a node's
+#               ambient grantees.
+#   mode        How a node is acting, which changes its ambient grantees:
+#               Kubernetes /login (with user_groups) vs /assumed (reached
+#               by a pivot, without them).
+#   pivot       One escalation step a grant makes possible: becoming
+#               another node, by a mechanism (/pod_exec, /token,
+#               /impersonate, /pod_identity, ...). Unlike acts_as, a
+#               pivot is an action.
+#   source      Where the grant behind a pivot comes from: /grant (held
+#               already) or /rbac_write (one the grantee can give itself
+#               by writing RBAC objects first). pivot_mode pairs each
+#               source with the mode that may use it.
+#   path        Alternating ambient grantees and pivots, which controls
+#               closes over.
 #
-# What src/k8s/rbac reads. A principal reaches what any subject it logs in as
-# reaches.
+# Example, a pod-exec pivot into a ServiceAccount with an AWS role:
+#
+#   alice
+#     -acts_as->               alice (the grantee in her binding)
+#     -pivot /pod_exec->       app:uploader
+#     -acts_as->               app:uploader
+#     -pivot /pod_identity->   role/uploader
+#     ...
+#
+#   acts_as("alice", /k8s, /user, "alice", /k8s, /user, /login)
+#   direct_perm("alice", /user, "app", "", "pods/exec", /any, "create")
+#   pivot("alice", /k8s, /user, "system:serviceaccount:app:uploader",
+#         /k8s, /serviceaccount, /pod_exec, /grant)
+#
+# A node is three flat columns: name, system, kind. A path starts at a
+# grantee (start_kind): whatever a grant names, such as a Kubernetes
+# binding subject or an IAM role. Each later pivot starts from what the
+# previous one reached: that node acts with some grantees' grants in some
+# mode (acts_as), and takes their pivots from the source that mode uses
+# (pivot_mode). A mode with no pivot_mode row, such as Kubernetes's
+# /login, never continues a path; views read it instead.
+#
+# What a node acts as is up to its adapter. A node can act as a grantee of
+# a kind that exists only partway along a path, and that grantee's pivots
+# say what it can do there (in Kubernetes, /assumed_user and
+# /impersonated_group).
 
-Decl controls_identity(Principal, Target)
+Decl pivot(From, FromSystem, FromKind, To, ToSystem, ToKind, Mechanism, Source)
   descr [
-    doc("Principal can assume Target's identity via one or more escalation hops, through identities and impersonated groups (transitively closed)."),
-    arg(Principal, "the user or ServiceAccount that gains control"),
-    arg(Target, "the user or ServiceAccount Principal ultimately controls")
+    doc("One pivot: whoever holds the grants of (FromSystem, FromKind, From) can assume identity To, or act as group To, by Mechanism."),
+    arg(From, "grantee name, e.g. a Kubernetes user or group name, system:serviceaccount:<ns>:<name>, or an IAM role ARN"),
+    arg(FromSystem, "From's system, e.g. /k8s"),
+    arg(FromKind, "From's kind within its system, e.g. /user, /group or /serviceaccount"),
+    arg(To, "name of the node taken over"),
+    arg(ToSystem, "To's system"),
+    arg(ToKind, "To's kind within its system"),
+    arg(Mechanism, "how the pivot is made, e.g. /impersonate, /token, /pod_exec or /pod_create"),
+    arg(Source, "what the pivot comes from, e.g. /grant (From's own grants) or /rbac_write (a role From can grant itself); pivot_mode says which acts_as mode uses it")
   ].
 
-controls_identity(Principal, Target) :-
-    acts_as(Principal, /k8s, Subject, SubjectSystem, SubjectKind, /login),
-    subject_controls(Subject, SubjectSystem, SubjectKind, Target, /k8s, TargetKind),
-    identity_kind(TargetKind),
-    Principal != Target.
-
-# A path back to Principal through another identity: Principal assumed
-# can do no more than Principal logged in, but the row says the cycle
-# exists.
-controls_identity(Principal, Principal) :-
-    controls_identity(Principal, Mid),
-    Mid != Principal,
-    assumed_hop(Mid, /k8s, Principal, /k8s, TargetKind),
-    identity_kind(TargetKind).
-
-Decl controls_group(Principal, Group)
+Decl acts_as(Actor, ActorSystem, ActorKind, Grantee, GranteeSystem, GranteeKind, Mode)
   descr [
-    doc("Principal, or an identity it controls, can impersonate Group, which holds grants."),
-    arg(Principal, "user name or system:serviceaccount:<ns>:<name>"),
-    arg(Group, "group whose direct_perm grants Principal can use")
+    doc("Node (ActorSystem, ActorKind, Actor) acts with the grants of (GranteeSystem, GranteeKind, Grantee) in Mode. Pivots from the grantee are pivots from the node."),
+    arg(Actor, "node name"),
+    arg(ActorSystem, "the node's system"),
+    arg(ActorKind, "the node's kind, as pivot names it as a To"),
+    arg(Grantee, "grantee name"),
+    arg(GranteeSystem, "the grantee's system"),
+    arg(GranteeKind, "the grantee's kind"),
+    arg(Mode, "how the node is acting, e.g. /login, /assumed or /assumed_writes; pivot_mode says which modes continue a path")
   ].
 
-controls_group(Principal, Group) :-
-    acts_as(Principal, /k8s, Subject, SubjectSystem, SubjectKind, /login),
-    subject_controls(Subject, SubjectSystem, SubjectKind, Group, /k8s, /group).
-
-Decl group_controls_identity(Group, Target)
+Decl pivot_mode(Mode, Source)
   descr [
-    doc("Any member of Group can assume Target's identity via one or more escalation hops, starting from the group's own grants."),
-    arg(Group, "group whose direct_perm grants start the escalation"),
-    arg(Target, "the user or ServiceAccount members of Group ultimately control")
+    doc("A node reached partway along a path, acting in Mode, takes its grantees' pivots from Source."),
+    arg(Mode, "an acts_as mode"),
+    arg(Source, "a pivot source")
   ].
 
-group_controls_identity(Group, Target) :-
-    subject_controls(Group, /k8s, /group, Target, /k8s, TargetKind),
-    identity_kind(TargetKind).
-
-Decl group_controls_group(Group, Other)
+Decl start_kind(System, Kind)
   descr [
-    doc("Any member of Group, or an identity the group controls, can impersonate Other, which holds grants."),
-    arg(Group, "group whose direct_perm grants start the escalation"),
-    arg(Other, "another group whose direct_perm grants members of Group can use")
+    doc("Paths start from grantees of this kind."),
+    arg(System, "the grantee's system"),
+    arg(Kind, "the grantee's kind")
   ].
 
-group_controls_group(Group, Other) :-
-    subject_controls(Group, /k8s, /group, Other, /k8s, /group),
-    Group != Other.
-
-Decl escalation_hop(Principal, Target)
+Decl identity_kind(System, Kind)
   descr [
-    doc("Single-step escalation: Principal, logged in with all its groups, can assume Target's identity via one mechanism, with the grants it holds now."),
-    arg(Principal, "the user or ServiceAccount performing the escalation"),
-    arg(Target, "the user or ServiceAccount whose identity Principal can directly assume")
+    doc("Nodes of this kind are identities: something that can be assumed, not a group of them. The closure doesn't read it; views over controls do."),
+    arg(System, "the node's system"),
+    arg(Kind, "the node's kind")
   ].
 
-escalation_hop(Principal, Target) :-
-    acts_as(Principal, /k8s, Subject, SubjectSystem, SubjectKind, /login),
-    subject_hop(Subject, SubjectSystem, SubjectKind, Target, /k8s, TargetKind, _, /grant),
-    identity_kind(TargetKind).
+Decl controls(From, FromSystem, FromKind, To, ToSystem, ToKind)
+  descr [
+    doc("Whoever holds the grants of (FromSystem, FromKind, From) reaches To in one or more pivots (transitively closed)."),
+    arg(From, "grantee name"),
+    arg(FromSystem, "From's system"),
+    arg(FromKind, "From's kind, one start_kind lists"),
+    arg(To, "name of the node reached"),
+    arg(ToSystem, "To's system"),
+    arg(ToKind, "To's kind")
+  ].
 
-# The same for groups: Principal may impersonate Group now, in one request.
-perm_group_impersonate(Principal, Group) :-
-    acts_as(Principal, /k8s, Subject, SubjectSystem, SubjectKind, /login),
-    subject_hop(Subject, SubjectSystem, SubjectKind, Group, /k8s, /group, _, /grant).
+# pivot is keyed by grantee, but a path arrives at a node, which holds the
+# grants of several grantees (acts_as). node_pivot joins the two once, so
+# that each round of the recursion below looks up a reached node's
+# pivots directly. Each row is a pivot row with From replaced by a node
+# that holds From's grants, and the mechanism dropped; nothing in it is
+# new. Joining acts_as and pivot inside the recursive rule instead gives
+# the same answers but redoes the join every round, about 20% slower on
+# the DD backend (medium fixture).
+node_pivot(Node, NodeSystem, NodeKind, To, ToSystem, ToKind) :-
+    acts_as(Node, NodeSystem, NodeKind, Grantee, GranteeSystem, GranteeKind, Mode),
+    pivot_mode(Mode, Source),
+    pivot(Grantee, GranteeSystem, GranteeKind, To, ToSystem, ToKind, _, Source).
+
+# Each recursive rule extends a path by one pivot, so why on a controls
+# fact shows a shortest path: the interpreter derives paths one pivot per
+# round and keeps the first proof, and the DD backend's lazy provenance
+# picks the proof of least height.
+controls(From, FromSystem, FromKind, To, ToSystem, ToKind) :-
+    pivot(From, FromSystem, FromKind, To, ToSystem, ToKind, _, _),
+    start_kind(FromSystem, FromKind).
+
+controls(From, FromSystem, FromKind, To, ToSystem, ToKind) :-
+    controls(From, FromSystem, FromKind, Mid, MidSystem, MidKind),
+    node_pivot(Mid, MidSystem, MidKind, To, ToSystem, ToKind).

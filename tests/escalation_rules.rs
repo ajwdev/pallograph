@@ -302,7 +302,7 @@ fn cluster_wide_user_and_group_impersonation_escalates() {
 // Impersonating a ServiceAccount is checked in the ServiceAccount's
 // namespace, so impersonate on serviceaccounts in team-a reaches
 // team-a:admin but not team-b:admin, though both hold cluster-admin.
-// Checked one hop at a time (escalation_hop): through team-a:admin,
+// Checked one pivot at a time (granted_pivot): through team-a:admin,
 // deployer reaches everything.
 #[test]
 fn namespaced_service_account_impersonation_stays_in_its_namespace() {
@@ -332,7 +332,7 @@ fn namespaced_service_account_impersonation_stays_in_its_namespace() {
         assert!(
             has_row(
                 &result,
-                "escalation_hop",
+                "granted_pivot",
                 &[DEPLOYER, "system:serviceaccount:team-a:admin"]
             ),
             "{backend}: deployer can impersonate team-a:admin"
@@ -340,11 +340,11 @@ fn namespaced_service_account_impersonation_stays_in_its_namespace() {
         assert!(
             !has_row(
                 &result,
-                "escalation_hop",
+                "granted_pivot",
                 &[DEPLOYER, "system:serviceaccount:team-b:admin"]
             ),
             "{backend}: deployer cannot impersonate team-b:admin, got {:?}",
-            result.scan("escalation_hop")
+            result.scan("granted_pivot")
         );
     }
 }
@@ -383,10 +383,10 @@ fn bind_imp_cluster_wide() -> String {
 }
 
 /// The identities imp reaches in one impersonation hop: users and
-/// ServiceAccounts (escalation_hop) and groups (controls_group).
+/// ServiceAccounts (granted_pivot) and groups (controls_group).
 fn imp_reaches(result: &EvalStore) -> Vec<String> {
     let imp = Value::String(IMP.into());
-    let mut reached: Vec<String> = ["escalation_hop", "controls_group"]
+    let mut reached: Vec<String> = ["granted_pivot", "controls_group"]
         .iter()
         .flat_map(|relation| result.scan(relation))
         .filter(|row| row[0] == imp)
@@ -547,7 +547,7 @@ fn assert_no_group_principals(backend: &str, result: &EvalStore, relation: &str)
 // demo:target by exec with its own grants, and writer by binding a role
 // that allows exec.
 #[test]
-fn subject_hop_records_mechanism_and_source() {
+fn pivot_records_mechanism_and_source() {
     let mut manifests = exec_into_admin_pod();
     manifests.push(cluster_role(
         "pod-exec",
@@ -574,21 +574,17 @@ fn subject_hop_records_mechanism_and_source() {
     };
     for (backend, result) in evaluate(&manifests, &[]) {
         assert!(
-            has_value_row(&result, "subject_hop", &hop("execs", "/group", "/grant")),
+            has_value_row(&result, "pivot", &hop("execs", "/group", "/grant")),
             "{backend}: execs execs into the pod, got {:?}",
-            result.scan("subject_hop")
+            result.scan("pivot")
         );
         assert!(
-            has_value_row(
-                &result,
-                "subject_hop",
-                &hop("writer", "/user", "/rbac_write")
-            ),
+            has_value_row(&result, "pivot", &hop("writer", "/user", "/rbac_write")),
             "{backend}: writer binds pod-exec, got {:?}",
-            result.scan("subject_hop")
+            result.scan("pivot")
         );
         assert!(
-            !has_value_row(&result, "subject_hop", &hop("writer", "/user", "/grant")),
+            !has_value_row(&result, "pivot", &hop("writer", "/user", "/grant")),
             "{backend}: writer holds no exec grant of its own"
         );
         assert!(
@@ -596,8 +592,8 @@ fn subject_hop_records_mechanism_and_source() {
             "{backend}: writer reaches {TARGET} after the write"
         );
         assert!(
-            !has_row(&result, "escalation_hop", &["writer", TARGET]),
-            "{backend}: escalation_hop is what writer may do now"
+            !has_row(&result, "granted_pivot", &["writer", TARGET]),
+            "{backend}: granted_pivot is what writer may do now"
         );
         assert_no_group_principals(backend, &result, "controls_identity");
         assert_no_group_principals(backend, &result, "controls_group");
@@ -614,6 +610,7 @@ fn acts_as_assumed_writes_uses_assumed_user() {
         [
             string("bob"),
             name("/k8s"),
+            name("/user"),
             string("bob"),
             name("/k8s"),
             name(kind),
@@ -642,9 +639,9 @@ fn acts_as_assumed_writes_uses_assumed_user() {
         let login_groups: Vec<&Value> = result
             .scan("acts_as")
             .iter()
-            .filter(|row| row[0] == string("bob") && row[4] == name("/group"))
-            .filter(|row| row[5] == name("/login"))
-            .map(|row| &row[2])
+            .filter(|row| row[0] == string("bob") && row[5] == name("/group"))
+            .filter(|row| row[6] == name("/login"))
+            .map(|row| &row[3])
             .collect();
         assert!(
             login_groups.contains(&&string("execs")),
@@ -733,7 +730,7 @@ fn mutual_impersonation_records_the_cycle() {
             );
         }
         assert!(
-            !has_row(&result, "escalation_hop", &["alice", "alice"]),
+            !has_row(&result, "granted_pivot", &["alice", "alice"]),
             "{backend}: alice cannot impersonate herself"
         );
     }
