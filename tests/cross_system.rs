@@ -226,3 +226,112 @@ fn walk_reaches_what_controls_says() {
         );
     }
 }
+
+/// Run the binary over the example with its config and eks.mg, on `script`.
+fn run_example(script: &str) -> std::process::Output {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join(EXAMPLE);
+    // Unique per call: tests run in parallel threads of one process.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let script_path = std::env::temp_dir().join(format!(
+        "pallograph-cross-system-{}-{n}.pg",
+        std::process::id()
+    ));
+    std::fs::write(&script_path, script).expect("write script");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_pallograph"))
+        .current_dir(&example)
+        .args(["-C", "pallograph.toml", "--rules", "eks.mg", "--script"])
+        .arg(&script_path)
+        .output()
+        .expect("run pallograph");
+    let _ = std::fs::remove_file(&script_path);
+    output
+}
+
+fn stdout(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn pivots_prints_a_path_out_of_the_cluster_and_back() {
+    let output = run_example("pivots alice\n");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(
+        out.contains(
+            "/pod_identity [/grant] → arn:aws:iam::111122223333:role/uploader (/aws /role)"
+        ),
+        "{out}"
+    );
+    assert!(out.contains("platform-admins (/k8s /group)"), "{out}");
+    assert!(
+        stderr(&output).contains("Reached 5 node(s)."),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = run_example("pivots platform-admins\n");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+#[test]
+fn pivots_ndjson_has_one_object_per_reached_node() {
+    let output = run_example("format ndjson\npivots alice\n");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let out = stdout(&output);
+    let rows: Vec<serde_json::Value> = out
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json line"))
+        .collect();
+    assert_eq!(rows.len(), 5, "{out}");
+    for row in &rows {
+        assert_eq!(row["at"], "", "{row}");
+        assert_eq!(row["from"]["name"], "alice", "{row}");
+        assert!(!row["steps"].as_array().unwrap().is_empty(), "{row}");
+    }
+}
+
+#[test]
+fn pivots_to_unreachable_node_says_no_path() {
+    let output = run_example("pivots system:serviceaccount:app:default alice\n");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("No path from system:serviceaccount:app:default to alice."),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn pivots_unknown_node_fails() {
+    let output = run_example("pivots nobody\n");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("No node named 'nobody'."),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn pivots_to_prints_the_whole_path() {
+    let output = run_example("pivots alice platform-admins\n");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let out = stdout(&output);
+    for line in [
+        "  /pod_exec [/grant] → system:serviceaccount:app:uploader (/k8s /serviceaccount)",
+        "    /pod_identity [/grant] → arn:aws:iam::111122223333:role/uploader (/aws /role)",
+        "      /sts_assume_role [/grant] → arn:aws:iam::111122223333:role/deploy (/aws /role)",
+        "        as platform-admins (/k8s /group) /impersonate [/grant] → platform-admins (/k8s /group)",
+    ] {
+        assert!(
+            out.lines().any(|printed| printed == line),
+            "missing {line:?} in:\n{out}"
+        );
+    }
+    assert!(!out.contains("app:default"), "{out}");
+}

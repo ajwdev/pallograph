@@ -22,6 +22,7 @@
 //! namespace) gets a chance to claim the path before the REPL gives up.
 
 use super::OutputFormat;
+use crate::api::NodeQuery;
 
 /// A parsed REPL command. Variants carry already-validated arguments; strings
 /// bound for the engine (query bodies, fact atoms, rules, source specs) are
@@ -35,6 +36,11 @@ pub enum Command {
     /// `graph [<predicate>]`: serve the rule graph and print its URL,
     /// focused on the predicate when one is given.
     Graph(Option<String>),
+    /// `pivots <from> [<to>]`: walk the pivot graph forward from a node.
+    Pivots {
+        from: NodeQuery,
+        to: Option<NodeQuery>,
+    },
     /// `use [<snapshot> [<command>]]`: point read-only commands at a snapshot.
     /// No snapshot means return to live state; a trailing command runs once
     /// with the snapshot in use.
@@ -237,6 +243,7 @@ pub fn parse_command(line: &str) -> Result<Command, ParseError> {
         ("diff", Some(args)) => parse_diff(args, false)?,
         ("diff-relation", Some(args)) => parse_diff(args, true)?,
         ("load", Some(args)) => parse_load(args)?,
+        ("pivots", Some(args)) => parse_pivots(args)?,
         ("smtlib", Some(args)) => parse_smtlib(args)?,
         ("k8s::load", Some(spec)) => Command::K8sLoad(spec.trim().to_string()),
         ("k8s::apply-delta", Some(spec)) => Command::K8sApplyDelta(spec.trim().to_string()),
@@ -355,6 +362,74 @@ fn parse_load(args: &str) -> Result<Command, ParseError> {
             source: source.trim().to_string(),
         }),
         None => err("Usage: load <relation> <source>  (source is a file path or ! <cmd>)"),
+    }
+}
+
+const PIVOTS_USAGE: &str = "Usage: pivots <from> [/system /kind] [<to> [/system /kind]]";
+
+/// One word of `pivots`' arguments: a name, or a system or kind constant (an
+/// unquoted word starting with `/`).
+enum PivotsToken {
+    Name(String),
+    Constant(String),
+}
+
+/// Split on whitespace, keeping a double-quoted word (which may contain
+/// spaces, as OIDC group names do) whole. `None` for an unclosed quote.
+fn pivots_tokens(args: &str) -> Option<Vec<PivotsToken>> {
+    let mut tokens = Vec::new();
+    let mut rest = args.trim_start();
+    while !rest.is_empty() {
+        if let Some(quoted) = rest.strip_prefix('"') {
+            let (name, after) = quoted.split_once('"')?;
+            tokens.push(PivotsToken::Name(name.to_string()));
+            rest = after;
+        } else {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let word = &rest[..end];
+            tokens.push(if word.starts_with('/') {
+                PivotsToken::Constant(word.to_string())
+            } else {
+                PivotsToken::Name(word.to_string())
+            });
+            rest = &rest[end..];
+        }
+        rest = rest.trim_start();
+    }
+    Some(tokens)
+}
+
+/// `pivots <from> [<to>]`. A node is a name, optionally double-quoted,
+/// followed by either nothing or a system and a kind.
+fn parse_pivots(args: &str) -> Result<Command, ParseError> {
+    let Some(tokens) = pivots_tokens(args) else {
+        return err(PIVOTS_USAGE);
+    };
+    let mut nodes: Vec<NodeQuery> = Vec::new();
+    let mut tokens = tokens.into_iter().peekable();
+    while let Some(token) = tokens.next() {
+        let PivotsToken::Name(name) = token else {
+            return err(PIVOTS_USAGE);
+        };
+        let mut query = NodeQuery {
+            name,
+            ..NodeQuery::default()
+        };
+        if matches!(tokens.peek(), Some(PivotsToken::Constant(_))) {
+            match (tokens.next(), tokens.next()) {
+                (Some(PivotsToken::Constant(system)), Some(PivotsToken::Constant(kind))) => {
+                    query.system = Some(system);
+                    query.kind = Some(kind);
+                }
+                _ => return err(PIVOTS_USAGE),
+            }
+        }
+        nodes.push(query);
+    }
+    let mut nodes = nodes.into_iter();
+    match (nodes.next(), nodes.next(), nodes.next()) {
+        (Some(from), to, None) => Ok(Command::Pivots { from, to }),
+        _ => err(PIVOTS_USAGE),
     }
 }
 
@@ -485,6 +560,65 @@ mod tests {
     #[test]
     fn why_passes_fact_through_verbatim() {
         assert_eq!(parse("::why pod(X, Y)"), Command::Why("pod(X, Y)".into()));
+    }
+
+    fn node_query(name: &str, system: Option<&str>, kind: Option<&str>) -> NodeQuery {
+        NodeQuery {
+            name: name.into(),
+            system: system.map(String::from),
+            kind: kind.map(String::from),
+        }
+    }
+
+    #[test]
+    fn pivots_parses_nodes() {
+        assert_eq!(
+            parse("::pivots alice"),
+            Command::Pivots {
+                from: node_query("alice", None, None),
+                to: None,
+            }
+        );
+        assert_eq!(
+            parse("::pivots alice /k8s /user arn:x"),
+            Command::Pivots {
+                from: node_query("alice", Some("/k8s"), Some("/user")),
+                to: Some(node_query("arn:x", None, None)),
+            }
+        );
+        assert_eq!(
+            parse("::pivots \"alice\""),
+            Command::Pivots {
+                from: node_query("alice", None, None),
+                to: None,
+            }
+        );
+        for bad in [
+            "::pivots a b c",
+            "::pivots alice /k8s",
+            "::pivots /k8s /user",
+        ] {
+            assert!(usage(bad).starts_with("Usage: pivots"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn pivots_quoted_names_keep_their_spaces() {
+        assert_eq!(
+            parse("::pivots \"Domain Users\" /k8s /group \"a b\""),
+            Command::Pivots {
+                from: node_query("Domain Users", Some("/k8s"), Some("/group")),
+                to: Some(node_query("a b", None, None)),
+            }
+        );
+        assert!(usage("::pivots \"a b").starts_with("Usage: pivots"));
+    }
+
+    #[test]
+    fn pivots_without_arguments_is_usage() {
+        // A bare command falls through for the dispatcher, which prints the
+        // usage from COMMANDS.
+        assert_eq!(parse("::pivots"), Command::Unknown("pivots".into()));
     }
 
     #[test]

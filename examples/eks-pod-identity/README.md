@@ -49,6 +49,7 @@ cargo run --bin pallograph -- -C pallograph.toml --rules eks.mg
 ```
 
 ```
+pivots alice
 ?- k8s_group_via_aws(P, G, R)
 ?- controls("alice", /k8s, /user, T, TS, TK)
 ?- controls_group("alice", G)
@@ -58,5 +59,20 @@ cargo run --bin pallograph -- -C pallograph.toml --rules eks.mg
 leaves the cluster, so `rbac::cluster-admin` lists alice. It can't print
 her chain yet (`no escalation chain`): the path display in Rust only walks
 Kubernetes pivots.
+
+`pivots` walks the same graph for any system and prints the chain, one
+step per line. `pivots alice` shows every node alice reaches; with a
+target, `pivots alice platform-admins` shows just her chain:
+
+```
+alice (/k8s /user)
+  /pod_exec [/grant] → system:serviceaccount:app:uploader (/k8s /serviceaccount)
+    /pod_identity [/grant] → arn:aws:iam::111122223333:role/uploader (/aws /role)
+      /sts_assume_role [/grant] → arn:aws:iam::111122223333:role/deploy (/aws /role)
+        as platform-admins (/k8s /group) /impersonate [/grant] → platform-admins (/k8s /group)
+```
+
+It's a naive walk: one shortest path to each node, for systems without
+first-class commands.
 
 `tests/cross_system.rs` runs this example on both backends.

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::IsTerminal;
 
 use anyhow::{Context as _, Result};
@@ -14,8 +14,8 @@ use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
 use crate::api::{
-    At, Core, DeltaSummary, Derivation, Fact, KubeObject, LocalCore, ProvenanceTree, ReachesQuery,
-    RelationInfo, Rows,
+    At, Core, DeltaSummary, Derivation, Fact, KubeObject, LocalCore, Node, NodeQuery, PivotPath,
+    ProvenanceTree, ReachesQuery, RelationInfo, Rows,
 };
 use crate::edb::watch::WatchStatus;
 use crate::edb::{FactSource, K8sManifestsSource, ShellSource};
@@ -74,6 +74,11 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         path: "graph",
         usage: Some("graph [<predicate>]   (browse the rule graph in a web browser)"),
+        manpage: false,
+    },
+    CommandSpec {
+        path: "pivots",
+        usage: Some("pivots <from> [/system /kind] [<to> [/system /kind]]"),
         manpage: false,
     },
     CommandSpec {
@@ -529,6 +534,9 @@ fn print_help() {
     println!("  why <pred>(<args>...)                  - show derivation tree for a fact");
     println!(
         "  graph [<predicate>]                    - browse how the rules depend on each other (starts a local web server)"
+    );
+    println!(
+        "  pivots <from> [<to>]                   - walk the pivot graph from a node: one shortest path to each node it reaches, any system (a node is a name, or name /system /kind)"
     );
     println!();
     println!("EDB / Rules");
@@ -1173,6 +1181,7 @@ impl<'a> Repl<'a> {
             Command::Query(body) => self.query(&body),
             Command::Why(fact) => self.why(&fact),
             Command::Graph(name) => self.graph(name.as_deref()),
+            Command::Pivots { from, to } => self.pivots(&from, to.as_ref()),
             Command::Use { snapshot, one_shot } => self.use_snapshot(snapshot, one_shot),
             Command::Snapshot(name) => self.snapshot(&name),
             Command::Diff {
@@ -1236,6 +1245,28 @@ impl<'a> Repl<'a> {
             }
             Ok(trees) => trees.iter().for_each(print_provenance),
             Err(e) => self.command_error(e),
+        }
+    }
+
+    fn pivots(&mut self, from: &NodeQuery, to: Option<&NodeQuery>) {
+        let at = self.at();
+        let pivots = match self.core.pivots(&at, from, to) {
+            Ok(pivots) => pivots,
+            Err(e) => return self.command_error(e),
+        };
+        if self.format == OutputFormat::Ndjson {
+            for path in &pivots.paths {
+                print_check_row(&at, pivot_path_json(&pivots.from, path));
+            }
+        } else {
+            print_pivot_tree(&pivots.from, &pivots.paths);
+        }
+        match to {
+            Some(to) if pivots.paths.is_empty() => {
+                eprintln!("No path from {} to {}.", pivots.from.name, to.name);
+            }
+            Some(_) => {}
+            None => eprintln!("Reached {} node(s).", pivots.paths.len()),
         }
     }
 
@@ -2904,6 +2935,65 @@ fn paths_json(paths: &[rbac::AccessPath]) -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+/// `name (/system /kind)`, how `pivots` shows a node.
+fn pivot_node(node: &Node) -> String {
+    format!("{} ({} {})", node.name, node.system, node.kind)
+}
+
+/// Print `pivots`' paths as one tree under `from`. Paths are printed in
+/// order of their steps, and a step already printed for an earlier path
+/// (a shared prefix) is not printed again.
+fn print_pivot_tree(from: &Node, paths: &[PivotPath]) {
+    println!("{}", pivot_node(from));
+    let mut ordered: Vec<&PivotPath> = paths.iter().collect();
+    ordered.sort_by(|a, b| {
+        let key = |path: &PivotPath| {
+            path.steps
+                .iter()
+                .map(|step| step.to.clone())
+                .collect::<Vec<_>>()
+        };
+        key(a).cmp(&key(b))
+    });
+    let mut printed: HashSet<&Node> = HashSet::new();
+    for path in ordered {
+        let mut previous = from;
+        for (depth, step) in path.steps.iter().enumerate() {
+            if printed.insert(&step.to) {
+                let grantee = if &step.grantee == previous {
+                    String::new()
+                } else {
+                    format!("as {} ", pivot_node(&step.grantee))
+                };
+                println!(
+                    "{}{grantee}{} [{}] → {}",
+                    "  ".repeat(depth + 1),
+                    step.mechanisms.join(", "),
+                    step.source,
+                    pivot_node(&step.to)
+                );
+            }
+            previous = &step.to;
+        }
+    }
+}
+
+/// One `pivots` path as an ndjson row: `from` and `to` first, so
+/// [`print_check_row`] puts `at` after them.
+fn pivot_path_json(from: &Node, path: &PivotPath) -> serde_json::Value {
+    let node = |node: &Node| serde_json::json!({ "name": node.name, "system": node.system, "kind": node.kind });
+    serde_json::json!({
+        "from": node(from),
+        "to": node(&path.to),
+        "steps": path.steps.iter().map(|step| serde_json::json!({
+            "grantee": node(&step.grantee),
+            "mechanisms": step.mechanisms,
+            "source": step.source,
+            "to": node(&step.to),
+        })).collect::<Vec<_>>(),
+    })
 }
 
 /// Print one ndjson row of an `rbac::`/`sched::` check, tagged with the

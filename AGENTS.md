@@ -45,6 +45,10 @@ Only the non-obvious parts:
   keep it that way. `k8s_`-prefixed rule files are Kubernetes only.
   `examples/eks-pod-identity/` adds AWS with rule files alone, and
   `tests/cross_system.rs` checks that it still does.
+  The `pivots` command (`src/pivots.rs`) is a naive walk of that graph
+  for systems without first-class commands. It only picks one shortest
+  path and formats it; `tests/pivot_walk` checks it reaches what
+  `controls` does.
 - `hack/relation-sizes.sh` counts rows per RBAC and escalation relation;
   use it to compare rule revisions.
 - `src/engine.rs` - `Engine` and the `Backend` trait, with two backends
