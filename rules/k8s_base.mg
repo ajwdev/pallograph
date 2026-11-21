@@ -1,11 +1,11 @@
-# Base rules - convenience predicates over k8s/5
+# Base rules - convenience predicates over k8s/6
 # These would ship with your controller
 
 pod(Namespace, Name, Data) :-
-    k8s("v1", "Pod", Namespace, Name, Data).
+    k8s("v1", "Pod", Namespace, Name, Data, _).
 
 serviceaccount(Namespace, Name, Data) :-
-    k8s("v1", "ServiceAccount", Namespace, Name, Data).
+    k8s("v1", "ServiceAccount", Namespace, Name, Data, _).
 
 # Extract common fields
 pod_sa(Namespace, PodName, SAName) :-

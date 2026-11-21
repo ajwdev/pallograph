@@ -1129,6 +1129,14 @@ impl Engine {
         rule_sources: Vec<String>,
         backend: Box<dyn Backend>,
     ) -> Result<Self> {
+        // The EDB is a set, as in Datalog: a fact listed twice (in a sourced
+        // file, say) is one fact. DD counts copies, so a duplicate would
+        // otherwise skew its aggregates.
+        let mut edb_index: HashSet<Fact> = HashSet::with_capacity(edb.len());
+        let edb: Vec<Fact> = edb
+            .into_iter()
+            .filter(|fact| edb_index.insert(fact.clone()))
+            .collect();
         // Backends with a persistent session (DD) start it here, so fact
         // mutations feed deltas to the worker rather than forcing a full
         // recompute. Rule changes still trigger a full worker rebuild.
@@ -1149,7 +1157,7 @@ impl Engine {
             has_session = session.is_some(),
             "backend session ready"
         );
-        let edb_index = edb.iter().cloned().collect();
+
         Ok(Self {
             edb,
             edb_index,
@@ -1329,8 +1337,8 @@ impl Engine {
         removed
     }
 
-    /// Remove one copy of a fact from the EDB and its index, and buffer the
-    /// retraction for the live session without committing it, so a batch of
+    /// Remove a fact from the EDB and its index, and buffer the retraction
+    /// for the live session without committing it, so a batch of
     /// retractions can share one commit.
     fn remove_fact(&mut self, relation: &str, tuple: &[Value]) -> bool {
         let Some(pos) = self
@@ -1345,13 +1353,8 @@ impl Engine {
             s.retract(relation.to_string(), row);
         }
         let entry = self.edb.remove(pos);
+        self.edb_index.remove(&entry);
         self.note_change();
-        // The EDB can hold a fact more than once (two objects that emit the
-        // same fact each add a copy); the index keeps the fact until the
-        // last copy goes.
-        if !self.edb.contains(&entry) {
-            self.edb_index.remove(&entry);
-        }
         true
     }
 
@@ -1368,23 +1371,27 @@ impl Engine {
     /// Insert each object's facts, first retracting the facts the same
     /// object (same group, kind, namespace and name, any version) emitted
     /// when it was last loaded, at startup or earlier in the session.
-    /// Without this the EDB would hold both versions' `k8s/5` rows and rules
+    /// Without this the EDB would hold both versions' `k8s/6` rows and rules
     /// would see the union of old and new.
     ///
-    /// The old facts are not stored anywhere: each matching `k8s/5` row's
+    /// The old facts are not stored anywhere: each matching `k8s/6` row's
     /// Data holds the whole object, so [`crate::edb::regenerate_facts`]
     /// rebuilds it and recomputes what it emitted. Finding the rows is one
     /// scan of the EDB per call.
     ///
     /// A fact both versions emit is retracted and re-added, which nets out.
-    /// A fact another object also emits survives, as each object added its
-    /// own copy.
+    /// No two objects emit the same fact (see `add_object` in
+    /// [`crate::edb`]), so retracting one object's facts never takes another's.
+    ///
+    /// A new version with a made-up UID (a manifest, see
+    /// [`crate::edb::ObjectKey::made_up_uid`]) takes the UID of the object it
+    /// replaces, so a change to a live object keeps that object's identity.
     pub fn upsert_objects(&mut self, objects: Vec<ObjectFacts>) -> ApplySummary {
         self.apply_changes(objects.into_iter().map(Change::Upsert).collect())
     }
 
     /// Apply a batch of adds, updates and retracts to the live EDB in one
-    /// pass: find the `k8s/5` rows the batch touches with a single EDB scan,
+    /// pass: find the `k8s/6` rows the batch touches with a single EDB scan,
     /// retract each along with the facts it emitted (via
     /// [`crate::edb::regenerate_facts`]), then insert the upserts' facts.
     /// The whole batch shares one session commit (or one rebuild), so a delta
@@ -1407,11 +1414,12 @@ impl Engine {
         // Later copies of a key win, matching a single object re-listed in
         // one batch. The collapsed count is not reported: nothing was
         // replaced in the EDB, the batch just named the object twice.
-        let (upserts, _collapsed) = last_per_key(upserts);
-        let upsert_keys: HashSet<&ObjectKey> = upserts.iter().map(|object| &object.key).collect();
+        let (mut upserts, _collapsed) = last_per_key(upserts);
+        let upsert_keys: HashSet<ObjectKey> =
+            upserts.iter().map(|object| object.key.clone()).collect();
         let upsert_count = upsert_keys.len();
 
-        let mut present_upsert: HashSet<ObjectKey> = HashSet::new();
+        let mut present_upsert: HashMap<ObjectKey, Value> = HashMap::new();
         let mut present_retract: HashSet<ObjectKey> = HashSet::new();
         let previous: Vec<Vec<Value>> = self
             .edb
@@ -1420,7 +1428,7 @@ impl Engine {
             .filter_map(|(_, tuple)| {
                 let key = ObjectKey::of_k8s_tuple(tuple)?;
                 if upsert_keys.contains(&key) {
-                    present_upsert.insert(key);
+                    present_upsert.insert(key, tuple[crate::edb::columns::k8s::UID].clone());
                     Some(tuple.clone())
                 } else if retract_keys.contains(&key) {
                     present_retract.insert(key);
@@ -1443,7 +1451,19 @@ impl Engine {
                 }
             }
         }
+        for object in &mut upserts {
+            if let Some(uid) = present_upsert.get(&object.key)
+                && crate::edb::has_made_up_uid(object)
+            {
+                crate::edb::set_object_uid(object, uid);
+            }
+        }
         for entry in upserts.into_iter().flat_map(|object| object.facts) {
+            // A hand-written fact (`+`) can match one an object emits; the
+            // EDB holds it once.
+            if self.edb_index.contains(&entry) {
+                continue;
+            }
             if let Some(s) = &self.session {
                 if s.has_input(&entry.0) {
                     s.insert(
@@ -1474,7 +1494,7 @@ impl Engine {
     }
 
     /// Which of `keys` name an object loaded in the live EDB, found with one
-    /// scan of its `k8s/5` rows.
+    /// scan of its `k8s/6` rows.
     pub fn loaded_object_keys(&self, keys: &HashSet<ObjectKey>) -> HashSet<ObjectKey> {
         self.edb
             .iter()
@@ -1636,18 +1656,34 @@ impl Engine {
 }
 
 /// Keep only the last object loaded under each key, in load order, and
-/// count how many earlier ones were dropped.
+/// count how many earlier ones were dropped. A kept object with a made-up
+/// UID takes the real UID of a dropped copy, if one had it.
 fn last_per_key(objects: Vec<ObjectFacts>) -> (Vec<ObjectFacts>, usize) {
     let mut last: HashMap<ObjectKey, usize> = HashMap::new();
+    // The last real UID per key, for a later copy with a made-up one: a
+    // manifest listed after the cluster snapshot it changes.
+    let mut real_uid: HashMap<ObjectKey, Value> = HashMap::new();
     for (i, object) in objects.iter().enumerate() {
         last.insert(object.key.clone(), i);
+        if !crate::edb::has_made_up_uid(object)
+            && let Some(uid) = crate::edb::object_uid(object)
+        {
+            real_uid.insert(object.key.clone(), uid.clone());
+        }
     }
     let dropped = objects.len() - last.len();
     let kept = objects
         .into_iter()
         .enumerate()
         .filter(|(i, object)| last[&object.key] == *i)
-        .map(|(_, object)| object)
+        .map(|(_, mut object)| {
+            if crate::edb::has_made_up_uid(&object)
+                && let Some(uid) = real_uid.get(&object.key)
+            {
+                crate::edb::set_object_uid(&mut object, uid);
+            }
+            object
+        })
         .collect();
     (kept, dropped)
 }
@@ -1988,20 +2024,22 @@ mod tests {
         assert_eq!(dd.query_live("blocked").unwrap(), vec![vec![s("c")]]);
     }
 
-    /// Retracting one of two copies of a fact keeps it in the duplicate
-    /// index, so re-adding it is still a no-op until the last copy goes.
+    /// A fact listed twice at startup is one fact, and the duplicate index
+    /// follows the EDB through retract, re-add and restore.
     #[test]
     fn retract_keeps_index_in_sync() {
         let (mut edb, rules) = diamond();
         edb.push(edb[0].clone());
         let mut engine = Engine::from_parts(edb, rules, Box::new(InterpreterBackend)).unwrap();
+        assert_eq!(rows(&engine, "edge").len(), 4, "duplicate dropped");
         let saved = engine.save_inputs();
         let ab = vec![s("a"), s("b")];
         assert!(engine.retract_fact("edge", &ab));
-        assert!(!engine.add_fact("edge".to_string(), ab.clone()));
-        assert!(engine.retract_fact("edge", &ab));
+        assert!(!engine.retract_fact("edge", &ab), "only one copy");
         assert!(engine.add_fact("edge".to_string(), ab.clone()));
+        assert!(!engine.add_fact("edge".to_string(), ab.clone()));
 
+        engine.retract_fact("edge", &ab);
         engine.restore_inputs(&saved).unwrap();
         assert!(!engine.add_fact("edge".to_string(), ab));
     }
@@ -2180,6 +2218,104 @@ mod tests {
                 "pool",
             ))]);
             assert_eq!(rows(&engine, "nodepool_label"), [zone("b")]);
+        }
+    }
+
+    /// The `Uid` column of the one `k8s/6` row.
+    fn only_uid(engine: &Engine) -> Value {
+        let k8s = rows(engine, "k8s");
+        assert_eq!(k8s.len(), 1);
+        k8s[0][crate::edb::columns::k8s::UID].clone()
+    }
+
+    /// `config_map` with `metadata.uid` set, as read from a cluster.
+    fn live_config_map(name: &str, tier: &str, uid: &str) -> serde_json::Value {
+        let mut json = config_map(name, tier);
+        json["metadata"]["uid"] = serde_json::json!(uid);
+        json
+    }
+
+    /// An object keeps its own UID; one without gets a `plg:` UID made up
+    /// from its key, the same every load.
+    #[test]
+    fn uid_is_real_or_made_up_from_key() {
+        let live = one(live_config_map(
+            "x",
+            "web",
+            "6f1c2d3e-0000-4000-8000-000000000001",
+        ));
+        assert_eq!(
+            crate::edb::object_uid(&live),
+            Some(&s("6f1c2d3e-0000-4000-8000-000000000001"))
+        );
+        let manifest = one(config_map("x", "web"));
+        assert_eq!(
+            crate::edb::object_uid(&manifest),
+            Some(&s("plg:core/ConfigMap/default/x"))
+        );
+        let pool = one(node_pool("karpenter.sh/v1", "a"));
+        assert_eq!(
+            crate::edb::object_uid(&pool),
+            Some(&s("plg:karpenter.sh/NodePool/pool"))
+        );
+    }
+
+    /// A manifest that changes a live object takes the live object's UID,
+    /// whether it is loaded later in the session or listed after the
+    /// cluster snapshot at startup. A net-new manifest keeps its made-up one.
+    #[test]
+    fn manifest_takes_uid_of_object_it_changes() {
+        let uid = s("6f1c2d3e-0000-4000-8000-000000000001");
+        let startup = objects(vec![live_config_map(
+            "x",
+            "web",
+            "6f1c2d3e-0000-4000-8000-000000000001",
+        )]);
+        for mut engine in object_engines(startup) {
+            engine.upsert_objects(objects(vec![config_map("x", "api")]));
+            assert_eq!(tiers(&engine), [(s("x"), s("api"))]);
+            assert_eq!(only_uid(&engine), uid, "after upsert");
+        }
+
+        let startup = objects(vec![
+            live_config_map("x", "web", "6f1c2d3e-0000-4000-8000-000000000001"),
+            config_map("x", "api"),
+        ]);
+        for engine in object_engines(startup) {
+            assert_eq!(tiers(&engine), [(s("x"), s("api"))]);
+            assert_eq!(only_uid(&engine), uid, "at startup");
+        }
+
+        for mut engine in object_engines(vec![]) {
+            engine.upsert_objects(objects(vec![config_map("y", "db")]));
+            assert_eq!(only_uid(&engine), s("plg:core/ConfigMap/default/y"));
+        }
+    }
+
+    /// The EDB is a set: a fact listed twice at startup is one fact, so an
+    /// aggregate over it counts it once on DD as on the interpreter.
+    #[test]
+    fn duplicate_startup_fact_counts_once() {
+        let edb = vec![
+            ("item".into(), vec![s("a"), Value::Number(5)]),
+            ("item".into(), vec![s("a"), Value::Number(5)]),
+            ("item".into(), vec![s("b"), Value::Number(7)]),
+        ];
+        let rules = vec![
+            "Decl item(K, V).\nDecl total(N, S).\n\
+             total(N, S) :- item(K, V) |> do fn:group_by(), let N = fn:count(K), let S = fn:sum(V)."
+                .to_string(),
+        ];
+        let backends: [Box<dyn Backend>; 2] = [
+            Box::new(InterpreterBackend),
+            Box::new(DdBackend { provenance: false }),
+        ];
+        for backend in backends {
+            let engine = Engine::from_parts(edb.clone(), rules.clone(), backend).unwrap();
+            assert_eq!(
+                rows(&engine, "total"),
+                [vec![Value::Number(2), Value::Number(12)]]
+            );
         }
     }
 
