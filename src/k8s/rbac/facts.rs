@@ -295,6 +295,18 @@ impl Writer {
     }
 }
 
+/// The writer a `(Name, Kind)` pair names, with Kind a subject kind or
+/// `/assumed_user`.
+pub fn writer(name: &str, kind: &Value) -> Option<Writer> {
+    Some(match kind {
+        Value::Name(kind) if kind.as_str() == "/assumed_user" => Writer {
+            subject: Subject::username(name),
+            assumed: true,
+        },
+        kind => Writer::login(&Subject::new(SubjectKind::from_value(kind)?, name)),
+    })
+}
+
 /// Rows of `relation` that start with a writer, `(Name, Kind, ...)` with
 /// Kind a subject kind or `/assumed_user`, followed by N strings.
 pub fn parse_writer_rows<const N: usize>(
@@ -305,16 +317,7 @@ pub fn parse_writer_rows<const N: usize>(
         .filter_map(|row| {
             let parsed = match row.as_slice() {
                 [Value::String(name), kind, rest @ ..] if rest.len() == N => (|| {
-                    let writer = match kind {
-                        Value::Name(kind) if kind.as_str() == "/assumed_user" => Writer {
-                            subject: Subject::username(name.as_str()),
-                            assumed: true,
-                        },
-                        kind => Writer::login(&Subject::new(
-                            SubjectKind::from_value(kind)?,
-                            name.clone(),
-                        )),
-                    };
+                    let writer = writer(name, kind)?;
                     let rest: Vec<String> = rest
                         .iter()
                         .map(|value| string(value).cloned())
@@ -538,35 +541,6 @@ pub fn parse_binding_subject(rows: &[Vec<Value>]) -> Vec<(Subject, (String, Stri
             };
             if parsed.is_none() {
                 unexpected_row("binding_subject", row);
-            }
-            parsed
-        })
-        .collect()
-}
-
-/// Rows of a relation keyed by a binding subject, `(Name, Kind, ...)` with
-/// `N` string columns after the kind.
-pub fn parse_subject_rows<const N: usize>(
-    relation: &str,
-    rows: &[Vec<Value>],
-) -> Vec<(Subject, [String; N])> {
-    rows.iter()
-        .filter_map(|row| {
-            let parsed = match row.as_slice() {
-                [Value::String(name), kind, rest @ ..] if rest.len() == N => (|| {
-                    let rest: Vec<String> = rest
-                        .iter()
-                        .map(|value| string(value).cloned())
-                        .collect::<Option<_>>()?;
-                    Some((
-                        Subject::new(SubjectKind::from_value(kind)?, name.clone()),
-                        rest.try_into().ok()?,
-                    ))
-                })(),
-                _ => None,
-            };
-            if parsed.is_none() {
-                unexpected_row(relation, row);
             }
             parsed
         })

@@ -1,10 +1,10 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Escalation rules (rules/escalation.mg) over small hand-written clusters,
-//! checked on both backends. Each test reads the derived relations
-//! directly, so it pins what the rules say independently of the Rust
-//! consumers in src/rbac.
+//! Escalation rules (rules/escalation.mg and rules/closure.mg) over small
+//! hand-written clusters, checked on both backends. Each test reads the
+//! derived relations directly, so it pins what the rules say
+//! independently of the Rust consumers in src/k8s/rbac.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -505,6 +505,236 @@ fn unnamed_impersonation_reaches_every_identity() {
                 "system:serviceaccount:team-b:admin",
             ],
             "{backend}"
+        );
+    }
+}
+
+// ---- The hop relation and the closure (rules/closure.mg) ----
+
+fn string(value: &str) -> Value {
+    Value::String(value.into())
+}
+
+fn name(value: &str) -> Value {
+    Value::Name(value.into())
+}
+
+fn has_value_row(result: &EvalStore, relation: &str, row: &[Value]) -> bool {
+    result.scan(relation).iter().any(|r| r.as_slice() == row)
+}
+
+/// The first column of `relation` never names a group that a binding
+/// subjects: only users and ServiceAccounts are principals.
+fn assert_no_group_principals(backend: &str, result: &EvalStore, relation: &str) {
+    let groups: Vec<&Value> = result
+        .scan("known_principal")
+        .iter()
+        .filter(|row| row[0] == name("/group"))
+        .map(|row| &row[1])
+        .collect();
+    let leaked: Vec<&Vec<Value>> = result
+        .scan(relation)
+        .iter()
+        .filter(|row| groups.contains(&&row[0]))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "{backend}: groups as principals in {relation}: {leaked:?}"
+    );
+}
+
+// A hop records how (Mechanism) and why (Source): the group execs reaches
+// demo:target by exec with its own grants, and writer by binding a role
+// that allows exec.
+#[test]
+fn subject_hop_records_mechanism_and_source() {
+    let mut manifests = exec_into_admin_pod();
+    manifests.push(cluster_role(
+        "pod-exec",
+        r#"[{"apiGroups":[""],"resources":["pods/exec"],"verbs":["create"]}]"#,
+    ));
+    manifests.push(cluster_role(
+        "binder",
+        r#"[{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterrolebindings"],"verbs":["create"]},{"apiGroups":["rbac.authorization.k8s.io"],"resources":["clusterroles"],"resourceNames":["pod-exec"],"verbs":["bind"]}]"#,
+    ));
+    manifests.push(cluster_role_binding("writer", "binder", "User", "writer"));
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+
+    let hop = |subject: &str, kind: &str, source: &str| {
+        [
+            string(subject),
+            name("/k8s"),
+            name(kind),
+            string(TARGET),
+            name("/k8s"),
+            name("/serviceaccount"),
+            name("/pod_exec"),
+            name(source),
+        ]
+    };
+    for (backend, result) in evaluate(&manifests, &[]) {
+        assert!(
+            has_value_row(&result, "subject_hop", &hop("execs", "/group", "/grant")),
+            "{backend}: execs execs into the pod, got {:?}",
+            result.scan("subject_hop")
+        );
+        assert!(
+            has_value_row(
+                &result,
+                "subject_hop",
+                &hop("writer", "/user", "/rbac_write")
+            ),
+            "{backend}: writer binds pod-exec, got {:?}",
+            result.scan("subject_hop")
+        );
+        assert!(
+            !has_value_row(&result, "subject_hop", &hop("writer", "/user", "/grant")),
+            "{backend}: writer holds no exec grant of its own"
+        );
+        assert!(
+            has_row(&result, "controls_identity", &["writer", TARGET]),
+            "{backend}: writer reaches {TARGET} after the write"
+        );
+        assert!(
+            !has_row(&result, "escalation_hop", &["writer", TARGET]),
+            "{backend}: escalation_hop is what writer may do now"
+        );
+        assert_no_group_principals(backend, &result, "controls_identity");
+        assert_no_group_principals(backend, &result, "controls_group");
+    }
+}
+
+// Assumed through escalation, a user with user_groups groups writes as
+// /assumed_user, never as the /user it writes as logged in.
+#[test]
+fn acts_as_assumed_writes_uses_assumed_user() {
+    let manifests = [cluster_role_binding("bob", "node-reader", "User", "bob")];
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+    let acts_as = |kind: &str, mode: &str| {
+        [
+            string("bob"),
+            name("/k8s"),
+            string("bob"),
+            name("/k8s"),
+            name(kind),
+            name(mode),
+        ]
+    };
+
+    for (backend, result) in evaluate(&manifests, &[("bob", "execs")]) {
+        assert!(
+            has_value_row(
+                &result,
+                "acts_as",
+                &acts_as("/assumed_user", "/assumed_writes")
+            ),
+            "{backend}: got {:?}",
+            result.scan("acts_as")
+        );
+        assert!(
+            !has_value_row(&result, "acts_as", &acts_as("/user", "/assumed_writes")),
+            "{backend}: assumed bob does not write as /user"
+        );
+        assert!(
+            has_value_row(&result, "acts_as", &acts_as("/user", "/login")),
+            "{backend}: bob logged in acts as /user"
+        );
+        let login_groups: Vec<&Value> = result
+            .scan("acts_as")
+            .iter()
+            .filter(|row| row[0] == string("bob") && row[4] == name("/group"))
+            .filter(|row| row[5] == name("/login"))
+            .map(|row| &row[2])
+            .collect();
+        assert!(
+            login_groups.contains(&&string("execs")),
+            "{backend}: bob logged in is in execs, got {login_groups:?}"
+        );
+    }
+}
+
+// Group a may impersonate group b, and b group c. Members of a gain b's
+// grants, but a request impersonating b cannot impersonate again, so a
+// reaches b and not c, both for the group and for alice, a member.
+#[test]
+fn impersonated_group_does_not_impersonate_further() {
+    let manifests = [
+        cluster_role(
+            "impersonate-b",
+            r#"[{"apiGroups":[""],"resources":["groups"],"resourceNames":["b"],"verbs":["impersonate"]}]"#,
+        ),
+        cluster_role(
+            "impersonate-c",
+            r#"[{"apiGroups":[""],"resources":["groups"],"resourceNames":["c"],"verbs":["impersonate"]}]"#,
+        ),
+        cluster_role(
+            "node-reader",
+            r#"[{"apiGroups":[""],"resources":["nodes"],"verbs":["get"]}]"#,
+        ),
+        cluster_role_binding("a", "impersonate-b", "Group", "a"),
+        cluster_role_binding("b", "impersonate-c", "Group", "b"),
+        cluster_role_binding("c", "node-reader", "Group", "c"),
+    ];
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+
+    for (backend, result) in evaluate(&manifests, &[("alice", "a")]) {
+        assert!(
+            has_row(&result, "group_controls_group", &["a", "b"]),
+            "{backend}: a impersonates b"
+        );
+        assert!(
+            !has_row(&result, "group_controls_group", &["a", "c"]),
+            "{backend}: got {:?}",
+            result.scan("group_controls_group")
+        );
+        assert!(
+            has_row(&result, "controls_group", &["alice", "b"]),
+            "{backend}: alice impersonates b"
+        );
+        assert!(
+            !has_row(&result, "controls_group", &["alice", "c"]),
+            "{backend}: got {:?}",
+            result.scan("controls_group")
+        );
+        assert_no_group_principals(backend, &result, "controls_group");
+    }
+}
+
+// alice and bob may impersonate each other. A path back to the principal
+// through another identity is a controls_identity row, as it always has
+// been.
+#[test]
+fn mutual_impersonation_records_the_cycle() {
+    let manifests = [
+        cluster_role(
+            "impersonate-bob",
+            r#"[{"apiGroups":[""],"resources":["users"],"resourceNames":["bob"],"verbs":["impersonate"]}]"#,
+        ),
+        cluster_role(
+            "impersonate-alice",
+            r#"[{"apiGroups":[""],"resources":["users"],"resourceNames":["alice"],"verbs":["impersonate"]}]"#,
+        ),
+        cluster_role_binding("alice", "impersonate-bob", "User", "alice"),
+        cluster_role_binding("bob", "impersonate-alice", "User", "bob"),
+    ];
+    let manifests: Vec<&str> = manifests.iter().map(String::as_str).collect();
+
+    for (backend, result) in evaluate(&manifests, &[]) {
+        for row in [
+            ["alice", "bob"],
+            ["alice", "alice"],
+            ["bob", "alice"],
+            ["bob", "bob"],
+        ] {
+            assert!(
+                has_row(&result, "controls_identity", &row),
+                "{backend}: {row:?}, got {:?}",
+                result.scan("controls_identity")
+            );
+        }
+        assert!(
+            !has_row(&result, "escalation_hop", &["alice", "alice"]),
+            "{backend}: alice cannot impersonate herself"
         );
     }
 }

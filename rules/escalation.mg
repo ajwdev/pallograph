@@ -1,25 +1,20 @@
 # Privilege escalation rules.
 #
-# Models paths by which one principal can acquire the effective permissions of
-# another identity. The key predicates:
+# Models the single hops by which one principal can acquire the effective
+# permissions of another identity, as subject_hop rows with Source /grant,
+# and the subjects an identity acts as (acts_as). closure.mg chains the hops
+# into controls_identity, controls_group, group_controls_identity and
+# group_controls_group.
 #
-#   controls_identity(P, Target) - P can assume Target's identity via at least
-#       one escalation path. Transitively closed: if A->B->C then A controls C,
-#       also when a step goes through a group P can impersonate.
-#   controls_group(P, Group) - P, or an identity it controls, can impersonate
-#       Group, which holds grants.
-#
-#   group_controls_identity(Group, Target), group_controls_group(Group, Other)
-#       - the same, starting from a group's own grants. Any member of Group
-#       gains what they reach.
-#
-# Principals (P, Target) are users and ServiceAccounts, by username. A group
-# is never a principal: nobody authenticates as one. Impersonating a group is
-# recorded in controls_group, and P then holds the group's grants, so
-# whatever the group reaches (group_escalation_hop) P reaches too.
-# Kubernetes only accepts Impersonate-Group alongside Impersonate-User; that
-# second permission is not required here, which over-approximates. A group
-# can also be where a path starts; see "Escalation from groups".
+# Principals are users and ServiceAccounts, by username. A group is never a
+# principal: nobody authenticates as one. Impersonating a group is a hop to
+# the group, and the impersonator then holds the group's grants, so whatever
+# the group's own grants reach the impersonator reaches too. Kubernetes only
+# accepts Impersonate-Group alongside Impersonate-User; that second
+# permission is not required here, which over-approximates. A group can also
+# be where a path starts: its members are mostly unknown (membership comes
+# from the authenticator, and user_groups only lists what the caller
+# supplied), so closure.mg starts paths from a group's own grants too.
 #
 # Escalation paths modeled:
 #   1. Impersonation  - impersonate verb on users/serviceaccounts/groups
@@ -33,9 +28,10 @@
 # Kubernetes adds (implicit_group): an impersonated request carries the
 # impersonated username plus system:authenticated (and, for a ServiceAccount,
 # its ServiceAccount groups), and other groups only through Impersonate-Group
-# headers, which controls_group models. A token or a pod gives a
+# headers, which hops to groups model. A token or a pod gives a
 # ServiceAccount its usual groups. So the first hop of a path uses
-# principal_subject, and every later hop uses assumed_subject.
+# principal_subject (acts_as /login), and every later hop uses
+# assumed_subject (acts_as /assumed).
 #
 # What P can do through escalation is not materialized. Join on demand:
 #
@@ -220,196 +216,53 @@ subject_impersonatable_sa(Name, Kind, SANs, SAName) :-
 user_has_own_grant(Username) :-
     direct_perm(Username, /user, _, _, _, _, _).
 
-Decl subject_escalation_hop(Name, Kind, Target)
-  descr [
-    doc("Single-step escalation using only the grants of binding subject (Kind, Name): whoever acts as that subject can assume Target's identity via one mechanism."),
-    arg(Name, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
-    arg(Kind, "/user, /group or /serviceaccount"),
-    arg(Target, "the user or ServiceAccount whose identity can be directly assumed")
-  ].
+group_has_grant(Group) :-
+    direct_perm(Group, /group, _, _, _, _, _).
 
-subject_escalation_hop(Name, Kind, Target) :-
+# ---- Hops from one binding subject (subject_hop, Source /grant) ----
+
+subject_hop(Name, /k8s, Kind, Target, /k8s, /serviceaccount, /impersonate, /grant) :-
     subject_impersonatable_sa(Name, Kind, SANs, SAName)
     |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
 
-subject_escalation_hop(Name, Kind, Target) :-
+subject_hop(Name, /k8s, Kind, Target, /k8s, /serviceaccount, /token, /grant) :-
     subject_token_accessible_sa(Name, Kind, SANs, SAName)
     |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
 
-subject_escalation_hop(Name, Kind, Target) :-
+subject_hop(Name, /k8s, Kind, Target, /k8s, /serviceaccount, /pod_exec, /grant) :-
     subject_exec_reachable_sa(Name, Kind, PodNs, SAName)
     |> let Target = fn:string:concat("system:serviceaccount:", PodNs, ":", SAName).
 
-subject_escalation_hop(Name, Kind, Target) :-
+subject_hop(Name, /k8s, Kind, Target, /k8s, /serviceaccount, /pod_create, /grant) :-
     subject_pod_creatable_sa(Name, Kind, SANs, SAName)
     |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
 
 # Cluster-wide grants only: impersonating a user is a cluster-scoped request.
 # A named grant reaches only the users it names.
-subject_escalation_hop(Name, Kind, Target) :-
+subject_hop(Name, /k8s, Kind, Target, /k8s, /user, /impersonate, /grant) :-
     grant_user_impersonate(Name, Kind, "", /any),
     user_has_own_grant(Target).
 
-subject_escalation_hop(Name, Kind, Target) :-
+subject_hop(Name, /k8s, Kind, Target, /k8s, /user, /impersonate, /grant) :-
     grant_user_impersonate(Name, Kind, "", Target),
     user_has_own_grant(Target).
 
-# ---- Escalation from a principal ----
-#
-# Single-step escalation: P can directly assume Target's identity via exactly
-# one mechanism. Keeping this as a separate predicate (rather than inlining into
-# controls_identity) is what makes the transitive closure below BFS-ordered:
-# semi-naive evaluation extends controls_identity by one hop per fixpoint
-# iteration, so shorter paths are always derived before longer ones. Because
-# provenance records only the first (is_new) insertion, why on any
-# controls_identity fact will show the shortest path to the target.
-
-Decl escalation_hop(Principal, Target)
-  descr [
-    doc("Single-step escalation: Principal, logged in with all its groups, can assume Target's identity via one mechanism."),
-    arg(Principal, "the user or ServiceAccount performing the escalation"),
-    arg(Target, "the user or ServiceAccount whose identity Principal can directly assume")
-  ].
-
-escalation_hop(P, Target) :-
-    principal_subject(P, Kind, Name),
-    subject_escalation_hop(Name, Kind, Target).
-
-Decl assumed_escalation_hop(Identity, Target)
-  descr [
-    doc("Single-step escalation from an identity assumed through escalation, which acts only as its assumed_subject subjects."),
-    arg(Identity, "the user or ServiceAccount reached by an earlier hop"),
-    arg(Target, "the user or ServiceAccount whose identity Identity can directly assume")
-  ].
-
-assumed_escalation_hop(Identity, Target) :-
-    assumed_subject(Identity, Kind, Name),
-    subject_escalation_hop(Name, Kind, Target).
-
-group_has_grant(Group) :-
-    direct_perm(Group, /group, _, _, _, _, _).
-
-# Group impersonation, from a binding subject's grants. Like user
-# impersonation, only a cluster-wide grant counts: a RoleBinding allowing
-# impersonate on groups allows nothing. A named grant reaches only the
-# groups it names, and only a group that holds a grant gains anything.
-Decl subject_impersonatable_group(Name, Kind, Group)
-  descr [
-    doc("Whoever acts as binding subject (Kind, Name) can impersonate Group, which holds grants."),
-    arg(Name, "subject name: user or group name, or system:serviceaccount:<ns>:<name>"),
-    arg(Kind, "/user, /group or /serviceaccount"),
-    arg(Group, "group whose direct_perm grants the impersonator can use")
-  ].
-
-subject_impersonatable_group(Name, Kind, Group) :-
+# Group impersonation. Like user impersonation, only a cluster-wide grant
+# counts: a RoleBinding allowing impersonate on groups allows nothing. A
+# named grant reaches only the groups it names, and only a group that holds
+# a grant gains anything.
+subject_hop(Name, /k8s, Kind, Group, /k8s, /group, /impersonate, /grant) :-
     grant_group_impersonate(Name, Kind, "", /any),
     group_has_grant(Group).
 
-subject_impersonatable_group(Name, Kind, Group) :-
+subject_hop(Name, /k8s, Kind, Group, /k8s, /group, /impersonate, /grant) :-
     grant_group_impersonate(Name, Kind, "", Group),
     group_has_grant(Group).
 
-# The same from a principal as it logs in and from an assumed identity.
-perm_group_impersonate(P, Group) :-
-    principal_subject(P, Kind, Name),
-    subject_impersonatable_group(Name, Kind, Group).
+# ---- Subjects an identity acts as (acts_as) ----
 
-assumed_group_impersonate(Identity, Group) :-
-    assumed_subject(Identity, Kind, Name),
-    subject_impersonatable_group(Name, Kind, Group).
+acts_as(Identity, /k8s, Name, /k8s, Kind, /login) :-
+    principal_subject(Identity, Kind, Name).
 
-# ---- controls_identity and controls_group ----
-#
-# One closure over three kinds of step: a hop from P as it logs in, a hop
-# from an identity already assumed, and a hop from a group P can
-# impersonate, whose grants P then holds. Each recursive rule extends a path
-# by exactly one hop, preserving BFS order. The two relations are mutually
-# recursive: impersonating groups can be what an assumed identity is
-# allowed to do, and a group's grants can reach the next identity.
-
-Decl controls_identity(Principal, Target)
-  descr [
-    doc("Principal can assume Target's identity via one or more escalation hops, through identities and impersonated groups (transitively closed)."),
-    arg(Principal, "the user or ServiceAccount that gains control"),
-    arg(Target, "the user or ServiceAccount Principal ultimately controls")
-  ].
-
-controls_identity(P, Target) :- escalation_hop(P, Target), P != Target.
-
-controls_identity(P, Target) :-
-    controls_identity(P, Mid),
-    assumed_escalation_hop(Mid, Target).
-
-controls_identity(P, Target) :-
-    controls_group(P, Group),
-    group_escalation_hop(Group, Target),
-    P != Target.
-
-Decl controls_group(Principal, Group)
-  descr [
-    doc("Principal, or an identity it controls, can impersonate Group, which holds grants."),
-    arg(Principal, "user name or system:serviceaccount:<ns>:<name>"),
-    arg(Group, "group whose direct_perm grants Principal can use")
-  ].
-
-controls_group(P, Group) :-
-    perm_group_impersonate(P, Group).
-
-controls_group(P, Group) :-
-    controls_identity(P, Mid),
-    assumed_group_impersonate(Mid, Group).
-
-# ---- Escalation from groups ----
-#
-# A group is never a principal, but a binding can grant a group the
-# permissions above. Group members are mostly unknown (membership comes from
-# the authenticator, and user_groups only lists what the caller supplied), so
-# paths that start from known users and ServiceAccounts would lose such a
-# grant. These relations start from the group instead, using only its own
-# grants, direct_perm(Group, /group, ...): whatever they reach, any member
-# reaches too.
-
-Decl group_escalation_hop(Group, Target)
-  descr [
-    doc("Single-step escalation from a group: any member of Group can assume Target's identity via one mechanism, using the group's own grants."),
-    arg(Group, "group whose direct_perm grants allow the escalation"),
-    arg(Target, "the user or ServiceAccount whose identity members of Group can directly assume")
-  ].
-
-group_escalation_hop(Group, Target) :-
-    subject_escalation_hop(Group, /group, Target).
-
-# The same closure as controls_identity and controls_group, from the
-# group's own grants.
-Decl group_controls_identity(Group, Target)
-  descr [
-    doc("Any member of Group can assume Target's identity via one or more escalation hops, starting from the group's own grants."),
-    arg(Group, "group whose direct_perm grants start the escalation"),
-    arg(Target, "the user or ServiceAccount members of Group ultimately control")
-  ].
-
-group_controls_identity(Group, Target) :- group_escalation_hop(Group, Target).
-
-group_controls_identity(Group, Target) :-
-    group_controls_identity(Group, Mid),
-    assumed_escalation_hop(Mid, Target).
-
-group_controls_identity(Group, Target) :-
-    group_controls_group(Group, Other),
-    group_escalation_hop(Other, Target).
-
-Decl group_controls_group(Group, Other)
-  descr [
-    doc("Any member of Group, or an identity the group controls, can impersonate Other, which holds grants."),
-    arg(Group, "group whose direct_perm grants start the escalation"),
-    arg(Other, "another group whose direct_perm grants members of Group can use")
-  ].
-
-group_controls_group(Group, Other) :-
-    subject_impersonatable_group(Group, /group, Other),
-    Group != Other.
-
-group_controls_group(Group, Other) :-
-    group_controls_identity(Group, Mid),
-    assumed_group_impersonate(Mid, Other),
-    Group != Other.
+acts_as(Identity, /k8s, Name, /k8s, Kind, /assumed) :-
+    assumed_subject(Identity, Kind, Name).

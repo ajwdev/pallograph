@@ -868,10 +868,17 @@ fn gained_named_group_impersonation_through_an_assumed_user() {
     ));
 
     for (backend, result) in evaluate(&manifests, &[("alice", "staff")]) {
+        let hop = vec![
+            Value::String("alice".into()),
+            Value::Name("/k8s".into()),
+            Value::String("admins".into()),
+            Value::Name("/k8s".into()),
+            Value::Name("/group".into()),
+        ];
         assert!(
-            has_row(&result, "assumed_group_impersonate", &["alice", "admins"]),
+            result.scan("assumed_hop").contains(&hop),
             "{backend}: assumed alice can impersonate admins, got {:?}",
-            result.scan("assumed_group_impersonate")
+            result.scan("assumed_hop")
         );
         assert_eq!(controlled(&result, "imp"), ["admins", "alice"], "{backend}");
     }
