@@ -14,6 +14,7 @@ use mangle_ir::{Inst, InstId, Ir, NameId};
 use tracing::debug;
 
 use crate::edb::{Fact, ObjectFacts, ObjectKey};
+use crate::rule_graph::RuleSource;
 use crate::telemetry;
 
 pub(crate) const EDB_DECLS: &str = include_str!("../rules/00_k8s_prelude.mg");
@@ -1051,11 +1052,37 @@ pub fn builtin_rules() -> Vec<String> {
     EMBEDDED_RULES.iter().map(|s| s.to_string()).collect()
 }
 
+/// Like [`builtin_rules`], with each file's repo-relative path.
+pub fn builtin_rule_files() -> Vec<RuleSource> {
+    EMBEDDED_RULE_NAMES
+        .iter()
+        .zip(EMBEDDED_RULES)
+        .map(|(name, text)| RuleSource {
+            origin: name.to_string(),
+            text: text.to_string(),
+        })
+        .collect()
+}
+
 /// Reads the rule sources at `path`: the file itself, or each `*.mg` file in
 /// it, in filename order, when `path` is a directory.
 pub fn read_rule_sources(path: &Path) -> Result<Vec<String>> {
-    let read =
-        |p: &Path| std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()));
+    Ok(read_rule_files(path)?
+        .into_iter()
+        .map(|source| source.text)
+        .collect())
+}
+
+/// Like [`read_rule_sources`], with each file's path.
+pub fn read_rule_files(path: &Path) -> Result<Vec<RuleSource>> {
+    let read = |p: &Path| {
+        let text =
+            std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+        Ok(RuleSource {
+            origin: p.display().to_string(),
+            text,
+        })
+    };
     if !path.is_dir() {
         return Ok(vec![read(path)?]);
     }
@@ -1506,6 +1533,11 @@ impl Engine {
 
     pub fn rules_len(&self) -> usize {
         self.rule_sources.len()
+    }
+
+    /// The rule sources the engine evaluates, `define` rules included.
+    pub fn rule_sources(&self) -> &[String] {
+        &self.rule_sources
     }
 
     /// The version of the engine's state: it moves forward on every change

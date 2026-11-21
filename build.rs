@@ -39,6 +39,12 @@ fn main() {
         ));
     }
     embedded.push_str("];\n");
+    // The same files' repo-relative paths, for the rule graph's locations.
+    embedded.push_str("pub const EMBEDDED_RULE_NAMES: &[&str] = &[\n");
+    for path in &rule_files {
+        embedded.push_str(&format!("    {:?},\n", path.display().to_string()));
+    }
+    embedded.push_str("];\n");
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
     std::fs::write(

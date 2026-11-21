@@ -106,6 +106,8 @@
         zstd
         # Generates tags for rules/ (see .ctags.d/mangle.ctags).
         universal-ctags
+        # Lays out the `graph` command's pages (dot).
+        graphviz
       ]);
     });
   });

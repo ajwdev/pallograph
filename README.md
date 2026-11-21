@@ -72,6 +72,17 @@ it with `define`. `show` lists the documented relations along with their columns
 you can see the chain of bindings and rules that produced a fact rather than
 just trust it.
 
+**Browse the rules.** `graph` starts a small web server and prints its
+URL; `graph <predicate>` prints one centered on that predicate. Each page
+draws how the rules depend on each other, with arrows following the data
+from what is supplied at runtime (EDB) down through the rules that use
+them (`topdown`, or the page's *flip* link, points them the other way, like
+a pprof call graph). Hover a predicate to light
+up what it depends on (blue) and what uses it (orange) and to read its rules
+in a side panel; double-click one to re-center on it. The server listens
+on `127.0.0.1:7474` (`--graph-addr` changes it; over SSH, forward the
+port) and needs Graphviz's `dot`, which the Nix dev shell provides.
+
 **Play what-if.** `+fact.` and `-fact.` add or retract facts, `define` adds a
 rule, and `source` loads a whole `.mg` file (its ground facts go in as
 facts, so `-` can retract them, and the rest as rules). Take a `snapshot`
