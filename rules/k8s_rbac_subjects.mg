@@ -139,7 +139,7 @@ known_principal(/user, Username) :- user_groups(Username, _).
 # or impersonation produced it. ServiceAccounts always carry
 # system:serviceaccounts and system:serviceaccounts:<ns>, and everyone except
 # system:anonymous is in system:authenticated (authenticatedGroups in
-# tools/k8s-oracle/request.go). escalation.mg gives an identity assumed
+# tools/k8s-oracle/request.go). k8s_rbac_escalation.mg gives an identity assumed
 # through escalation only these groups.
 Decl implicit_group(Username, Group)
   descr [

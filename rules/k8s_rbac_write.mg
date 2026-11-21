@@ -42,7 +42,7 @@
 #
 # A writer is a known user or ServiceAccount, acting with all its subjects
 # (principal_subject), or a group, acting with its own grants: as in
-# escalation.mg, a group's members are mostly unknown, so a group is also
+# k8s_rbac_escalation.mg, a group's members are mostly unknown, so a group is also
 # where a path can start. The permissions a path needs may come from
 # different subjects of one writer. A writer that already holds every
 # permission cluster-wide gains nothing and is left out.
@@ -219,7 +219,7 @@ rbac_writer_subject(Group, /group, /group, Group) :-
     rbac_writer(Group, /group).
 
 # A user with user_groups groups, assumed through escalation (impersonated),
-# acts without those groups (assumed_subject in escalation.mg), so what it
+# acts without those groups (assumed_subject in k8s_rbac_escalation.mg), so what it
 # can write then is worked out apart, as writer kind /assumed_user. Other
 # users and ServiceAccounts act the same either way.
 user_has_groups(Username) :- user_groups(Username, _).
@@ -576,9 +576,9 @@ rbac_write_role(Writer, /principal, Mechanism, Binding, Role) :-
 rbac_write_role(Writer, /group, Mechanism, Binding, Role) :-
     rbac_write(Writer, /group, Mechanism, "", Binding, "ClusterRole", Role, /direct).
 
-# ---- Feeding escalation.mg ----
+# ---- Feeding k8s_rbac_escalation.mg ----
 #
-# The permissions escalation.mg's mechanisms need, by resource and verb,
+# The permissions k8s_rbac_escalation.mg's mechanisms need, by resource and verb,
 # projected per role like clusterrole_rbac_power.
 
 # (Action, Resource, Verb), each matched literally or by "*".
@@ -613,7 +613,7 @@ role_escalation_action(Ns, Role, Action) :-
 
 # Impersonation is checked on the impersonated identity's name, so for the
 # impersonate actions the rule's ResourceName is kept (/any without
-# resourceNames), as escalation.mg's impersonate guards do.
+# resourceNames), as k8s_rbac_escalation.mg's impersonate guards do.
 impersonate_action(/sa_impersonate).
 impersonate_action(/user_impersonate).
 impersonate_action(/group_impersonate).

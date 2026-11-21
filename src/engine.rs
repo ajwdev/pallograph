@@ -16,7 +16,7 @@ use tracing::debug;
 use crate::edb::{Fact, ObjectFacts, ObjectKey};
 use crate::telemetry;
 
-pub(crate) const EDB_DECLS: &str = include_str!("../rules/00_edb_prelude.mg");
+pub(crate) const EDB_DECLS: &str = include_str!("../rules/00_k8s_prelude.mg");
 
 // The rules/*.mg sources in filename order, embedded by build.rs.
 include!(concat!(env!("OUT_DIR"), "/embedded_rules.rs"));

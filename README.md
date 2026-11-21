@@ -192,13 +192,14 @@ what the cluster gained since.
 
 ## How it works
 
-The rules live in [`rules/`](rules/) as plain Mangle files. `base.mg` projects
-raw objects into typed relations; the three `rbac_roles.mg`, `rbac_subjects.mg`
-and `rbac.mg` files model RBAC (see below); `escalation.mg` models the single
-hops of identity theft (exec into a pod, mint a token, impersonate); `rbac_write.mg`
+The rules live in [`rules/`](rules/) as plain Mangle files. Files that only
+model Kubernetes start with `k8s_`; the rest work for any system. `k8s_base.mg` projects
+raw objects into typed relations; the three `k8s_rbac_roles.mg`, `k8s_rbac_subjects.mg`
+and `k8s_rbac.mg` files model RBAC (see below); `k8s_rbac_escalation.mg` models the single
+hops of identity theft (exec into a pod, mint a token, impersonate); `k8s_rbac_write.mg`
 models granting yourself a role by writing RBAC objects (`bind`,
 `escalate`), which adds hops through the roles gained; `closure.mg` chains
-hops into paths; `labels.mg` implements label selectors, evaluated against the kinds and scope Kubernetes uses for each owner (`selector_targets.mg`); `summary.mg` does
+hops into paths; `k8s_labels.mg` implements label selectors, evaluated against the kinds and scope Kubernetes uses for each owner (`k8s_selector_targets.mg`); `k8s_summary.mg` does
 inventory counts. `build.rs` compiles every rule file at build time, so a
 broken rule fails `cargo build` instead of your demo.
 
@@ -218,15 +219,15 @@ There are two evaluation backends, and they must produce the same facts:
 The RBAC rules are split by question, and each file's header lists its
 relations:
 
-- `rbac_roles.mg`: what a role grants. `role_rule` and `clusterrole_rule`
+- `k8s_rbac_roles.mg`: what a role grants. `role_rule` and `clusterrole_rule`
   hold each role's PolicyRules (ClusterRole aggregation applied), and
   `policy_rule_perm` / `policy_rule_url_perm` flatten one PolicyRule into
   (apiGroup, resource, resourceName, verb) or (URL, verb) rows.
-- `rbac_subjects.mg`: who a binding applies to. `binding_subject` and
+- `k8s_rbac_subjects.mg`: who a binding applies to. `binding_subject` and
   `binding_roleref` cover RoleBindings and ClusterRoleBindings alike, and
   `principal_subject(Username, Kind, Name)` lists the subjects a user or
   service account acts as: itself plus each of its groups.
-- `rbac.mg`: the joins. `direct_perm/7` and `direct_url_perm/4` hold each
+- `k8s_rbac.mg`: the joins. `direct_perm/7` and `direct_url_perm/4` hold each
   binding subject's own grants, and `rbac_allowed` decides `access_request`
   facts the way the kube-apiserver RBAC authorizer does.
 

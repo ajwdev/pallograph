@@ -2,7 +2,7 @@
 #
 # As in Kubernetes, a selector is evaluated only against the kinds its owner
 # selects, in the owner's namespace or among cluster-scoped objects:
-# selector_targets.mg lists them (a Service selects Pods in its namespace, a
+# k8s_selector_targets.mg lists them (a Service selects Pods in its namespace, a
 # PersistentVolumeClaim selects PersistentVolumes). The matching itself does
 # not care about kind: it checks every requirement of a selector against
 # every candidate object, and selector_matches/9 keeps the pairs the target
@@ -65,7 +65,7 @@
 #     → object_has_label_key/5       (strips LabelValue; needed because Mangle forbids
 #                                     unbound wildcards in negated literals — see below)
 #     → object_label_by_name/6       (object_label keyed by object name)
-#   selector_* + selector_target_kind/5 (selector_targets.mg) + object_in_namespace/4
+#   selector_* + selector_target_kind/5 (k8s_selector_targets.mg) + object_in_namespace/4
 #     → selector_declared/5          (the selectors objects own)
 #     → selector_candidate/9         (each selector paired with the objects it may select;
 #                                     ensures every variable is bound before negation fires)

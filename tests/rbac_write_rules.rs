@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Escalation by writing RBAC objects (rules/rbac_write.mg) over small
+//! Escalation by writing RBAC objects (rules/k8s_rbac_write.mg) over small
 //! hand-written clusters, checked on both backends. Like
 //! tests/escalation_rules.rs, each test reads the derived relations
 //! directly.
@@ -549,7 +549,7 @@ fn admin_pod() -> Vec<String> {
     ]
 }
 
-// A gained role feeds escalation.mg: sa-a may only bind ns1's pod-creator
+// A gained role feeds k8s_rbac_escalation.mg: sa-a may only bind ns1's pod-creator
 // Role and create RoleBindings in ns1. Binding it lets sa-a create pods in
 // ns1, which run as ns1/admin.
 #[test]

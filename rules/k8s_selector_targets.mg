@@ -3,13 +3,13 @@
 # A label selector in Kubernetes is always evaluated against one kind of
 # object, in a scope its controller picks: a Service's selector picks Pods in
 # the Service's namespace, a PersistentVolumeClaim's picks PersistentVolumes
-# (cluster-scoped). labels.mg only pairs a selector with the objects this
+# (cluster-scoped). k8s_labels.mg only pairs a selector with the objects this
 # table names, so a Service never matches a ConfigMap that happens to carry
 # the same labels.
 #
 # Workloads follow ownership: a Deployment selects its ReplicaSets, which
 # select Pods, so a Deployment reaches its Pods through reachable/8 in
-# graph.mg. StatefulSets and DaemonSets also select the ControllerRevisions
+# k8s_graph.mg. StatefulSets and DaemonSets also select the ControllerRevisions
 # holding their history.
 #
 # Kinds not listed here (custom resources included) keep their selector_*
@@ -50,6 +50,6 @@ selector_target_kind("policy/v1beta1", "PodDisruptionBudget", "v1", "Pod", /same
 selector_target_kind("networking.k8s.io/v1", "NetworkPolicy", "v1", "Pod", /same_namespace).
 selector_target_kind("v1", "PersistentVolumeClaim", "v1", "PersistentVolume", /cluster).
 
-# A ClusterRole's aggregationRule.clusterRoleSelectors (see rbac_roles.mg).
+# A ClusterRole's aggregationRule.clusterRoleSelectors (see k8s_rbac_roles.mg).
 selector_target_kind("rbac.authorization.k8s.io/v1", "ClusterRole",
                      "rbac.authorization.k8s.io/v1", "ClusterRole", /cluster).

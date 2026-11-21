@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Label selector compatibility: checks `selector_matches` (rules/labels.mg)
+//! Label selector compatibility: checks `selector_matches` (rules/k8s_labels.mg)
 //! and `k8s::match` against apimachinery's selector code.
 //!
 //! Each world under `tests/labels_compat/worlds/` is an `objects.yaml`, and

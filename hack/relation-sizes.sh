@@ -2,7 +2,7 @@
 # Print how many rows the RBAC and escalation rules derive, per relation and
 # in total, for one rules directory and one set of Kubernetes manifests.
 # Use it to compare rule revisions: every relation a rule head in
-# rbac*.mg, escalation.mg or closure.mg defines is counted, so the total covers
+# k8s_rbac*.mg or closure.mg defines is counted, so the total covers
 # intermediate relations too, whatever a revision calls them.
 #
 # Usage: hack/relation-sizes.sh [-b BINARY] RULES_DIR DATA_PATH...
@@ -48,11 +48,7 @@ EOF
 
 # Relations defined by a rule head at the start of a line. Relations that
 # only hold rows for access_request input are skipped: they are empty here.
-# closure.mg is optional so that older revisions, which lack it, still work.
-files=("$rules"/rbac*.mg "$rules"/escalation.mg)
-if [[ -f "$rules/closure.mg" ]]; then
-	files+=("$rules/closure.mg")
-fi
+files=("$rules"/k8s_rbac*.mg "$rules"/closure.mg)
 mapfile -t relations < <(
 	cat "${files[@]}" |
 		grep -oE '^[a-z_][a-z0-9_]*\(' | tr -d '(' |

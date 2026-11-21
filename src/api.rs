@@ -1131,7 +1131,7 @@ impl Core for LocalCore {
     ) -> Result<Rows, MatchError> {
         let expressions = parse_selector(selector).map_err(MatchError::Selector)?;
         // The selector's facts, owned by a query object no real object can
-        // collide with; `labels.mg` matches them like any selector.
+        // collide with; `k8s_labels.mg` matches them like any selector.
         let selector_key = vec![
             Value::String("pallograph.dev/query".to_string()),
             Value::String("Match".to_string()),
@@ -1163,7 +1163,7 @@ impl Core for LocalCore {
 
         // selector_matches columns: 0 SelApiVersion, 1 SelKind, 2
         // SelNamespace, 3 SelName, 4 Selector, 5 ObjApiVersion, 6 ObjKind,
-        // 7 ObjNamespace, 8 ObjName. labels.mg pairs the query owner only
+        // 7 ObjNamespace, 8 ObjName. k8s_labels.mg pairs the query owner only
         // with objects in its namespace, like `kubectl -n`.
         let kind = kind.map(|kind| Value::String(kind.to_string()));
         let mut rows: Vec<Vec<Value>> = store

@@ -9,7 +9,7 @@ not in the closure is a finding.
 
 Pallograph does not ship this gate as a built-in relation, because the closure
 is yours and the policy is yours. It ships only the empty EDB hook
-`cluster_admin_allowed` (declared in `rules/00_edb_prelude.mg`). You provide
+`cluster_admin_allowed` (declared in `rules/00_k8s_prelude.mg`). You provide
 the closure facts and the view, both as Mangle files.
 
 ## The pieces

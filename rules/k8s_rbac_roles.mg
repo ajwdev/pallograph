@@ -2,7 +2,7 @@
 #
 # Facts loaded from the cluster (EDB) used here:
 #   k8s/5                     - Role and ClusterRole objects
-#   selector_* / object_label - via selector_matches/9 in labels.mg
+#   selector_* / object_label - via selector_matches/9 in k8s_labels.mg
 #
 # Derived relations (IDB):
 #   role/3, clusterrole/2                           (type filters)
@@ -14,7 +14,7 @@
 #   policy_rule_perm/5, policy_rule_url_perm/3      (one PolicyRule, flattened)
 #
 # Wildcards: "*" in apiGroups, resources, verbs and nonResourceURLs is stored
-# as the literal string "*"; rbac.mg matches it at decision time. In
+# as the literal string "*"; k8s_rbac.mg matches it at decision time. In
 # resourceNames, "*" is not a wildcard: Kubernetes compares it as a literal
 # name. A rule with no resourceNames (absent or empty) applies to every name
 # and is flattened to ResourceName /any, a name constant rather than a
@@ -82,7 +82,7 @@ clusterrole_own_rule(Role, Rule) :-
 # Each clusterRoleSelectors[i] entry is one of the ClusterRole's selectors
 # (Selector "aggregationRule.clusterRoleSelectors[i]"), with its matchLabels
 # and matchExpressions stored as the standard selector_* facts.
-# selector_matches/9 in labels.mg then gives AND semantics within one
+# selector_matches/9 in k8s_labels.mg then gives AND semantics within one
 # entry, and reading it with Selector left open gives OR semantics across
 # entries. An empty selector ({} or {matchLabels: {}}) has no requirements
 # and matches every ClusterRole, as in Kubernetes; edb.rs marks it with

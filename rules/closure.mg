@@ -2,10 +2,10 @@
 #
 # One hop relation and one closure over it, whatever system the hop comes
 # from. The Kubernetes rules fill the inputs:
-#   escalation.mg  - subject_hop from a binding subject's own grants
+#   k8s_rbac_escalation.mg  - subject_hop from a binding subject's own grants
 #                    (Source /grant), and acts_as for logging in and for
 #                    being assumed
-#   rbac_write.mg  - subject_hop through a role a subject can grant itself
+#   k8s_rbac_write.mg  - subject_hop through a role a subject can grant itself
 #                    by writing RBAC objects (Source /rbac_write), and
 #                    acts_as for the writes an assumed identity can make
 #
@@ -39,7 +39,7 @@ identity_kind(/serviceaccount).
 group_kind(/group).
 
 # Paths start from subjects a principal can log in as, or from a group.
-# /assumed_user subjects (rbac_write.mg) are only reached mid-path.
+# /assumed_user subjects (k8s_rbac_write.mg) are only reached mid-path.
 start_subject_kind(/user).
 start_subject_kind(/serviceaccount).
 start_subject_kind(/group).

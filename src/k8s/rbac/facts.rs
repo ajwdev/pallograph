@@ -230,7 +230,7 @@ pub fn grant_covers(granted: &Permission, query: &Permission) -> bool {
 pub type RoleKey = (RoleKind, String, String);
 
 /// A role a binding subject can grant itself by writing RBAC objects
-/// (`rbac_write_binding` in rules/rbac_write.mg).
+/// (`rbac_write_binding` in rules/k8s_rbac_write.mg).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RbacWrite {
     /// The verb that lets the write through.
@@ -279,7 +279,7 @@ impl RbacWrite {
 /// `Subject::principal`) as it logs in or, for a group, with its own grants;
 /// or, with `assumed`, a user with `user_groups` groups as it acts when
 /// assumed through escalation, without them (writer kind `/assumed_user` in
-/// rules/rbac_write.mg).
+/// rules/k8s_rbac_write.mg).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Writer {
     pub subject: Subject,
@@ -379,7 +379,7 @@ pub fn parse_rbac_write_binding(relation: &str, rows: &[Vec<Value>]) -> Vec<(Wri
 
 /// The rules of each Role and ClusterRole (role_rule and clusterrole_rule),
 /// after aggregation, and the (apigroup, resource, verb) each rule grants
-/// (policy_rule_perm, ResourceName dropped). As in rbac_roles.mg, a rule's
+/// (policy_rule_perm, ResourceName dropped). As in k8s_rbac_roles.mg, a rule's
 /// permissions are stored once per distinct PolicyRule value and joined with
 /// a role on demand, not copied into every role that has the rule.
 #[derive(Default)]
@@ -987,7 +987,7 @@ impl PermissionTables {
 
 /// The subjects any login as `username` matches, whether or not the loaded
 /// objects mention it: itself, and the groups Kubernetes adds, as
-/// `implicit_group` and `principal_group` in rules/rbac_subjects.mg derive
+/// `implicit_group` and `principal_group` in rules/k8s_rbac_subjects.mg derive
 /// them. A ServiceAccount is in system:serviceaccounts and
 /// system:serviceaccounts:<ns>; everyone but system:anonymous is in
 /// system:authenticated, and system:anonymous is in system:unauthenticated.

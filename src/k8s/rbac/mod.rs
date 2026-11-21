@@ -140,7 +140,7 @@ impl std::fmt::Display for ReachMechanism {
 
 /// The RBAC-write verb class that lets a principal grant itself a role:
 /// `bind` an existing role, or `escalate` to a role with more permissions
-/// than it already holds. From `rbac_verb_class` in rules/rbac_write.mg.
+/// than it already holds. From `rbac_verb_class` in rules/k8s_rbac_write.mg.
 #[derive(Clone, Copy, Hash, Ord, PartialEq, PartialOrd, Eq, Debug)]
 pub enum WriteMechanism {
     Bind,

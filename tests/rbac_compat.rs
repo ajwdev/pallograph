@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! RBAC compatibility harness: checks `rbac_allowed` (rules/rbac.mg) against
+//! RBAC compatibility harness: checks `rbac_allowed` (rules/k8s_rbac.mg) against
 //! the kube-apiserver RBAC authorizer, and the single-step impersonation
 //! and RBAC write relations of the escalation rules against the API server
 //! code around it (see "Escalation questions" below).
@@ -64,7 +64,7 @@
 //!
 //! P's rows are those with Name P and Kind /user or /serviceaccount.
 //!
-//! The write relations come from rules/rbac_write.mg. Buckets of these
+//! The write relations come from rules/k8s_rbac_write.mg. Buckets of these
 //! kinds are prefixed with the kind, e.g. "impersonate over-grant: total".
 //! A write the principal's own rules already cover is allowed by
 //! Kubernetes (tagged write-allowed-by-covering-rules) but gains nothing,

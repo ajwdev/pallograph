@@ -236,7 +236,7 @@ func (w *World) add(object runtime.Object) error {
 // that aggregate them read those. On a cycle the controller's result
 // depends on the order it visits roles and on what the roles held before
 // (see TestAggregationCycleVisitOrder), so no recomputation is right.
-// rules/rbac_roles.mg makes the same choice.
+// rules/k8s_rbac_roles.mg makes the same choice.
 func (w *World) aggregate(variant worldVariant) {
 	ownRules := map[string][]rbacv1.PolicyRule{}
 	for _, role := range w.ClusterRoles {

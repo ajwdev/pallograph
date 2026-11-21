@@ -9,7 +9,7 @@ what changed.
 - `pallograph.toml` - a `dev` profile with two startup datasources: the live
   cluster (`cluster/`) and a cluster-admin approval closure
   (`cluster-admin-allowlist.json`, loaded into the `cluster_admin_allowed` EDB
-  relation declared empty in `rules/00_edb_prelude.mg`).
+  relation declared empty in `rules/00_k8s_prelude.mg`).
 - `cluster/rbac.yaml` - the live cluster as Argo has it deployed.
 - `base/rbac.yaml` - the target-branch render (matches live, no drift).
 - `head/rbac.yaml` - the PR merged into the target branch.

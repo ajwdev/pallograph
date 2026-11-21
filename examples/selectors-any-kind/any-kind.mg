@@ -2,10 +2,10 @@
 # namespace, not only the kinds Kubernetes evaluates it against. See
 # README.md.
 #
-# Builds on labels.mg: it adds candidate pairs, the built-in matcher checks
+# Builds on k8s_labels.mg: it adds candidate pairs, the built-in matcher checks
 # their requirements, and selector_matches_any_kind/9 reads every pair that
 # passes. selector_matches/9 is unchanged, since it keeps only the kinds
-# selector_targets.mg allows.
+# k8s_selector_targets.mg allows.
 
 Decl selector_matches_any_kind(SelApiVersion, SelKind, SelNamespace, SelName, Selector,
                                ObjApiVersion, ObjKind, ObjNamespace, ObjName)

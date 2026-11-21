@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Andrew Williams
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Escalation rules (rules/escalation.mg and rules/closure.mg) over small
+//! Escalation rules (rules/k8s_rbac_escalation.mg and rules/closure.mg) over small
 //! hand-written clusters, checked on both backends. Each test reads the
 //! derived relations directly, so it pins what the rules say
 //! independently of the Rust consumers in src/k8s/rbac.

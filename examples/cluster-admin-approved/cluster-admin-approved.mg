@@ -4,7 +4,7 @@
 # Two inputs, both loaded as Mangle files (facts are EDB, rules are IDB):
 #   - this file: the view rules below.
 #   - an approval closure: facts for cluster_admin_allowed, the EDB relation
-#     declared (empty) in rules/00_edb_prelude.mg. See approved.example.mg.
+#     declared (empty) in rules/00_k8s_prelude.mg. See approved.example.mg.
 #
 # Load both BEFORE snapshot so a snapshot carries the view. source works on
 # both backends; a profile datasource (facts) plus the --rules dir (this view)
