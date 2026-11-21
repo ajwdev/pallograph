@@ -194,10 +194,11 @@ what the cluster gained since.
 
 The rules live in [`rules/`](rules/) as plain Mangle files. `base.mg` projects
 raw objects into typed relations; the three `rbac_roles.mg`, `rbac_subjects.mg`
-and `rbac.mg` files model RBAC (see below); `escalation.mg` models identity
-theft paths (exec into a pod, mint a token, impersonate); `rbac_write.mg`
+and `rbac.mg` files model RBAC (see below); `escalation.mg` models the single
+hops of identity theft (exec into a pod, mint a token, impersonate); `rbac_write.mg`
 models granting yourself a role by writing RBAC objects (`bind`,
-`escalate`) and continues those paths through it; `labels.mg` implements label selectors, evaluated against the kinds and scope Kubernetes uses for each owner (`selector_targets.mg`); `summary.mg` does
+`escalate`), which adds hops through the roles gained; `closure.mg` chains
+hops into paths; `labels.mg` implements label selectors, evaluated against the kinds and scope Kubernetes uses for each owner (`selector_targets.mg`); `summary.mg` does
 inventory counts. `build.rs` compiles every rule file at build time, so a
 broken rule fails `cargo build` instead of your demo.
 

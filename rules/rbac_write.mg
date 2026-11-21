@@ -55,11 +55,11 @@
 #   - Into the writer's own RBAC permissions (Mode /all), so binding a role
 #     that allows more RBAC writes continues the path, through any number
 #     of writes. A group's gains count for its members too.
-#   - Into the escalation closure of escalation.mg (controls_identity and
-#     the rest, through gained_escalation_hop), so a role gained here can
-#     reach identities, and an identity reached there brings what it can
-#     grant itself. escalation_hop and the grant_* guards stay as they are:
-#     they say what a principal may do now, in one request.
+#   - Into the escalation closure of closure.mg, as subject_hop rows with
+#     Source /rbac_write, so a role gained here can reach identities, and
+#     an identity reached there brings what it can grant itself.
+#     escalation_hop and the grant_* guards leave these out: they say what
+#     a principal may do now, in one request.
 #
 # An identity assumed through escalation acts without its user_groups
 # groups, so for a user that has some, what it can write when assumed is
@@ -82,6 +82,7 @@
 #                                  one request
 #   rbac_write_anything/1        - principals that may write anything
 #   gained_escalation_hop/4      - escalation hops through gained roles
+#                                  (subject_hop rows with Source /rbac_write)
 #   rbac_write_role/5            - rbac_write_binding_direct cluster-wide,
 #                                  by principal, for tests/rbac_compat.rs
 #
@@ -722,6 +723,37 @@ gained_reachable_sa(Name, Kind, SANs, SAName, "impersonate") :-
     gained_namespaced_impersonate(Name, Kind, "", /sa_impersonate, SAName),
     serviceaccount(SANs, SAName, _).
 
+# ---- Hops through gained roles (subject_hop, Source /rbac_write) ----
+
+mechanism_label(/impersonate, "impersonate").
+mechanism_label(/token, "token").
+mechanism_label(/pod_exec, "pod-exec").
+mechanism_label(/pod_create, "pod-create").
+
+subject_hop(Name, /k8s, Kind, Target, /k8s, /serviceaccount, Mechanism, /rbac_write) :-
+    gained_reachable_sa(Name, Kind, SANs, SAName, Label),
+    mechanism_label(Mechanism, Label)
+    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
+
+# Users and groups are cluster-scoped: only a cluster-wide gain counts, and
+# a named one reaches only the users or groups it names.
+subject_hop(Name, /k8s, Kind, Target, /k8s, /user, /impersonate, /rbac_write) :-
+    gained_impersonate(Name, Kind, "", /user_impersonate, /any),
+    user_has_own_grant(Target).
+
+subject_hop(Name, /k8s, Kind, Target, /k8s, /user, /impersonate, /rbac_write) :-
+    gained_impersonate(Name, Kind, "", /user_impersonate, Target),
+    user_has_own_grant(Target).
+
+subject_hop(Name, /k8s, Kind, Group, /k8s, /group, /impersonate, /rbac_write) :-
+    gained_impersonate(Name, Kind, "", /group_impersonate, /any),
+    group_has_grant(Group).
+
+subject_hop(Name, /k8s, Kind, Group, /k8s, /group, /impersonate, /rbac_write) :-
+    gained_impersonate(Name, Kind, "", /group_impersonate, Group),
+    group_has_grant(Group).
+
+# The same hops by writer, as src/rbac reads them.
 Decl gained_escalation_hop(Name, Kind, Target, Mechanism)
   descr [
     doc("Like subject_escalation_hop, through a role binding subject (Kind, Name) can grant itself by writing RBAC objects (rbac_write_binding) rather than its own grants. Kept apart from escalation_hop, which answers what a principal may do now."),
@@ -731,19 +763,10 @@ Decl gained_escalation_hop(Name, Kind, Target, Mechanism)
     arg(Mechanism, "pod-create, token, impersonate or pod-exec")
   ].
 
-gained_escalation_hop(Name, Kind, Target, Mechanism) :-
-    gained_reachable_sa(Name, Kind, SANs, SAName, Mechanism)
-    |> let Target = fn:string:concat("system:serviceaccount:", SANs, ":", SAName).
-
-# Users and groups are cluster-scoped: only a cluster-wide gain counts, and
-# a named one reaches only the users or groups it names.
-gained_escalation_hop(Name, Kind, Target, "impersonate") :-
-    gained_impersonate(Name, Kind, "", /user_impersonate, /any),
-    user_has_own_grant(Target).
-
-gained_escalation_hop(Name, Kind, Target, "impersonate") :-
-    gained_impersonate(Name, Kind, "", /user_impersonate, Target),
-    user_has_own_grant(Target).
+gained_escalation_hop(Name, Kind, Target, Label) :-
+    subject_hop(Name, /k8s, Kind, Target, /k8s, TargetKind, Mechanism, /rbac_write),
+    identity_kind(TargetKind),
+    mechanism_label(Mechanism, Label).
 
 Decl gained_impersonatable_group(Name, Kind, Group)
   descr [
@@ -754,22 +777,12 @@ Decl gained_impersonatable_group(Name, Kind, Group)
   ].
 
 gained_impersonatable_group(Name, Kind, Group) :-
-    gained_impersonate(Name, Kind, "", /group_impersonate, /any),
-    group_has_grant(Group).
+    subject_hop(Name, /k8s, Kind, Group, /k8s, /group, _, /rbac_write).
 
-gained_impersonatable_group(Name, Kind, Group) :-
-    gained_impersonate(Name, Kind, "", /group_impersonate, Group),
-    group_has_grant(Group).
-
-# The escalation closure of escalation.mg, continued through these hops:
-# from a principal as it logs in, from an identity assumed on the way, and
-# from a group. An assumed user with user_groups groups uses its
-# /assumed_user writes, not those it could make logged in.
-controls_identity(P, Target) :-
-    principal_subject(P, Kind, Name),
-    gained_escalation_hop(Name, Kind, Target, _),
-    P != Target.
-
+# The writes an identity reached on the way can make: an assumed user with
+# user_groups groups uses its /assumed_user writes, not those it could make
+# logged in. closure.mg reads these as acts_as /assumed_writes; a principal
+# logging in writes as itself (acts_as /login).
 assumed_gains_subject(Identity, /group, Group) :-
     assumed_subject(Identity, /group, Group).
 
@@ -784,24 +797,8 @@ assumed_gains_subject(Identity, /assumed_user, Identity) :-
     assumed_subject(Identity, /user, Identity),
     user_has_groups(Identity).
 
-assumed_escalation_hop(Identity, Target) :-
-    assumed_gains_subject(Identity, Kind, Name),
-    gained_escalation_hop(Name, Kind, Target, _).
-
-group_escalation_hop(Group, Target) :-
-    gained_escalation_hop(Group, /group, Target, _).
-
-controls_group(P, Group) :-
-    principal_subject(P, Kind, Name),
-    gained_impersonatable_group(Name, Kind, Group).
-
-assumed_group_impersonate(Identity, Group) :-
-    assumed_gains_subject(Identity, Kind, Name),
-    gained_impersonatable_group(Name, Kind, Group).
-
-group_controls_group(Group, Other) :-
-    gained_impersonatable_group(Group, /group, Other),
-    Group != Other.
+acts_as(Identity, /k8s, Name, /k8s, Kind, /assumed_writes) :-
+    assumed_gains_subject(Identity, Kind, Name).
 
 # A user or group that can grant itself a role holds grants of its own,
 # which impersonating it brings.
