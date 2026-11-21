@@ -51,7 +51,7 @@
 #   path        Alternating ambient grantees and pivots, which controls
 #               closes over.
 #
-# Example, a pod-exec pivot into a ServiceAccount with an AWS role:
+# Example, from examples/eks-pod-identity/:
 #
 #   alice
 #     -acts_as->               alice (the grantee in her binding)

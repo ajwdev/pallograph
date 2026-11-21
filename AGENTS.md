@@ -43,6 +43,8 @@ Only the non-obvious parts:
   relation (`pivot`) and what each node acts as (`acts_as`), filled
   by each system's rules. Nothing in it names a system, kind or mechanism;
   keep it that way. `k8s_`-prefixed rule files are Kubernetes only.
+  `examples/eks-pod-identity/` adds AWS with rule files alone, and
+  `tests/cross_system.rs` checks that it still does.
 - `hack/relation-sizes.sh` counts rows per RBAC and escalation relation;
   use it to compare rule revisions.
 - `src/engine.rs` - `Engine` and the `Backend` trait, with two backends
