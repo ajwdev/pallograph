@@ -80,6 +80,21 @@ Only the non-obvious parts:
 - `src/edb/watch.rs` - with `watch = true` on a `k8s` datasource (or
   `--watch`), kube watchers keep the engine current through
   `Engine::apply_changes`, one DD commit per batch.
+- `src/rule_graph/` - the rules' dependency graph (each edge records a
+  rule's head and a predicate in its body; pages draw it as data flowing
+  down from what is supplied at runtime), with each statement's text and
+  `file:line`, views of it and dot output. Predicates with no rules and no
+  facts in any rule file are inferred to be supplied at runtime (EDB); the
+  graph never reads the Rust loaders. Reads rule text only, so it depends
+  on the mangle crates and
+  nothing else in the crate; keep it that way so it can move with the
+  Datalog code. The mangle AST has no source positions, so statements are
+  located by scanning the text, then parsed one at a time.
+- `src/graph_server/` - the `graph` command's web server (std threads,
+  GET only, loopback by default, `--graph-addr` to change). It runs
+  Graphviz `dot` per request; the page is `assets/page.{html,js}`, and
+  tests never need Graphviz. `build.rs` emits `EMBEDDED_RULE_NAMES` so
+  embedded rules keep their paths.
 - `src/builtins.txt` - built-in K8s/EKS principals filtered from SMT output.
   Its header documents how to regenerate it.
 - `api-resources.txt` (repo root) is `include_str!`'d by the fixture

@@ -72,6 +72,11 @@ const COMMANDS: &[CommandSpec] = &[
         manpage: false,
     },
     CommandSpec {
+        path: "graph",
+        usage: Some("graph [<predicate>]   (browse the rule graph in a web browser)"),
+        manpage: false,
+    },
+    CommandSpec {
         path: "query",
         usage: Some("query <body>   (or ?- <body>)"),
         manpage: false,
@@ -522,6 +527,9 @@ fn print_help() {
         "  show <rel...>                          - describe relations (columns, types, docs)"
     );
     println!("  why <pred>(<args>...)                  - show derivation tree for a fact");
+    println!(
+        "  graph [<predicate>]                    - browse how the rules depend on each other (starts a local web server)"
+    );
     println!();
     println!("EDB / Rules");
     println!("  +pred(arg1, arg2, ...).                - insert a ground fact and re-evaluate");
@@ -1164,6 +1172,7 @@ impl<'a> Repl<'a> {
         match command {
             Command::Query(body) => self.query(&body),
             Command::Why(fact) => self.why(&fact),
+            Command::Graph(name) => self.graph(name.as_deref()),
             Command::Use { snapshot, one_shot } => self.use_snapshot(snapshot, one_shot),
             Command::Snapshot(name) => self.snapshot(&name),
             Command::Diff {
@@ -1290,6 +1299,44 @@ impl<'a> Repl<'a> {
             // Detail view: a psql \d-style block per requested relation.
             Ok(relations) => relations.iter().for_each(print_relation_detail),
             Err(e) => self.command_error(e),
+        }
+    }
+
+    /// Starts the rule graph server if needed and prints where to open it.
+    fn graph(&mut self, name: Option<&str>) {
+        use crate::graph_server;
+        use crate::rule_graph::view::percent_encode;
+
+        if let Some(name) = name {
+            match graph_server::current_graph() {
+                Ok(graph) if graph.predicates.contains_key(name) => {}
+                Ok(_) => return self.command_error(format!("no predicate named {name}")),
+                Err(e) => return self.command_error(format!("{e:#}")),
+            }
+        }
+        let address = match graph_server::ensure_started() {
+            Ok(address) => address,
+            Err(e) => return self.command_error(format!("rule graph server: {e:#}")),
+        };
+        let path = match name {
+            Some(name) => format!("/graph?focus={}", percent_encode(name)),
+            None => "/".to_string(),
+        };
+        println!("rule graph: http://{address}{path}");
+        if address.ip().is_loopback() {
+            let port = address.port();
+            // ssh wants IPv6 addresses in brackets, as in a URL.
+            let ip = match address.ip() {
+                std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+                ip => ip.to_string(),
+            };
+            println!("  over SSH, forward the port first: ssh -L {port}:{ip}:{port} <host>");
+        }
+        if !graph_server::dot_available() {
+            println!(
+                "  Graphviz 'dot' was not found on PATH; graph pages need it \
+                 (/graph.dot and /graph.json still work)"
+            );
         }
     }
 

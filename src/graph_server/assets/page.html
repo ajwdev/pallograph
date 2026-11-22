@@ -1,0 +1,157 @@
+<!doctype html><meta charset=utf-8><title>{{TITLE}}</title>
+<style>
+  body { margin: 0; font-family: sans-serif; background: #fff; display: flex; flex-direction: column; height: 100vh; }
+  header { background: #f6f6f6; padding: 6px 12px; border-bottom: 1px solid #ddd; font-size: 13px; }
+  header .controls { margin-top: 4px; }
+  header .controls a { text-decoration: none; border: 1px solid #ccc; background: #fff; border-radius: 4px; padding: 0 6px; color: #333; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #graph { flex: 1; overflow: auto; position: relative; }
+  #splitter { width: 6px; cursor: col-resize; background: #e8e8e8; border-left: 1px solid #ddd; flex: none; }
+  #splitter:hover, #splitter.dragging { background: #b8cfe8; }
+  #panel { width: 520px; flex: none; display: flex; flex-direction: column; min-height: 0; font-size: 13px; background: #fbfbfb; }
+  #panel-bar { display: flex; align-items: center; gap: 8px; padding: 4px 10px; border-bottom: 1px solid #e4e4e4; color: #666; font-size: 12px; }
+  #panel-bar span { flex: 1; }
+  #panel-bar button, #reopen { font: inherit; font-size: 12px; cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 4px; padding: 1px 8px; }
+  #panel-body { flex: 1; overflow: auto; padding: 8px 14px; }
+  body.collapsed #panel, body.collapsed #splitter { display: none; }
+  #reopen { display: none; position: fixed; right: 0; top: 50%; transform: translateY(-50%); writing-mode: vertical-rl; padding: 10px 4px; border-radius: 4px 0 0 4px; border-right: none; box-shadow: -1px 0 4px rgba(0,0,0,.12); }
+  body.collapsed #reopen { display: block; }
+  #panel h3 { margin: 4px 0 2px; font-family: monospace; font-size: 15px; }
+  #panel h3 a { font-family: sans-serif; font-size: 12px; font-weight: normal; margin-left: 8px; }
+  #panel .meta { color: #666; margin-bottom: 8px; }
+  #panel .loc { color: #666; font-family: monospace; font-size: 11px; margin-top: 10px; }
+  #panel .session { background: #fff3c4; border: 1px solid #e8d27a; border-radius: 3px; padding: 0 4px; font-family: sans-serif; margin-left: 6px; }
+  #panel pre { margin: 2px 0; padding: 6px 8px; background: #fff; border: 1px solid #e4e4e4; border-radius: 4px; white-space: pre-wrap; font-size: 12px; }
+  #panel .c { color: #888; font-style: italic; }
+  #panel .p { color: #1f5fa8; cursor: pointer; text-decoration: underline dotted; }
+  #panel .p.here { color: #1f5fa8; font-weight: bold; }
+  #panel .p.away { color: #7a4fa8; }
+  #panel .neg { color: #d62728; font-weight: bold; }
+  svg { display: block; }
+  .dim { opacity: 0.12; }
+  .hot path { stroke: #ef7d0c !important; stroke-width: 3px; }
+  .hot polygon { stroke: #ef7d0c !important; fill: #ef7d0c; }
+  .up path { stroke: #1f77b4 !important; stroke-width: 3px; }
+  .up polygon { stroke: #1f77b4 !important; fill: #1f77b4; }
+  .node.sel polygon, .node.sel path { stroke-width: 4px; }
+  g.node { cursor: pointer; }
+  /* Shift-click walks a chain; without this the browser selects text. */
+  #graph svg { user-select: none; -webkit-user-select: none; }
+  .legend { margin-top: 4px; line-height: 1.8; }
+  .legend summary { cursor: pointer; color: #555; width: max-content; }
+  .legend-item { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; cursor: pointer; white-space: nowrap; }
+  .legend-item.sel { font-weight: bold; }
+  .swatch { display: inline-block; width: 12px; height: 12px; border: 1px solid #888; border-radius: 3px; }
+  #help-button { font: inherit; font-size: 12px; cursor: pointer; border: 1px solid #ccc; background: #fff; border-radius: 4px; padding: 0 8px; }
+  #help { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 10; }
+  #help.open { display: flex; align-items: flex-start; justify-content: center; overflow: auto; }
+  #help .card { background: #fff; max-width: 52em; margin: 40px 16px; padding: 6px 22px 16px; border-radius: 6px; box-shadow: 0 4px 24px rgba(0,0,0,.25); font-size: 14px; line-height: 1.5; }
+  #help h2 { display: flex; justify-content: space-between; align-items: center; }
+  #help h3 { margin: 16px 0 4px; font-size: 15px; }
+  #help dt { font-weight: bold; margin-top: 8px; }
+  #help dd { margin-left: 18px; }
+  #help code { background: #f3f3f3; padding: 0 3px; border-radius: 3px; }
+</style>
+<header><button id="help-button" title="how to read this page (?)">? help</button> &middot; <a href="/">index</a> &middot; <b>{{TITLE}}</b> &middot;
+  {{DIRECTION}} &middot;
+  hover a node: <span style="color:#1f77b4">blue = depends on</span>, <span style="color:#ef7d0c">orange = used by</span>
+  &middot; click pins &middot; shift-click = whole chain &middot; double-click = focus here &middot; Esc clears &middot; <kbd>r</kbd> toggles rules panel &middot;
+  click a predicate in the rule text to jump (<span style="color:#7a4fa8">purple</span> = not in this graph)
+  {{CONTROLS}}
+  {{LEGEND}}</header>
+<main>
+<div id="graph">{{SVG}}</div>
+<div id="splitter" title="drag to resize, double-click to reset"></div>
+<div id="panel">
+  <div id="panel-bar"><span>rules</span>
+    <button id="narrow" title="narrower">&minus;</button><button id="wide" title="wider">+</button>
+    <button id="collapse" title="hide panel (r)">hide &raquo;</button></div>
+  <div id="panel-body"><p class="meta">Hover or click a node to see its rules.</p></div>
+</div>
+</main>
+<button id="reopen" title="show rules panel (r)">&laquo; rules</button>
+<div id="help"><div class="card">
+  <h2>Reading the rule graph <button id="help-close" title="close (Esc)">close</button></h2>
+
+  <h3>What is drawn</h3>
+  <dl>
+    <dt>Boxes</dt>
+    <dd>Each box is a predicate (a relation). Its color says which rule file defines it; click
+      <i>colors</i> in the header to open the legend that maps colors to files (it stays open
+      until you close it). Hover a file in the legend to highlight its predicates, click to
+      keep the highlight.</dd>
+    <dt>Cylinders</dt>
+    <dd>Data sources (EDB): predicates with facts but no rules, where the data comes from.
+      Shape says derived (box) or source (cylinder); color says where it is defined.
+      <b>Grey</b> cylinders are <i>supplied at runtime</i>: nothing in the rules produces
+      their rows, so they come from outside the program. Usually that is the Kubernetes
+      loader (<code>k8s</code>, <code>object_label</code>, ...), but it can be a datasource
+      in <code>pallograph.toml</code> (<code>cluster_admin_allowed</code>), facts you add with
+      <code>+fact</code> or <code>source</code> (<code>access_request</code>), or a test. A
+      <code>Decl</code> in <code>rules/00_k8s_prelude.mg</code> documents their columns. The
+      graph infers this from the rules alone, without reading the Rust code.
+      <b>Colored</b> cylinders, such as <code>selector_target_kind</code>, are lookup tables
+      written as facts in that rule file.</dd>
+    <dt>Arrows</dt>
+    <dd>By default arrows follow the data: from what is supplied at runtime at the top,
+      down through each rule that uses them, the order the engine derives facts in. The
+      <i>flip</i> link points them the other way, from a rule's head to what it depends on,
+      like a pprof call graph.</dd>
+    <dt>Line thickness and <code>xN</code> labels</dt>
+    <dd>How many rules use that dependency. <code>x3</code> on
+      <code>selector_declared &rarr; selector_candidate</code> means three of
+      <code>selector_candidate</code>'s rules read <code>selector_declared</code> (three rules,
+      not three predicates). Thicker lines mean more rules, growing with the log of the count
+      and capped, so one busy edge doesn't swamp the picture. Hover the predicate to read the
+      rules.</dd>
+    <dt>Red dashed line ending in a bar</dt>
+    <dd>Negation: at least one rule uses the predicate with <code>!</code>, so the head holds
+      only when that predicate does <i>not</i>, as in
+      <code>orphaned_sa(N, S) :- serviceaccount(N, S, _), !sa_in_use(N, S).</code> The engine
+      must finish the negated predicate first (a stratum boundary). One negated rule is enough
+      to make the line red; hover to see which rule has the <code>!</code>.</dd>
+    <dt>Small loop on a box</dt>
+    <dd>Recursion: one of the predicate's rules uses the predicate itself, as transitive
+      closures like <code>controls_identity</code> do.</dd>
+    <dt>A line running back up the page</dt>
+    <dd>A longer recursive cycle through several predicates. Layout has to point one edge of
+      every cycle upward.</dd>
+  </dl>
+
+  <h3>Getting around</h3>
+  <dl>
+    <dt>Hover a box</dt>
+    <dd>Blue lines and boxes: what it depends on. Orange: what uses it. Everything else fades.
+      The rules panel on the right shows its rules.</dd>
+    <dt>Click / shift-click</dt>
+    <dd>Click keeps the highlight while you read; shift-click highlights the whole chain both
+      ways. Click empty space or press Esc to clear.</dd>
+    <dt>Double-click, or <i>focus here</i> in the panel</dt>
+    <dd>Re-centers the page on that predicate. A focused page walks a few hops each way; the
+      header's <code>&minus;</code>/<code>+</code> links change how many, <i>users only</i>
+      shows only what uses it, and <i>whole graph</i> drops the focus.</dd>
+    <dt>Rules panel</dt>
+    <dd>Each statement with its <code>file:line</code> and the comment above it. Predicate
+      names are links: blue ones are drawn here (click jumps to them), purple ones are not
+      (click shows their rules). <i>added this session</i> marks rules added with <code>define</code> or
+      <code>source</code>. Drag the panel's edge to resize, <kbd>r</kbd> hides it.</dd>
+    <dt>Keys</dt>
+    <dd><kbd>?</kbd> this help, <kbd>r</kbd> rules panel, <kbd>Esc</kbd> clear or close,
+      Ctrl+F finds a predicate by name.</dd>
+  </dl>
+
+  <h3>The URL</h3>
+  <p>Every view is a URL, so it can be bookmarked or shared:
+    <code>focus=PRED</code>, <code>depth=N</code> (hops toward what it depends on),
+    <code>users=N</code> (hops toward what uses it), <code>down</code> (users only),
+    <code>hide=A,B</code>, <code>stop=A,B</code> (drawn but not walked past),
+    <code>files</code> (one box per file), <code>boxes</code> (group by file),
+    <code>topdown</code> (flipped arrows). <code>/graph.dot</code> and
+    <code>/graph.json</code> give the same view as Graphviz dot or JSON.</p>
+</div></div>
+<script>
+const RULES = {{RULES_JSON}};
+const TOPDOWN = {{TOPDOWN}};
+const ORIGINS = {{ORIGINS_JSON}};
+{{SCRIPT}}
+</script>

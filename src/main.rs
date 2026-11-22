@@ -13,7 +13,7 @@ use tracing::{debug, info};
 use pallograph::api::LocalCore;
 use pallograph::engine::{self, Backend, DdBackend, Engine, InterpreterBackend};
 use pallograph::repl::OutputFormat;
-use pallograph::{config, edb, load, repl, telemetry};
+use pallograph::{config, edb, graph_server, load, repl, telemetry};
 
 #[derive(clap::ValueEnum, Clone, PartialEq)]
 enum BackendKind {
@@ -88,6 +88,11 @@ struct Cli {
     /// `--backend dd`, which applies each batch of changes incrementally.
     #[arg(long)]
     watch: bool,
+
+    /// Address for the `graph` command's web server. Loopback by default;
+    /// over SSH, forward the port, or bind an address the browser can reach.
+    #[arg(long, value_name = "IP:PORT", default_value = graph_server::DEFAULT_ADDRESS)]
+    graph_addr: std::net::SocketAddr,
 }
 
 /// A client for the cluster in the current kubeconfig context (or the
@@ -320,13 +325,14 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     };
 
     // Build the policy engine.
-    let mut rule_sources = match &cli.builtin_rules {
-        Some(dir) => engine::read_rule_sources(dir)?,
-        None => engine::builtin_rules(),
+    let mut rule_files = match &cli.builtin_rules {
+        Some(dir) => engine::read_rule_files(dir)?,
+        None => engine::builtin_rule_files(),
     };
     for path in &cli.rules {
-        rule_sources.extend(engine::read_rule_sources(path)?);
+        rule_files.extend(engine::read_rule_files(path)?);
     }
+    let rule_sources = rule_files.iter().map(|file| file.text.clone()).collect();
     let engine = Engine::with_rule_sources(edb, objects, rule_sources, backend)?;
     if cli.explain {
         let mut cp = engine.compile()?;
@@ -335,6 +341,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     }
 
     let engine = Arc::new(Mutex::new(engine));
+    // Nothing listens until the first `graph` command.
+    graph_server::configure(graph_server::GraphServerConfig {
+        address: cli.graph_addr,
+        engine: Arc::clone(&engine),
+        startup_sources: rule_files,
+        dot_command: "dot".to_string(),
+    });
     let watch = match watch_client {
         Some(client) => {
             info!(target: telemetry::WATCH, "waiting for the initial list...");

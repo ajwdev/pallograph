@@ -32,6 +32,9 @@ pub enum Command {
     Query(String),
     /// `why <fact>`: show how a fact was derived (provenance).
     Why(String),
+    /// `graph [<predicate>]`: serve the rule graph and print its URL,
+    /// focused on the predicate when one is given.
+    Graph(Option<String>),
     /// `use [<snapshot> [<command>]]`: point read-only commands at a snapshot.
     /// No snapshot means return to live state; a trailing command runs once
     /// with the snapshot in use.
@@ -251,6 +254,12 @@ pub fn parse_command(line: &str) -> Result<Command, ParseError> {
         },
 
         // Session commands.
+        ("graph", _) => Command::Graph(
+            argument
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(String::from),
+        ),
         ("alias", _) => parse_alias(argument)?,
         ("format", _) => parse_format(argument)?,
         ("help", _) => Command::Help(
@@ -461,6 +470,16 @@ mod tests {
     fn queries_keep_both_spellings() {
         assert_eq!(parse("?- pod(X)"), Command::Query("pod(X)".into()));
         assert_eq!(parse("::query pod(X)"), Command::Query("pod(X)".into()));
+    }
+
+    #[test]
+    fn parse_graph() {
+        assert_eq!(parse("::graph"), Command::Graph(None));
+        assert_eq!(parse("::graph   "), Command::Graph(None));
+        assert_eq!(
+            parse("::graph controls_identity"),
+            Command::Graph(Some("controls_identity".into()))
+        );
     }
 
     #[test]
